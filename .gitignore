@@ -16,3 +16,11 @@ venv/
 
 # Project lock file
 uv.lock
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor junk
+.idea/
+.vscode/
