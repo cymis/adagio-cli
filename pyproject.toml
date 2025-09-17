@@ -1,0 +1,40 @@
+[project]
+name = "adagio"
+version = "0.0.0"
+description = "Adagio command line tool"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "rich>=14.1.0",
+    "typer>=0.17.4",
+]
+
+
+[dependency-groups]
+dev = [
+    "ruff>=0.13.0",
+]
+
+[project.scripts]
+adagio = "adagio.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.8.17,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.ruff.lint.isort]
+known-first-party = ["adagio"]
+section-order = [
+  "future",
+  "standard-library",
+  "third-party",
+  "first-party",
+  "local-folder"
+]
+
+
