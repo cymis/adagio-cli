@@ -3,7 +3,7 @@ name = "adagio"
 version = "0.0.0"
 description = "Adagio command line tool"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10,<3.11"
 dependencies = [
     "rich>=14.1.0",
     "typer>=0.17.4",
@@ -38,3 +38,9 @@ section-order = [
 ]
 
 
+[tool.mypy]
+plugins = ['pydantic.mypy']
+
+[[tool.mypy.overrides]]
+module = ["qiime2.*"]
+ignore_missing_imports = true
