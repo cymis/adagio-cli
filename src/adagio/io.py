@@ -1,9 +1,8 @@
-from parsl import python_app
 
-from adagio.execution.proxy import ProxyMetadata, lift_parsl, ProxyArtifact
+from adagio.execution.proxy import ProxyMetadata, lift_parsl, IndexedProxyArtifact
 
 
-@lift_parsl(lambda fut: ProxyArtifact(fut, 'artifact'))
+@lift_parsl(lambda fut: IndexedProxyArtifact(fut, 0))
 def load_input(*, ctx, source: str):
     from qiime2.sdk import Results, Artifact
     from qiime2.sdk import PluginManager
@@ -12,7 +11,7 @@ def load_input(*, ctx, source: str):
     with ctx.cache:
         input = Artifact.load(source)
 
-    return Results(['artifact'], [input])
+    return [input]
 
 @lift_parsl(ProxyMetadata)
 def load_metadata(*, ctx, source: str):

@@ -72,9 +72,13 @@ class AdagioSignature(BaseModel):
             if input.ast.name.startswith('Metadata') and input.ast.builtin:
                 print("SCHEDULED:", f'load_metadata({source!r})')
                 scope[input.id] = load_metadata(ctx=ctx, source=source)
+                # IIFE for the dreaded for-loop in the parent closure problem.
+                scope[input.id]._future_.add_done_callback((lambda str: (lambda x: print("DONE:", str)))(f'load_metadata({source!r})'))
             else:
                 print("SCHEDULED:", f'load_input({source!r})')
                 scope[input.id] = load_input(ctx=ctx, source=source)
+                # IIFE for the dreaded for-loop in the parent closure problem.
+                scope[input.id]._future_.add_done_callback((lambda str: (lambda x: print("DONE:", str)))(f'load_input({source!r})'))
 
     def save_outputs(self, ctx, arguments: AdagioArguments, scope):
         from adagio.io import save_output
@@ -88,8 +92,10 @@ class AdagioSignature(BaseModel):
             else:
                 raise NotImplementedError('impossible')
             print("SCHEDULED:", f'{output.name}.save({dest!r})')
-            futures.append(save_output(ctx=ctx, output=scope[output.id],
-                                       destination=dest))
+            future = save_output(ctx=ctx, output=scope[output.id], destination=dest)
+            # IIFE for the dreaded for-loop in the parent closure problem.
+            future.add_done_callback((lambda str: (lambda x: print("DONE:", str)))(f'{output.name}.save({dest!r})'))
+            futures.append(future)
 
         for future in futures:
             try:
