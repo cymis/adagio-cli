@@ -3,17 +3,12 @@ name = "adagio"
 version = "0.0.0"
 description = "Adagio command line tool"
 readme = "README.md"
-requires-python = ">=3.11"
-dependencies = [
-    "rich>=14.1.0",
-    "typer>=0.17.4",
-]
+requires-python = ">=3.10"
+dependencies = ["rich>=14.1.0", "typer>=0.17.4"]
 
 
 [dependency-groups]
-dev = [
-    "ruff>=0.13.0",
-]
+dev = ["ruff>=0.13.0"]
 
 [project.scripts]
 adagio = "adagio.cli:app"
@@ -34,7 +29,5 @@ section-order = [
   "standard-library",
   "third-party",
   "first-party",
-  "local-folder"
+  "local-folder",
 ]
-
-
