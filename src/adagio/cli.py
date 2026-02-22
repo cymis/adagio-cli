@@ -3,11 +3,12 @@ import typer
 from pathlib import Path
 
 from rich.console import Console
-from rich.panel import Panel
 
 import time
 import itertools
 from rich.live import Live
+from .execute import parse_spec, parse_config, process_job
+
 
 app = typer.Typer(
     help="Adagio command line tool for processing pipelines created with the Adagio GUI."
@@ -15,43 +16,38 @@ app = typer.Typer(
 console = Console()
 
 
-@app.command("hello")
-def hello_cmd(
-    input_file: Annotated[
+@app.command("execute")
+def execute_cmd(
+    pipeline: Annotated[
         Path,
         typer.Option(
             "--input",
             "-i",
-            help="Help text",
+            help="Adagio created pipeline",
             exists=False,
             file_okay=True,
             dir_okay=False,
             readable=True,
         ),
     ],
-    name: Annotated[
-        str, typer.Option("--name", "-n", help="Say hello to someone else")
+    config: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            "-c",
+            help="Configuration file for the pipeline",
+            exists=False,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
     ],
 ):
-    """Say hello."""
-    stick_figure = r"""
-     O
-    /|\
-    / \
-    """
+    """Execute an Adagio created pipeline"""
+    spec = parse_spec(pipeline)
+    config = parse_config(config)
 
-    message = (
-        f"[bold cyan]Hello {name}, {input_file} looks like a great file![/bold cyan]"
-    )
-
-    # Wrap the figure + message in a Rich panel for nicer output
-    console.print(
-        Panel.fit(
-            f"{stick_figure}\n{message}",
-            title="[yellow]Stick Figure[/yellow]",
-            border_style="green",
-        )
-    )
+    process_job(spec, config)
 
 
 @app.command("chicken")
