@@ -1,0 +1,301 @@
+{
+  "name": "Dada2",
+  "description": "<no description>",
+  "spec": {
+    "type": "pipeline",
+    "meta": {
+      "version": "1.0.0rc"
+    },
+    "signature": {
+      "inputs": [
+        {
+          "id": "519bcdb4-0ebd-4d91-8831-d631514550ae",
+          "name": "seqs",
+          "type": "RawSequences | EMPSingleEndSequences | EMPPairedEndSequences",
+          "ast": {
+            "type": "union",
+            "members": [
+              {
+                "name": "RawSequences",
+                "type": "expression",
+                "fields": [],
+                "builtin": false,
+                "predicate": null
+              },
+              {
+                "name": "EMPSingleEndSequences",
+                "type": "expression",
+                "fields": [],
+                "builtin": false,
+                "predicate": null
+              },
+              {
+                "name": "EMPPairedEndSequences",
+                "type": "expression",
+                "fields": [],
+                "builtin": false,
+                "predicate": null
+              }
+            ]
+          },
+          "required": true
+        },
+        {
+          "id": "102b1edf-1bfa-413d-b878-ca7b75e5a43e",
+          "name": "barcodes",
+          "type": "MetadataColumn[Categorical]",
+          "ast": {
+            "name": "MetadataColumn",
+            "type": "expression",
+            "fields": [
+              {
+                "name": "Categorical",
+                "type": "expression",
+                "fields": [],
+                "builtin": true,
+                "predicate": null
+              }
+            ],
+            "builtin": true,
+            "predicate": null
+          },
+          "required": true
+        }
+      ],
+      "parameters": [
+        {
+          "id": "62d9cdad-4d4d-4cb3-ac44-e1d3be2249c3",
+          "name": "barcodes",
+          "required": true,
+          "type": "MetadataColumn[Categorical]",
+          "ast": {
+            "name": "MetadataColumn",
+            "type": "expression",
+            "fields": [
+              {
+                "name": "Categorical",
+                "type": "expression",
+                "fields": [],
+                "builtin": true,
+                "predicate": null
+              }
+            ],
+            "builtin": true,
+            "predicate": null
+          }
+        },
+        {
+          "id": "48e95116-d211-4943-b03e-074834a97c0e",
+          "name": "trunc_len",
+          "required": false,
+          "default": null,
+          "type": "Int",
+          "ast": {
+            "name": "Int",
+            "type": "expression",
+            "fields": [],
+            "builtin": true,
+            "predicate": null
+          }
+        },
+        {
+          "id": "4837a451-6e0b-40bb-8422-0740d73fe562",
+          "name": "trim_foobar",
+          "required": false,
+          "default": 150,
+          "type": "Int",
+          "ast": {
+            "name": "Int",
+            "type": "expression",
+            "fields": [],
+            "builtin": true,
+            "predicate": null
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "id": "53395d12-a842-4f3d-b960-4df47fb9d2b5",
+          "name": "table_1",
+          "type": "FeatureTable[Frequency]",
+          "ast": {
+            "name": "FeatureTable",
+            "type": "expression",
+            "fields": [
+              {
+                "name": "Frequency",
+                "type": "expression",
+                "fields": [],
+                "builtin": false,
+                "predicate": null
+              }
+            ],
+            "builtin": false,
+            "predicate": null
+          }
+        },
+        {
+          "id": "c25ee826-dd40-4c50-960c-aa445bdf121f",
+          "name": "denoising_stats_1",
+          "type": "SampleData[DADA2Stats]",
+          "ast": {
+            "name": "SampleData",
+            "type": "expression",
+            "fields": [
+              {
+                "name": "DADA2Stats",
+                "type": "expression",
+                "fields": [],
+                "builtin": false,
+                "predicate": null
+              }
+            ],
+            "builtin": false,
+            "predicate": null
+          }
+        },
+        {
+          "id": "0debddb6-8d5a-4e7d-82da-c96a3d7506cc",
+          "name": "representative_sequences_1",
+          "type": "FeatureData[Sequence]",
+          "ast": {
+            "name": "FeatureData",
+            "type": "expression",
+            "fields": [
+              {
+                "name": "Sequence",
+                "type": "expression",
+                "fields": [],
+                "builtin": false,
+                "predicate": null
+              }
+            ],
+            "builtin": false,
+            "predicate": null
+          }
+        },
+        {
+          "id": "1dca4868-80b5-4c78-9b58-a267c390da37",
+          "name": "per_sample_sequences",
+          "type": "SampleData[SequencesWithQuality]",
+          "ast": {
+            "name": "SampleData",
+            "type": "expression",
+            "fields": [
+              {
+                "name": "SequencesWithQuality",
+                "type": "expression",
+                "fields": [],
+                "builtin": false,
+                "predicate": null
+              }
+            ],
+            "builtin": false,
+            "predicate": null
+          }
+        },
+        {
+          "id": "9ea8facf-c776-4cf2-83f9-653dbac8edde",
+          "name": "error_correction_details",
+          "type": "ErrorCorrectionDetails",
+          "ast": {
+            "name": "ErrorCorrectionDetails",
+            "type": "expression",
+            "fields": [],
+            "builtin": false,
+            "predicate": null
+          }
+        }
+      ]
+    },
+    "graph": [
+      {
+        "id": "4cb48e7b-1ab9-4db2-b615-c03246fe79e4",
+        "kind": "plugin-action",
+        "plugin": "dada2",
+        "action": "denoise_single",
+        "inputs": {
+          "demultiplexed_seqs": {
+            "kind": "archive",
+            "id": "1dca4868-80b5-4c78-9b58-a267c390da37"
+          }
+        },
+        "parameters": {
+          "trunc_len": {
+            "kind": "promoted",
+            "id": "48e95116-d211-4943-b03e-074834a97c0e"
+          },
+          "trim_left": {
+            "kind": "promoted",
+            "id": "4837a451-6e0b-40bb-8422-0740d73fe562"
+          }
+        },
+        "outputs": {
+          "table": {
+            "kind": "archive",
+            "id": "53395d12-a842-4f3d-b960-4df47fb9d2b5"
+          },
+          "representative_sequences": {
+            "kind": "archive",
+            "id": "0debddb6-8d5a-4e7d-82da-c96a3d7506cc"
+          },
+          "denoising_stats": {
+            "kind": "archive",
+            "id": "c25ee826-dd40-4c50-960c-aa445bdf121f"
+          }
+        }
+      },
+      {
+        "id": "d034ef2e-23c2-4b84-bbae-dd2a9b5bfba9",
+        "kind": "plugin-action",
+        "plugin": "demux",
+        "action": "emp_single",
+        "inputs": {
+          "seqs": {
+            "kind": "archive",
+            "id": "519bcdb4-0ebd-4d91-8831-d631514550ae"
+          },
+          "barcodes": {
+            "kind": "metadata",
+            "id": "102b1edf-1bfa-413d-b878-ca7b75e5a43e"
+          }
+        },
+        "parameters": {
+          "barcodes": {
+            "kind": "metadata",
+            "column": {
+              "kind": "promoted",
+              "id": "62d9cdad-4d4d-4cb3-ac44-e1d3be2249c3"
+            }
+          }
+        },
+        "outputs": {
+          "per_sample_sequences": {
+            "kind": "archive",
+            "id": "1dca4868-80b5-4c78-9b58-a267c390da37"
+          },
+          "error_correction_details": {
+            "kind": "archive",
+            "id": "9ea8facf-c776-4cf2-83f9-653dbac8edde"
+          }
+        }
+      }
+    ]
+  },
+  "layout": {
+    "version": 0,
+    "type": "grid",
+    "positions": {
+      "4cb48e7b-1ab9-4db2-b615-c03246fe79e4": {
+        "row": 2,
+        "col": 3
+      },
+      "d034ef2e-23c2-4b84-bbae-dd2a9b5bfba9": {
+        "row": 1,
+        "col": 3
+      }
+    }
+  },
+  "exportedAt": "2026-02-17T03:58:22.236Z",
+  "version": 1
+}
