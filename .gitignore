@@ -24,3 +24,10 @@ Thumbs.db
 # Editor junk
 .idea/
 .vscode/
+
+*.qza
+*.qzv
+
+.ipynb_checkpoints/
+.mypy_cache/
+runinfo/

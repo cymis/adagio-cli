@@ -10,6 +10,7 @@ from rich.console import Console
 
 from .app.parsers.pipeline import parse_parameters
 
+
 console = Console()
 
 
@@ -77,6 +78,41 @@ def _spec_type(spec: Any) -> type:
         t = getattr(spec, "type", None) or getattr(spec, "type_", None)
 
     return {"str": str, "int": int, "float": float, "bool": bool}.get(str(t), str)
+
+
+# @app.command("execute")
+# def execute_cmd(
+#     pipeline: Annotated[
+#         Path,
+#         typer.Option(
+#             "--input",
+#             "-i",
+#             help="Adagio created pipeline",
+#             exists=False,
+#             file_okay=True,
+#             dir_okay=False,
+#             readable=True,
+#         ),
+#     ],
+#     config: Annotated[
+#         Path,
+#         typer.Option(
+#             "--config",
+#             "-c",
+#             help="Configuration file for the pipeline",
+#             exists=False,
+#             file_okay=True,
+#             dir_okay=False,
+#             readable=True,
+#         ),
+#     ],
+# ):
+#     """Execute an Adagio created pipeline"""
+#     spec = parse_spec(pipeline)
+#     config = parse_config(config)
+#
+#     process_job(spec, config)
+# >>>>>>> dev
 
 
 # ---- The core: build a dynamic run() with signature + Annotated Parameter ----

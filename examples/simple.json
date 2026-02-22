@@ -1,0 +1,377 @@
+{
+  "type": "pipeline",
+  "meta": {
+    "version": "1.0.0rc"
+  },
+  "signature": {
+    "inputs": [
+      {
+        "id": "9a586cf8-272f-43de-b137-3fc36729f2c7",
+        "name": "sample_metadata",
+        "type": "Metadata",
+        "ast": {
+          "name": "Metadata",
+          "type": "expression",
+          "fields": [],
+          "builtin": true,
+          "predicate": null
+        },
+        "required": true
+      },
+      {
+        "id": "aead4a07-1cd3-4034-9e20-80536b8c2264",
+        "name": "table",
+        "type": "FeatureTable[Frequency | PresenceAbsence]",
+        "ast": {
+          "name": "FeatureTable",
+          "type": "expression",
+          "fields": [
+            {
+              "type": "union",
+              "members": [
+                {
+                  "name": "Frequency",
+                  "type": "expression",
+                  "fields": [],
+                  "builtin": false,
+                  "predicate": null
+                },
+                {
+                  "name": "PresenceAbsence",
+                  "type": "expression",
+                  "fields": [],
+                  "builtin": false,
+                  "predicate": null
+                }
+              ]
+            }
+          ],
+          "builtin": false,
+          "predicate": null
+        },
+        "required": true
+      }
+    ],
+    "parameters": [
+      {
+        "id": "c2051f90-5128-4197-a430-e1be6e0ace56",
+        "name": "metric",
+        "required": false,
+        "default": "canberra",
+        "type": "Str % Choices('aitchison', 'braycurtis', 'canberra', 'canberra_adkins', 'chebyshev', 'cityblock', 'correlation', 'cosine', 'dice', 'euclidean', 'hamming', 'jaccard', 'jensenshannon', 'matching', 'minkowski', 'rogerstanimoto', 'russellrao', 'seuclidean', 'sokalmichener', 'sokalsneath', 'sqeuclidean', 'yule')",
+        "ast": {
+          "name": "Str",
+          "type": "expression",
+          "fields": [],
+          "builtin": true,
+          "predicate": {
+            "name": "Choices",
+            "type": "predicate",
+            "choices": [
+              "aitchison",
+              "braycurtis",
+              "canberra",
+              "canberra_adkins",
+              "chebyshev",
+              "cityblock",
+              "correlation",
+              "cosine",
+              "dice",
+              "euclidean",
+              "hamming",
+              "jaccard",
+              "jensenshannon",
+              "matching",
+              "minkowski",
+              "rogerstanimoto",
+              "russellrao",
+              "seuclidean",
+              "sokalmichener",
+              "sokalsneath",
+              "sqeuclidean",
+              "yule"
+            ]
+          }
+        }
+      },
+      {
+        "id": "66b84a2e-9ad9-4774-ad8a-438ae54bf3da",
+        "name": "compare",
+        "required": true,
+        "default": null,
+        "type": "MetadataColumn[Categorical]",
+        "ast": {
+          "name": "MetadataColumn",
+          "type": "expression",
+          "fields": [
+            {
+              "name": "Categorical",
+              "type": "expression",
+              "fields": [],
+              "builtin": true,
+              "predicate": null
+            }
+          ],
+          "builtin": true,
+          "predicate": null
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "id": "a264bb78-3496-4324-ad75-a5aa933dd8f2",
+        "name": "summary",
+        "type": "Visualization",
+        "ast": {
+          "name": "Visualization",
+          "type": "expression",
+          "fields": [],
+          "builtin": true,
+          "predicate": null
+        }
+      },
+      {
+        "id": "ee42b860-8d75-4120-b56c-b9d5c12bb572",
+        "name": "distance_matrix1",
+        "type": "DistanceMatrix",
+        "ast": {
+          "name": "DistanceMatrix",
+          "type": "expression",
+          "fields": [],
+          "builtin": false,
+          "predicate": null
+        }
+      },
+      {
+        "id": "4cb5be9f-964e-42e2-af86-ca75e72c0fcf",
+        "name": "beta-group",
+        "type": "Visualization",
+        "ast": {
+          "name": "Visualization",
+          "type": "expression",
+          "fields": [],
+          "builtin": true,
+          "predicate": null
+        }
+      },
+      {
+        "id": "7667756f-4c8a-4090-8ffd-200e37b6e4a7",
+        "name": "distance_matrix2",
+        "type": "DistanceMatrix",
+        "ast": {
+          "name": "DistanceMatrix",
+          "type": "expression",
+          "fields": [],
+          "builtin": false,
+          "predicate": null
+        }
+      },
+      {
+        "id": "332931ea-4a96-42ad-bf32-81713781e29b",
+        "name": "pcoa",
+        "type": "PCoAResults",
+        "ast": {
+          "name": "PCoAResults",
+          "type": "expression",
+          "fields": [],
+          "builtin": false,
+          "predicate": null
+        }
+      },
+      {
+        "id": "ceb812ba-793b-4387-bdd0-4b91569e25b9",
+        "name": "emperor",
+        "type": "Visualization",
+        "ast": {
+          "name": "Visualization",
+          "type": "expression",
+          "fields": [],
+          "builtin": true,
+          "predicate": null
+        }
+      }
+    ]
+  },
+  "graph": [
+    {
+      "id": "febcf6e0-90ed-44a6-8b1b-f7beb53223a2",
+      "kind": "built-in",
+      "name": "root-input",
+      "inputs": {
+        "sample_metadata": {
+          "kind": "archive",
+          "id": "9a586cf8-272f-43de-b137-3fc36729f2c7"
+        }
+      },
+      "parameters": {},
+      "outputs": {
+        "sample_metadata": {
+          "kind": "archive",
+          "id": "990f2bbb-dda6-4f83-87fa-5a56025d2095"
+        }
+      }
+    },
+    {
+      "id": "a0ec2ae8-6736-4fab-9b07-9e718a7194f1",
+      "kind": "built-in",
+      "name": "root-input",
+      "inputs": {
+        "table": {
+          "kind": "archive",
+          "id": "aead4a07-1cd3-4034-9e20-80536b8c2264"
+        }
+      },
+      "parameters": {},
+      "outputs": {
+        "table": {
+          "kind": "archive",
+          "id": "63981d12-7beb-4443-aed4-a5e7b29ab796"
+        }
+      }
+    },
+    {
+      "id": "31efdf49-e06b-4ad5-8c97-47a2a323120f",
+      "kind": "plugin-action",
+      "plugin": "feature_table",
+      "action": "summarize",
+      "inputs": {
+        "table": {
+          "kind": "archive",
+          "id": "63981d12-7beb-4443-aed4-a5e7b29ab796"
+        },
+        "sample_metadata": {
+          "kind": "metadata",
+          "id": "990f2bbb-dda6-4f83-87fa-5a56025d2095"
+        }
+      },
+      "parameters": {},
+      "outputs": {
+        "visualization": {
+          "kind": "archive",
+          "id": "a264bb78-3496-4324-ad75-a5aa933dd8f2"
+        }
+      }
+    },
+    {
+      "id": "cfd580cd-7278-45b4-84f6-f879b1f94b24",
+      "kind": "plugin-action",
+      "plugin": "diversity",
+      "action": "beta",
+      "inputs": {
+        "table": {
+          "kind": "archive",
+          "id": "63981d12-7beb-4443-aed4-a5e7b29ab796"
+        }
+      },
+      "parameters": {
+        "metric": {
+          "kind": "promoted",
+          "id": "c2051f90-5128-4197-a430-e1be6e0ace56"
+        }
+      },
+      "outputs": {
+        "distance_matrix": {
+          "kind": "archive",
+          "id": "ee42b860-8d75-4120-b56c-b9d5c12bb572"
+        }
+      }
+    },
+    {
+      "id": "22a5a5d7-d532-4251-914a-ecf34df945fd",
+      "kind": "plugin-action",
+      "plugin": "diversity",
+      "action": "beta_group_significance",
+      "inputs": {
+        "distance_matrix": {
+          "kind": "archive",
+          "id": "ee42b860-8d75-4120-b56c-b9d5c12bb572"
+        },
+        "metadata": {
+          "kind": "metadata",
+          "id": "990f2bbb-dda6-4f83-87fa-5a56025d2095"
+        }
+      },
+      "parameters": {
+        "metadata": {
+          "kind": "metadata",
+          "column": {
+            "kind": "promoted",
+            "id": "66b84a2e-9ad9-4774-ad8a-438ae54bf3da"
+          }
+        }
+      },
+      "outputs": {
+        "visualization": {
+          "kind": "archive",
+          "id": "4cb5be9f-964e-42e2-af86-ca75e72c0fcf"
+        }
+      }
+    },
+    {
+      "id": "68a5d6a8-7d24-40d7-8197-3294951f5cd6",
+      "kind": "plugin-action",
+      "plugin": "diversity",
+      "action": "beta",
+      "inputs": {
+        "table": {
+          "kind": "archive",
+          "id": "63981d12-7beb-4443-aed4-a5e7b29ab796"
+        }
+      },
+      "parameters": {
+        "metric": {
+          "kind": "promoted",
+          "id": "c2051f90-5128-4197-a430-e1be6e0ace56"
+        }
+      },
+      "outputs": {
+        "distance_matrix": {
+          "kind": "archive",
+          "id": "7667756f-4c8a-4090-8ffd-200e37b6e4a7"
+        }
+      }
+    },
+    {
+      "id": "ef9ed04d-bb5e-40ab-9292-b5c0573be32d",
+      "kind": "plugin-action",
+      "plugin": "diversity",
+      "action": "pcoa",
+      "inputs": {
+        "distance_matrix": {
+          "kind": "archive",
+          "id": "7667756f-4c8a-4090-8ffd-200e37b6e4a7"
+        }
+      },
+      "parameters": {},
+      "outputs": {
+        "pcoa": {
+          "kind": "archive",
+          "id": "332931ea-4a96-42ad-bf32-81713781e29b"
+        }
+      }
+    },
+    {
+      "id": "464fc7c0-a91b-4d66-a304-8668c0377867",
+      "kind": "plugin-action",
+      "plugin": "emperor",
+      "action": "plot",
+      "inputs": {
+        "pcoa": {
+          "kind": "archive",
+          "id": "332931ea-4a96-42ad-bf32-81713781e29b"
+        },
+        "metadata": {
+          "kind": "metadata",
+          "id": "990f2bbb-dda6-4f83-87fa-5a56025d2095"
+        }
+      },
+      "parameters": {},
+      "outputs": {
+        "visualization": {
+          "kind": "archive",
+          "id": "ceb812ba-793b-4387-bdd0-4b91569e25b9"
+        }
+      }
+    }
+  ]
+}
