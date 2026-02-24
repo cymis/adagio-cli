@@ -13,6 +13,12 @@ class ParamType(StrEnum):
     PARAM = "param"
 
 
+class ShowParamsMode(StrEnum):
+    ALL = "all"
+    MISSING = "missing"
+    REQUIRED = "required"
+
+
 def promote_positional_pipeline(argv: list[str]) -> tuple[list[str], str | None]:
     """Allow `adagio run <pipeline>` by rewriting it to `--pipeline <pipeline>`."""
     if len(argv) < 2 or argv[0] != "run":

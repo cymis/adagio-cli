@@ -7,14 +7,18 @@ from rich.console import Console
 
 def run_pipeline_from_kwargs(
     pipeline: Path,
+    arguments_file: Path | None,
     kwargs: dict[str, Any],
     input_bindings: list[tuple[str, str]],
     param_bindings: list[tuple[str, str]],
+    required_inputs: list[str],
+    required_params: list[str],
     *,
     console: Console,
 ) -> None:
-    """Run a pipeline command from resolved CLI keyword arguments."""
+    """Run a pipeline from resolved CLI keyword arguments."""
     from ..dummy_execute import execute
+    from ..model.arguments import AdagioArgumentsFile
     from ..model.pipeline import AdagioPipeline
     from ..monitor.tty import RichMonitor
 
@@ -23,9 +27,29 @@ def run_pipeline_from_kwargs(
     parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
     arguments = parsed_pipeline.signature.to_default_arguments()
 
-    arguments_file = kwargs.pop("arguments_file", None)
+    input_names = {name for _, name in input_bindings}
+    param_names = {name for _, name in param_bindings}
+
     if arguments_file is not None:
-        _merge_arguments_file(arguments, Path(arguments_file))
+        file_data = json.loads(arguments_file.read_text(encoding="utf-8"))
+        arguments_data = AdagioArgumentsFile.model_validate(file_data)
+
+        unknown_inputs = sorted(set(arguments_data.inputs) - input_names)
+        if unknown_inputs:
+            raise SystemExit(
+                "Unknown inputs in arguments file: " + ", ".join(unknown_inputs)
+            )
+
+        unknown_params = sorted(set(arguments_data.parameters) - param_names)
+        if unknown_params:
+            raise SystemExit(
+                "Unknown parameters in arguments file: " + ", ".join(unknown_params)
+            )
+
+        arguments.inputs.update(arguments_data.inputs)
+        arguments.parameters.update(arguments_data.parameters)
+        if arguments_data.outputs:
+            arguments.outputs = arguments_data.outputs
 
     for ident, original in input_bindings:
         value = kwargs.get(ident)
@@ -33,8 +57,21 @@ def run_pipeline_from_kwargs(
             arguments.inputs[original] = str(value)
 
     for ident, original in param_bindings:
-        if ident in kwargs:
-            arguments.parameters[original] = kwargs.get(ident)
+        value = kwargs.get(ident)
+        if value is not None:
+            arguments.parameters[original] = value
+
+    missing_inputs = [
+        name for name in required_inputs if _is_missing(arguments.inputs.get(name))
+    ]
+    missing_params = [
+        name for name in required_params if _is_missing(arguments.parameters.get(name))
+    ]
+    if missing_inputs or missing_params:
+        missing = [f"input:{name}" for name in missing_inputs] + [
+            f"param:{name}" for name in missing_params
+        ]
+        raise SystemExit("Missing required arguments: " + ", ".join(missing))
 
     console.print(f"[bold]Pipeline:[/bold] {pipeline}")
     console.print("[bold]Executing pipeline[/bold] (dummy mode)")
@@ -45,38 +82,6 @@ def run_pipeline_from_kwargs(
     )
 
 
-def _merge_arguments_file(arguments, arguments_file: Path) -> None:
-    """Merge values from an arguments file into runtime arguments."""
-    try:
-        text = arguments_file.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise SystemExit(f"Unable to read arguments file: {arguments_file}") from exc
-
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"Invalid JSON in arguments file: {arguments_file}") from exc
-
-    if not isinstance(payload, dict):
-        raise SystemExit(f"Invalid arguments file format: {arguments_file}")
-
-    inputs = payload.get("inputs")
-    if isinstance(inputs, dict):
-        for key, value in inputs.items():
-            arguments.inputs[key] = str(value)
-
-    params = payload.get("parameters")
-    if isinstance(params, dict):
-        for key, value in params.items():
-            arguments.parameters[key] = value
-
-    if "outputs" in payload:
-        outputs = payload["outputs"]
-        if isinstance(outputs, str):
-            arguments.outputs = outputs
-        elif isinstance(outputs, dict):
-            arguments.outputs = {
-                str(key): str(value) for key, value in outputs.items()
-            }
-        else:
-            raise SystemExit(f"Invalid outputs in arguments file: {arguments_file}")
+def _is_missing(value: Any) -> bool:
+    """Treat placeholders and null values as missing."""
+    return value is None or value == "<fill me>"
