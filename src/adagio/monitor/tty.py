@@ -1,14 +1,10 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    Progress,
-    TextColumn,
-    TimeElapsedColumn,
-)
+from rich.progress import Progress, TextColumn
 
 from .api import Monitor
 
@@ -16,22 +12,22 @@ from .api import Monitor
 @dataclass
 class _TaskState:
     progress_task_id: int
+    label: str
     total_subtasks: int
     completed_subtasks: int = 0
     status: str = "pending"
+    error: str | None = None
+    started_at: float | None = None
+    finished_at: float | None = None
 
 
 class RichMonitor(Monitor):
     def __init__(self, *, console: Console | None = None):
         self._console = console or Console()
         self._progress = Progress(
-            TextColumn("{task.fields[badge]} {task.fields[label]}\n"),
-            TextColumn(" "),
-            BarColumn(bar_width=40),
-            TextColumn("{task.fields[state]}"),
-            TimeElapsedColumn(),
+            TextColumn("{task.fields[row]}"),
             console=self._console,
-            expand=False,
+            expand=True,
             transient=False,
         )
         self._task_lookup: dict[str, _TaskState] = {}
@@ -55,49 +51,40 @@ class RichMonitor(Monitor):
         self, *, task_id: str, label: str, total_subtasks: int = 1
     ) -> None:
         total = max(total_subtasks, 1)
+        state = _TaskState(
+            progress_task_id=-1,
+            label=label,
+            total_subtasks=total,
+        )
+        row = self._render_row(state)
         progress_task_id = self._progress.add_task(
             description="",
             total=total,
             completed=0,
-            badge="PEND",
-            label=label,
-            state=f"pending (0/{total})",
+            row=row,
         )
-        self._task_lookup[task_id] = _TaskState(
-            progress_task_id=progress_task_id,
-            total_subtasks=total,
-            completed_subtasks=0,
-            status="pending",
-        )
+        state.progress_task_id = progress_task_id
+        self._task_lookup[task_id] = state
 
     def start_task(self, *, task_id: str) -> None:
         task = self._task_lookup.get(task_id)
         if task is None:
             return
         task.status = "running"
-        self._progress.update(
-            task.progress_task_id,
-            badge="RUN",
-            state=f"running ({task.completed_subtasks}/{task.total_subtasks})",
-        )
+        task.started_at = time.monotonic()
+        self._refresh_row(task)
 
     def advance_task(
         self, *, task_id: str, advance: int = 1, message: str | None = None
     ) -> None:
+        del message
         task = self._task_lookup.get(task_id)
         if task is None:
             return
         task.completed_subtasks = min(
             task.total_subtasks, task.completed_subtasks + max(advance, 0)
         )
-        state = f"running ({task.completed_subtasks}/{task.total_subtasks})"
-        if message:
-            state = f"{state} {message}"
-        self._progress.update(
-            task.progress_task_id,
-            completed=task.completed_subtasks,
-            state=state,
-        )
+        self._refresh_row(task)
 
     def finish_task(
         self, *, task_id: str, status: str = "completed", error: str | None = None
@@ -107,33 +94,13 @@ class RichMonitor(Monitor):
             return
 
         task.status = status
-        badge_lookup = {
-            "completed": "DONE",
-            "failed": "FAIL",
-            "skipped": "SKIP",
-        }
-        if status == "completed":
+        task.error = error
+        task.finished_at = time.monotonic()
+        if status in {"completed", "skipped"}:
             task.completed_subtasks = task.total_subtasks
-            state = f"completed ({task.completed_subtasks}/{task.total_subtasks})"
-        elif status == "failed":
-            state = "failed"
-            if error:
-                state = f"{state}: {error}"
-        elif status == "skipped":
-            task.completed_subtasks = task.total_subtasks
-            state = f"skipped ({task.completed_subtasks}/{task.total_subtasks})"
-        else:
-            state = status
-
         if status in self._status_counts:
             self._status_counts[status] += 1
-
-        self._progress.update(
-            task.progress_task_id,
-            completed=task.completed_subtasks,
-            badge=badge_lookup.get(status, "PEND"),
-            state=state,
-        )
+        self._refresh_row(task)
 
     def finish_pipeline(self) -> None:
         if not self._pipeline_started:
@@ -147,3 +114,63 @@ class RichMonitor(Monitor):
             f"{self._status_counts['skipped']} skipped, "
             f"{max(pending, 0)} pending"
         )
+
+    def _refresh_row(self, task: _TaskState) -> None:
+        self._progress.update(
+            task.progress_task_id,
+            completed=task.completed_subtasks,
+            row=self._render_row(task),
+        )
+
+    def _render_row(self, task: _TaskState) -> str:
+        status_styles = {
+            "pending": ("PEND", "yellow"),
+            "running": ("RUN", "cyan"),
+            "completed": ("DONE", "green"),
+            "failed": ("FAIL", "red"),
+            "skipped": ("SKIP", "magenta"),
+        }
+        badge_text, color = status_styles.get(task.status, ("PEND", "yellow"))
+        badge = f"[bold {color}]{badge_text}[/]"
+        bar = _bar_text(task.completed_subtasks, task.total_subtasks, color)
+
+        if task.status == "completed":
+            state_text = f"completed ({task.completed_subtasks}/{task.total_subtasks})"
+        elif task.status == "failed":
+            state_text = "failed"
+            if task.error:
+                state_text = f"{state_text}: {task.error}"
+        elif task.status == "skipped":
+            state_text = f"skipped ({task.completed_subtasks}/{task.total_subtasks})"
+        elif task.status == "running":
+            state_text = f"running ({task.completed_subtasks}/{task.total_subtasks})"
+        else:
+            state_text = f"pending ({task.completed_subtasks}/{task.total_subtasks})"
+
+        elapsed = _elapsed(task)
+        return (
+            f"{badge} {task.label}\n"
+            f" {bar}   {state_text}   {elapsed}"
+        )
+
+
+def _bar_text(completed: int, total: int, color: str, width: int = 40) -> str:
+    if total <= 0:
+        total = 1
+    ratio = min(max(completed / total, 0.0), 1.0)
+    filled = int(round(ratio * width))
+    empty = width - filled
+    return f"[{color}]{'━' * filled}[/]{' ' * empty}"
+
+
+def _elapsed(task: _TaskState) -> str:
+    start = task.started_at
+    if start is None:
+        seconds = 0
+    elif task.finished_at is not None:
+        seconds = max(0, int(task.finished_at - start))
+    else:
+        seconds = max(0, int(time.monotonic() - start))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{sec:02d}"
