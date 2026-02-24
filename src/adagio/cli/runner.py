@@ -1,5 +1,4 @@
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +13,8 @@ def run_pipeline_from_kwargs(
     *,
     console: Console,
 ) -> None:
-    from ..dummy_execute import (
-        DummyExecutionConfig,
-        DummyExecutionFailed,
-        execute_dummy_pipeline,
-    )
+    """Run a pipeline command from resolved CLI keyword arguments."""
+    from ..dummy_execute import execute
     from ..model.pipeline import AdagioPipeline
     from ..monitor.tty import RichMonitor
 
@@ -31,15 +27,6 @@ def run_pipeline_from_kwargs(
     if arguments_file is not None:
         _merge_arguments_file(arguments, Path(arguments_file))
 
-    dummy_enabled = bool(kwargs.pop("dummy", True))
-    dummy_config = DummyExecutionConfig(
-        min_seconds=float(kwargs.pop("dummy_min_seconds", 10.0)),
-        max_seconds=float(kwargs.pop("dummy_max_seconds", 15.0)),
-        fail_rate=float(kwargs.pop("dummy_fail_rate", 0.0)),
-        subtasks=int(kwargs.pop("dummy_subtasks", 3)),
-        seed=kwargs.pop("dummy_seed", None),
-    )
-
     for ident, original in input_bindings:
         value = kwargs.get(ident)
         if value is not None:
@@ -50,39 +37,16 @@ def run_pipeline_from_kwargs(
             arguments.parameters[original] = kwargs.get(ident)
 
     console.print(f"[bold]Pipeline:[/bold] {pipeline}")
-    console.print(
-        f"[bold]Executing pipeline[/bold] ({'dummy' if dummy_enabled else 'runtime'} mode)"
+    console.print("[bold]Executing pipeline[/bold] (dummy mode)")
+    execute(
+        pipeline=parsed_pipeline,
+        arguments=arguments,
+        monitor=RichMonitor(console=console),
     )
-
-    try:
-        if dummy_enabled:
-            execute_dummy_pipeline(
-                pipeline=parsed_pipeline,
-                arguments=arguments,
-                monitor=RichMonitor(console=console),
-                dummy=dummy_config,
-            )
-        else:
-            raise SystemExit(
-                "Runtime execution is temporarily disabled. "
-                "Use default dummy mode (or pass --dummy)."
-            )
-    except DummyExecutionFailed as exc:
-        raise SystemExit(str(exc)) from exc
-    except (ModuleNotFoundError, ImportError) as exc:
-        if dummy_enabled:
-            raise
-        missing = getattr(exc, "name", None) or "unknown"
-        raise SystemExit(
-            "Execution dependencies are missing. "
-            f"Missing module: {missing!r}. "
-            f"Details: {exc}. "
-            f"Python executable: {sys.executable}. "
-            "Install runtime requirements (for example, qiime2/parsl) in that same environment."
-        ) from exc
 
 
 def _merge_arguments_file(arguments, arguments_file: Path) -> None:
+    """Merge values from an arguments file into runtime arguments."""
     try:
         text = arguments_file.read_text(encoding="utf-8")
     except OSError as exc:

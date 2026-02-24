@@ -2,23 +2,14 @@ from parsl import python_app, join_app
 
 from qiime2.sdk.proxy import ProxyResults, Proxy
 from qiime2.sdk import Pipeline, Results
-try:
-    from qiime2.sdk.context import ParallelContext as _BaseContext
-except ImportError:  # pragma: no cover - older qiime2
-    from qiime2.sdk.context import Context as _BaseContext
+from qiime2.sdk.context import ParallelContext
 
 from adagio.execution.proxy import IndexedProxyResults, dfk_thread_future, lift_parsl
 
 
-class AdagioContext(_BaseContext):
+class AdagioContext(ParallelContext):
     def __init__(self, action_obj=None, parent=None):
-        try:
-            # Newer qiime2 parallel context API
-            super().__init__(action_obj, parent)
-        except TypeError:
-            # qiime2<=2024.10: Context(parent=None, parallel=False)
-            super().__init__(parent=parent, parallel=True)
-            self.action_obj = action_obj
+        super().__init__(action_obj, parent)
 
 
     def _callable_action_(self, *args, **kwargs):

@@ -11,6 +11,7 @@ from .args import ParamType, dynamic_opt, to_identifier
 
 
 def _spec_py_type(type_name: str) -> type:
+    """Map pipeline type text to a Python type."""
     normalized = re.sub(r"[^a-z0-9]+", " ", (type_name or "").lower()).strip()
     tokens = set(normalized.split())
 
@@ -26,6 +27,7 @@ def _spec_py_type(type_name: str) -> type:
 
 
 def _default_py_type(default: Any) -> type | None:
+    """Infer a Python type from a default value."""
     if isinstance(default, bool):
         return bool
     if isinstance(default, int):
@@ -38,6 +40,7 @@ def _default_py_type(default: Any) -> type | None:
 
 
 def _resolve_param_type(type_name: str, default: Any) -> type:
+    """Resolve the CLI parameter type from type text and default."""
     declared = _spec_py_type(type_name)
     inferred = _default_py_type(default)
     if inferred is None:
@@ -55,6 +58,7 @@ def build_dynamic_run(
         [Path, dict[str, Any], list[tuple[str, str]], list[tuple[str, str]]], None
     ],
 ):
+    """Build a dynamic run command from pipeline input and parameter specs."""
     input_bindings: list[tuple[str, str]] = []
     param_bindings: list[tuple[str, str]] = []
     seen_idents: set[str] = set()
@@ -115,55 +119,6 @@ def build_dynamic_run(
         help_text="Path to an arguments JSON file to pre-populate inputs, parameters, and outputs.",
         default=None,
     )
-    add_dynamic_option(
-        ident="dummy",
-        opt="--dummy",
-        required=False,
-        py_type=bool,
-        help_text="Run a simulated pipeline execution instead of invoking runtime plugins.",
-        default=True,
-    )
-    add_dynamic_option(
-        ident="dummy_min_seconds",
-        opt="--dummy-min-seconds",
-        required=False,
-        py_type=float,
-        help_text="Minimum seconds spent per task in dummy mode.",
-        default=10.0,
-    )
-    add_dynamic_option(
-        ident="dummy_max_seconds",
-        opt="--dummy-max-seconds",
-        required=False,
-        py_type=float,
-        help_text="Maximum seconds spent per task in dummy mode.",
-        default=15.0,
-    )
-    add_dynamic_option(
-        ident="dummy_fail_rate",
-        opt="--dummy-fail-rate",
-        required=False,
-        py_type=float,
-        help_text="Failure probability per task in dummy mode (0.0 to 1.0).",
-        default=0.0,
-    )
-    add_dynamic_option(
-        ident="dummy_subtasks",
-        opt="--dummy-subtasks",
-        required=False,
-        py_type=int,
-        help_text="Number of subtasks shown for each task in dummy mode.",
-        default=3,
-    )
-    add_dynamic_option(
-        ident="dummy_seed",
-        opt="--dummy-seed",
-        required=False,
-        py_type=int | None,
-        help_text="Optional random seed for deterministic dummy runs.",
-        default=None,
-    )
-
     for spec in input_specs:
         original = spec.name
         ident = to_identifier(original, "input")

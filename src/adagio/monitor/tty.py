@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import time
 from dataclasses import dataclass
 
@@ -22,7 +20,10 @@ class _TaskState:
 
 
 class RichMonitor(Monitor):
+    """Render pipeline progress in a stacked Rich layout."""
+
     def __init__(self, *, console: Console | None = None):
+        """Initialize the Rich monitor."""
         self._console = console or Console()
         self._progress = Progress(
             TextColumn("{task.fields[row]}"),
@@ -40,6 +41,7 @@ class RichMonitor(Monitor):
         self._total_tasks = 0
 
     def start_pipeline(self, *, total_tasks: int = 0) -> None:
+        """Start rendering pipeline progress."""
         if self._pipeline_started:
             return
         self._pipeline_started = True
@@ -50,6 +52,7 @@ class RichMonitor(Monitor):
     def queue_task(
         self, *, task_id: str, label: str, total_subtasks: int = 1
     ) -> None:
+        """Queue a task row in the progress view."""
         total = max(total_subtasks, 1)
         state = _TaskState(
             progress_task_id=-1,
@@ -67,6 +70,7 @@ class RichMonitor(Monitor):
         self._task_lookup[task_id] = state
 
     def start_task(self, *, task_id: str) -> None:
+        """Mark a task as running."""
         task = self._task_lookup.get(task_id)
         if task is None:
             return
@@ -77,6 +81,7 @@ class RichMonitor(Monitor):
     def advance_task(
         self, *, task_id: str, advance: int = 1, message: str | None = None
     ) -> None:
+        """Advance a task's subtask progress."""
         del message
         task = self._task_lookup.get(task_id)
         if task is None:
@@ -89,6 +94,7 @@ class RichMonitor(Monitor):
     def finish_task(
         self, *, task_id: str, status: str = "completed", error: str | None = None
     ) -> None:
+        """Mark a task as finished."""
         task = self._task_lookup.get(task_id)
         if task is None:
             return
@@ -103,6 +109,7 @@ class RichMonitor(Monitor):
         self._refresh_row(task)
 
     def finish_pipeline(self) -> None:
+        """Stop rendering and print a summary."""
         if not self._pipeline_started:
             return
         self._progress.stop()
@@ -116,6 +123,7 @@ class RichMonitor(Monitor):
         )
 
     def _refresh_row(self, task: _TaskState) -> None:
+        """Refresh a rendered task row."""
         self._progress.update(
             task.progress_task_id,
             completed=task.completed_subtasks,
@@ -123,6 +131,7 @@ class RichMonitor(Monitor):
         )
 
     def _render_row(self, task: _TaskState) -> str:
+        """Build a stacked two-line row for a task."""
         status_styles = {
             "pending": ("PEND", "yellow"),
             "running": ("RUN", "cyan"),
@@ -155,6 +164,7 @@ class RichMonitor(Monitor):
 
 
 def _bar_text(completed: int, total: int, color: str, width: int = 40) -> str:
+    """Build a colored progress bar string."""
     if total <= 0:
         total = 1
     ratio = min(max(completed / total, 0.0), 1.0)
@@ -164,6 +174,7 @@ def _bar_text(completed: int, total: int, color: str, width: int = 40) -> str:
 
 
 def _elapsed(task: _TaskState) -> str:
+    """Format elapsed task time as H:MM:SS."""
     start = task.started_at
     if start is None:
         seconds = 0

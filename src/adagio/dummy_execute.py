@@ -1,8 +1,4 @@
-from __future__ import annotations
-
-import random
 import time
-from dataclasses import dataclass
 from typing import Any
 
 from adagio.model.arguments import AdagioArguments
@@ -11,40 +7,26 @@ from adagio.monitor.api import Monitor
 from adagio.monitor.log import LogMonitor
 
 
-@dataclass
-class DummyExecutionConfig:
-    min_seconds: float = 10.0
-    max_seconds: float = 15.0
-    fail_rate: float = 0.0
-    subtasks: int = 3
-    seed: int | None = None
+SLEEP_SECONDS = 5.0
+SUBTASK_COUNT = 3
 
 
-class DummyExecutionFailed(RuntimeError):
-    pass
-
-
-def execute_dummy_pipeline(
+def execute(
     *,
     pipeline: AdagioPipeline,
     arguments: AdagioArguments,
     monitor: Monitor | None = None,
-    dummy: DummyExecutionConfig | None = None,
 ) -> None:
+    """Execute a pipeline with fixed dummy progress."""
     sig = pipeline.signature
     monitor = monitor or LogMonitor()
-    dummy = dummy or DummyExecutionConfig()
     tasks = list(pipeline.iter_tasks())
 
     pipeline.validate_graph()
     sig.validate_arguments(arguments)
 
-    subtasks = max(dummy.subtasks, 1)
-    fail_rate = min(max(dummy.fail_rate, 0.0), 1.0)
-    min_seconds, max_seconds = sorted(
-        (max(dummy.min_seconds, 0.0), max(dummy.max_seconds, 0.0))
-    )
-    rng = random.Random(dummy.seed)
+    subtasks = SUBTASK_COUNT
+    sleep_per_subtask = SLEEP_SECONDS / SUBTASK_COUNT
 
     monitor.start_pipeline(total_tasks=len(tasks))
     try:
@@ -57,26 +39,9 @@ def execute_dummy_pipeline(
 
         for task in tasks:
             monitor.start_task(task_id=task.id)
-            duration = rng.uniform(min_seconds, max_seconds)
-            sleep_per_subtask = duration / subtasks
-
-            for subtask_index in range(subtasks):
-                if sleep_per_subtask > 0:
-                    time.sleep(sleep_per_subtask)
-                monitor.advance_task(
-                    task_id=task.id,
-                    advance=1,
-                )
-
-            if rng.random() < fail_rate:
-                monitor.finish_task(
-                    task_id=task.id,
-                    status="failed",
-                    error="simulated failure",
-                )
-                raise DummyExecutionFailed(
-                    f"Dummy execution failed at task '{task.id}'."
-                )
+            for _ in range(subtasks):
+                time.sleep(sleep_per_subtask)
+                monitor.advance_task(task_id=task.id, advance=1)
 
             monitor.finish_task(task_id=task.id, status="completed")
     finally:
@@ -84,6 +49,7 @@ def execute_dummy_pipeline(
 
 
 def _task_label(task: Any) -> str:
+    """Build a human-readable label for a task."""
     kind = getattr(task, "kind", "unknown")
     task_id = getattr(task, "id", "<unknown>")
     if kind == "plugin-action":
