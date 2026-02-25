@@ -1,3 +1,4 @@
+import re
 import time
 from dataclasses import dataclass
 
@@ -5,6 +6,12 @@ from rich.console import Console
 from rich.progress import Progress, TextColumn
 
 from .api import Monitor
+
+BADGE_WIDTH = 8
+LABEL_WIDTH = 28
+BAR_WIDTH = 28
+COUNTER_WIDTH = 5
+ELAPSED_WIDTH = 4
 
 
 @dataclass
@@ -20,7 +27,7 @@ class _TaskState:
 
 
 class RichMonitor(Monitor):
-    """Render pipeline progress in a stacked Rich layout."""
+    """Render compact pipeline progress rows."""
 
     def __init__(self, *, console: Console | None = None):
         """Initialize the Rich monitor."""
@@ -47,7 +54,7 @@ class RichMonitor(Monitor):
         self._pipeline_started = True
         self._total_tasks = total_tasks
         self._progress.start()
-        self._console.print("[bold]Task Checklist[/bold]")
+        self._console.print("[bold]Task Progress[/bold]")
 
     def queue_task(
         self, *, task_id: str, label: str, total_subtasks: int = 1
@@ -131,39 +138,45 @@ class RichMonitor(Monitor):
         )
 
     def _render_row(self, task: _TaskState) -> str:
-        """Build a stacked two-line row for a task."""
-        status_styles = {
-            "pending": ("PEND", "yellow"),
-            "running": ("RUN", "cyan"),
-            "completed": ("DONE", "green"),
-            "failed": ("FAIL", "red"),
-            "skipped": ("SKIP", "magenta"),
-        }
-        badge_text, color = status_styles.get(task.status, ("PEND", "yellow"))
-        badge = f"[bold {color}]{badge_text}[/]"
-        bar = _bar_text(task.completed_subtasks, task.total_subtasks, color)
-
-        if task.status == "completed":
-            state_text = f"completed ({task.completed_subtasks}/{task.total_subtasks})"
-        elif task.status == "failed":
-            state_text = "failed"
-            if task.error:
-                state_text = f"{state_text}: {task.error}"
-        elif task.status == "skipped":
-            state_text = f"skipped ({task.completed_subtasks}/{task.total_subtasks})"
-        elif task.status == "running":
-            state_text = f"running ({task.completed_subtasks}/{task.total_subtasks})"
-        else:
-            state_text = f"pending ({task.completed_subtasks}/{task.total_subtasks})"
-
+        """Build a compact row for a task."""
+        badge_text, color = _status_style(task.status)
+        badge_plain = badge_text.ljust(BADGE_WIDTH)
+        badge = f"[bold {color}]{badge_plain}[/]"
+        label = _compact_label(task.label, LABEL_WIDTH).ljust(LABEL_WIDTH)
+        bar = _bar_text(task.completed_subtasks, task.total_subtasks, color, BAR_WIDTH)
+        counter = f"{task.completed_subtasks}/{task.total_subtasks}"
         elapsed = _elapsed(task)
+        error = ""
+        if task.status == "failed" and task.error:
+            error = f"  [red]{task.error}[/]"
         return (
-            f"{badge} {task.label}\n"
-            f" {bar}   {state_text}   {elapsed}"
+            f"{badge} {label} {bar}  "
+            f"{counter.rjust(COUNTER_WIDTH)}  {elapsed.rjust(ELAPSED_WIDTH)}{error}"
         )
 
 
-def _bar_text(completed: int, total: int, color: str, width: int = 40) -> str:
+def _status_style(status: str) -> tuple[str, str]:
+    """Map task state to badge text and color."""
+    lookup = {
+        "pending": ("PENDING", "yellow"),
+        "running": ("RUNNING", "cyan"),
+        "completed": ("DONE", "green"),
+        "failed": ("FAILED", "red"),
+        "skipped": ("SKIPPED", "magenta"),
+    }
+    return lookup.get(status, ("PENDING", "yellow"))
+
+
+def _compact_label(label: str, width: int = 28) -> str:
+    """Trim task labels to a compact display name."""
+    match = re.search(r"\(([^)]+)\)\s*$", label)
+    compact = match.group(1) if match else label
+    if len(compact) <= width:
+        return compact
+    return compact[: width - 1] + "…"
+
+
+def _bar_text(completed: int, total: int, color: str, width: int = 28) -> str:
     """Build a colored progress bar string."""
     if total <= 0:
         total = 1
@@ -174,14 +187,13 @@ def _bar_text(completed: int, total: int, color: str, width: int = 40) -> str:
 
 
 def _elapsed(task: _TaskState) -> str:
-    """Format elapsed task time as H:MM:SS."""
+    """Format elapsed task time as M:SS."""
     start = task.started_at
     if start is None:
-        seconds = 0
-    elif task.finished_at is not None:
+        return "0:00"
+    if task.finished_at is not None:
         seconds = max(0, int(task.finished_at - start))
     else:
         seconds = max(0, int(time.monotonic() - start))
     minutes, sec = divmod(seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}:{minutes:02d}:{sec:02d}"
+    return f"{minutes}:{sec:02d}"
