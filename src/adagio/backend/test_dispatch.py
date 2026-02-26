@@ -29,6 +29,7 @@ from adagio.backend.dispatch import (
     serve_rpc_loop,
     send_bridge_event,
 )
+from adagio.backend.util import build_zipapp_from_subpackage
 
 
 def _can_bind_loopback() -> bool:
@@ -168,7 +169,18 @@ class TestDispatchBackend(unittest.TestCase):
             self.assertIn("adagio/__init__.py", names)
             self.assertIn("adagio/embedded_agent/__init__.py", names)
             self.assertIn("adagio/embedded_agent/main.py", names)
+            self.assertNotIn("adagio/embedded_agent/__main__.py", names)
             self.assertNotIn("adagio/backend/dispatch.py", names)
+
+    def test_build_zipapp_from_subpackage(self):
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp) / "embedded-agent.pyz"
+            build_zipapp_from_subpackage(target, "adagio.embedded_agent")
+            self.assertTrue(target.exists())
+            with zipfile.ZipFile(target) as archive:
+                names = set(archive.namelist())
+            self.assertIn("__main__.py", names)
+            self.assertIn("adagio/embedded_agent/main.py", names)
 
     def test_rpc_session_resolve_result(self):
         session = FluxRPCSession(agent_command="true")

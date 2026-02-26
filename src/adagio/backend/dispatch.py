@@ -5,8 +5,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import importlib.abc
-import importlib.resources
 import json
 import os
 from pathlib import Path
@@ -21,9 +19,9 @@ from typing import Any, Callable, Sequence
 from urllib import parse, request
 import uuid
 import inspect
-import zipapp
 
 from adagio.backend.environment_setup import _default_config_path
+from adagio.backend.util import build_zipapp_from_subpackage
 
 
 @dataclass(slots=True)
@@ -471,49 +469,11 @@ def _build_runtime_command(
 
 _BUNDLED_AGENT_CONTAINER_DIR = "/tmp/adagio-agent"
 _BUNDLED_AGENT_FILENAME = "rpc-agent.pyz"
-
-
-def _copy_bundled_agent_source(
-    source: importlib.abc.Traversable,
-    target_dir: Path,
-):
-    target_dir.mkdir(parents=True, exist_ok=True)
-    for entry in source.iterdir():
-        name = entry.name
-        if name == "__pycache__":
-            continue
-        if entry.is_dir():
-            _copy_bundled_agent_source(entry, target_dir / name)
-            continue
-        if name.endswith(".pyc"):
-            continue
-        if name.startswith("test_") and name.endswith(".py"):
-            continue
-        (target_dir / name).write_bytes(entry.read_bytes())
+_BUNDLED_AGENT_SUBPACKAGE = "adagio.embedded_agent"
 
 
 def _build_bundled_agent_zipapp(target: Path):
-    package_tree = importlib.resources.files("adagio.embedded_agent")
-    with tempfile.TemporaryDirectory(prefix="adagio-agent-build-") as build_tmp:
-        build_root = Path(build_tmp)
-        adagio_root = build_root / "adagio"
-        adagio_root.mkdir(parents=True, exist_ok=True)
-        (adagio_root / "__init__.py").write_text("", encoding="utf-8")
-        _copy_bundled_agent_source(package_tree, adagio_root / "embedded_agent")
-        (build_root / "__main__.py").write_text(
-            "from adagio.embedded_agent.main import main\n\n"
-            "if __name__ == '__main__':\n"
-            "    main()\n",
-            encoding="utf-8",
-        )
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            target.unlink()
-        zipapp.create_archive(
-            source=build_root,
-            target=target,
-            interpreter="/usr/bin/env python3",
-        )
+    build_zipapp_from_subpackage(target, _BUNDLED_AGENT_SUBPACKAGE)
 
 
 def _post_bridge_json(url: str, token: str, payload: dict[str, Any]) -> None:
