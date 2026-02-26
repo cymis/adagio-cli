@@ -21,6 +21,12 @@ console = Console()
 def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
 
+    if argv and argv[0] == "runtime":
+        from .runtime import run_runtime
+
+        run_runtime(argv[1:], console=console)
+        return
+
     argv, positional_pipeline = promote_positional_pipeline(argv)
     pipeline_str = extract_flag_value(argv, "--pipeline", "-p")
     show_mode_str = extract_flag_value(argv, "--show-params")

@@ -1,9 +1,20 @@
 {
-  "inputs": {},
-  "outputs": {},
-  "parameters": {
-    "barcodes": "barcodes",
-    "trunc_len": 120,
-    "trim_foobar": 150
+  "emp-paired-1": {
+    "inputs": {},
+    "outputs": {},
+    "parameters": {
+      "barcodes": "barcodes",
+      "trunc_len": 120,
+      "trim_foobar": 150
+    }
+  },
+  "foo-paired-1": {
+    "inputs": {},
+    "outputs": {},
+    "parameters": {
+      "barcodes": "barcodes",
+      "trunc_len": 120,
+      "trim_foobar": 150
+    }
   }
 }

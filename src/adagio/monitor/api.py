@@ -39,6 +39,18 @@ class Monitor:
         """Start tracking output saving."""
         return None
 
+    def finish_output(
+        self,
+        *,
+        output_id: str,
+        output_name: str,
+        destination: str,
+        status: str = "succeeded",
+        error: str | None = None,
+    ) -> None:
+        """Track completion for an individual output artifact."""
+        return None
+
     def finish_save_output(self) -> None:
         """Finish tracking output saving."""
         return None
