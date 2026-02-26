@@ -3,12 +3,11 @@ import typer
 from pathlib import Path
 
 from adagio.backend import (
+    AgentLaunchRequest,
     DEFAULT_FLUX_IMAGE,
-    DispatchRequest,
     InstallRequest,
-    dispatch_to_flux,
-    enqueue_bridge_task,
     install_compute_environment,
+    run_agent_once,
 )
 from rich.console import Console
 from rich.panel import Panel
@@ -173,26 +172,13 @@ def install_cmd(
 
 @app.command("dispatch")
 def dispatch_cmd(
-    agent_cmd: Annotated[
+    command: Annotated[
         str,
         typer.Option(
-            "--agent-cmd",
-            help=(
-                "Shell command executed inside the standardized Flux environment. "
-                "It receives ADAGIO_BRIDGE_* env vars for host callbacks."
-            ),
+            "--command",
+            help="One-off shell command executed inside the standardized compute environment.",
         ),
     ],
-    task: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--task",
-            help=(
-                "Initial task for the agent bridge queue. "
-                "Repeat this option to enqueue multiple tasks."
-            ),
-        ),
-    ] = None,
     config: Annotated[
         Path | None,
         typer.Option(
@@ -214,93 +200,41 @@ def dispatch_cmd(
             help="Target mount path inside the runtime for --workdir.",
         ),
     ] = "/workspace",
-    bridge_host: Annotated[
-        str | None,
-        typer.Option(
-            "--bridge-host",
-            help="Hostname the in-runtime agent should use to reach the host bridge.",
-        ),
-    ] = None,
-    bridge_bind: Annotated[
-        str,
-        typer.Option(
-            "--bridge-bind",
-            help="Host interface for binding the bridge server.",
-        ),
-    ] = "0.0.0.0",
-    bridge_port: Annotated[
-        int,
-        typer.Option(
-            "--bridge-port",
-            min=0,
-            max=65535,
-            help="Bridge server port. Use 0 for an ephemeral port.",
-        ),
-    ] = 0,
-    bridge_token: Annotated[
-        str | None,
-        typer.Option(
-            "--bridge-token",
-            help="Static auth token for bridge endpoints. Defaults to a generated token.",
-        ),
-    ] = None,
 ):
-    """Dispatch an agent command in the compute environment with host callback bridge support."""
+    """Run a one-off command in the configured compute environment."""
+
     def _print_output(stream_name: str, line: str):
         style = "cyan" if stream_name == "stdout" else "magenta"
         console.print(f"[{style}]{stream_name}>[/{style}] {line}")
 
-    def _print_event(event):
-        message = event.payload.get("message")
-        if message:
-            console.print(f"[green]event[{event.event_type}] {message}[/green]")
-        else:
-            console.print(f"[green]event[{event.event_type}] {event.payload}[/green]")
+    runtime_command: list[str] | None = None
 
-    def _print_start(session):
-        console.print(
-            Panel.fit(
-                f"Host bridge URL: [bold]{session.host_bridge_url}[/bold]\n"
-                f"Agent bridge URL: [bold]{session.agent_bridge_url}[/bold]\n"
-                f"Bridge token: [bold]{session.token}[/bold]\n"
-                f"Runtime command: [bold]{' '.join(session.command)}[/bold]",
-                title="[cyan]Adagio Dispatch Started[/cyan]",
-                border_style="cyan",
-            )
-        )
-        console.print(
-            "Queue tasks from another shell while dispatch is running:\n"
-            f"  adagio dispatch-task --bridge-url {session.host_bridge_url} "
-            f"--token {session.token} --task '<payload>'"
-        )
+    def _capture_start(binding):
+        nonlocal runtime_command
+        runtime_command = binding.command
 
-    request = DispatchRequest(
-        agent_command=agent_cmd,
-        tasks=list(task or []),
+    request = AgentLaunchRequest(
+        agent_command=command,
         config_path=config,
         workdir=workdir,
         container_workdir=container_workdir,
-        bridge_bind=bridge_bind,
-        bridge_port=bridge_port,
-        bridge_host=bridge_host,
-        bridge_token=bridge_token,
     )
 
     try:
-        report = dispatch_to_flux(
+        report = run_agent_once(
             request,
-            on_start=_print_start,
+            on_start=_capture_start,
             on_output=_print_output,
-            on_event=_print_event,
         )
     except Exception as e:
         console.print(f"[red]Dispatch failed:[/red] {e}")
         raise typer.Exit(1)
 
+    rendered_cmd = " ".join(runtime_command or report.command)
     console.print(
         Panel.fit(
             f"Command exit code: [bold]{report.returncode}[/bold]\n"
-            f"Events received: [bold]{len(report.events)}[/bold]",
+            f"Runtime command: [bold]{rendered_cmd}[/bold]",
             title="[cyan]Adagio Dispatch Complete[/cyan]",
             border_style="cyan",
         )
@@ -308,40 +242,6 @@ def dispatch_cmd(
 
     if not report.ok:
         raise typer.Exit(report.returncode)
-
-
-@app.command("dispatch-task")
-def dispatch_task_cmd(
-    bridge_url: Annotated[
-        str,
-        typer.Option(
-            "--bridge-url",
-            help="Host bridge URL from `adagio dispatch` output.",
-        ),
-    ],
-    token: Annotated[
-        str,
-        typer.Option(
-            "--token",
-            help="Bridge auth token from `adagio dispatch` output.",
-        ),
-    ],
-    task: Annotated[
-        str,
-        typer.Option(
-            "--task",
-            help="Task payload added to the bridge queue for the in-runtime agent.",
-        ),
-    ],
-):
-    """Enqueue a task into a running dispatch bridge."""
-    try:
-        enqueue_bridge_task(bridge_url=bridge_url, token=token, task=task)
-    except Exception as e:
-        console.print(f"[red]Failed to enqueue task:[/red] {e}")
-        raise typer.Exit(1)
-
-    console.print("[green]Task queued.[/green]")
 
 
 @app.callback(invoke_without_command=True)

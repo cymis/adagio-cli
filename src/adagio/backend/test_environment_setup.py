@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from adagio.backend.base import CommandResult
-from adagio.backend.miniforge import (
+from adagio.backend.environment_setup import (
     InstallRequest,
     _extract_wsl_runtime,
     _normalize_image_ref,
@@ -16,7 +16,7 @@ from adagio.backend.miniforge import (
 )
 
 
-class TestMiniforgeInstaller(unittest.TestCase):
+class TestEnvironmentSetup(unittest.TestCase):
     def test_select_linux_runtime_priority(self):
         def fake_which(cmd: str) -> str | None:
             installed = {
@@ -55,8 +55,8 @@ class TestMiniforgeInstaller(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "compute-environment.json"
-            with patch("adagio.backend.miniforge.platform.system", return_value="Linux"):
-                with patch("adagio.backend.miniforge._default_config_path", return_value=cfg):
+            with patch("adagio.backend.environment_setup.platform.system", return_value="Linux"):
+                with patch("adagio.backend.environment_setup._default_config_path", return_value=cfg):
                     report = install_compute_environment(
                         InstallRequest(apply=True, image="example/flux:1"),
                         runner=fake_runner,
@@ -82,8 +82,8 @@ class TestMiniforgeInstaller(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "compute-environment.json"
-            with patch("adagio.backend.miniforge.platform.system", return_value="Linux"):
-                with patch("adagio.backend.miniforge._default_config_path", return_value=cfg):
+            with patch("adagio.backend.environment_setup.platform.system", return_value="Linux"):
+                with patch("adagio.backend.environment_setup._default_config_path", return_value=cfg):
                     report = install_compute_environment(
                         InstallRequest(apply=False),
                         runner=fake_runner,

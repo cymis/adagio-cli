@@ -7,22 +7,26 @@ import socket
 from tempfile import TemporaryDirectory
 import unittest
 from urllib import error, request
+import zipfile
 
 from adagio.backend.dispatch import (
+    AgentLaunchRequest,
     BridgeEvent,
     BridgeServer,
     ComputeEnvironmentConfig,
-    DispatchRequest,
     FluxRPCClient,
     FluxRPCSession,
     RPCRequest,
     RPCResult,
     RemoteCallError,
+    RuntimeMount,
     RuntimeConfig,
+    _build_bundled_agent_zipapp,
     _build_runtime_command,
     _default_bridge_host,
-    enqueue_bridge_task,
+    enqueue_bridge_command,
     load_compute_environment,
+    serve_rpc_loop,
     send_bridge_event,
 )
 
@@ -89,7 +93,7 @@ class TestDispatchBackend(unittest.TestCase):
             image="docker.io/fluxrm/flux-sched:latest",
             runtime=RuntimeConfig(engine="podman"),
         )
-        dispatch = DispatchRequest(
+        dispatch = AgentLaunchRequest(
             agent_command="flux run hostname",
             workdir=Path("/tmp"),
             bridge_host="host.containers.internal",
@@ -114,7 +118,7 @@ class TestDispatchBackend(unittest.TestCase):
             image="docker.io/fluxrm/flux-sched:latest",
             runtime=RuntimeConfig(engine="podman", via_wsl=True),
         )
-        dispatch = DispatchRequest(agent_command="flux run hostname")
+        dispatch = AgentLaunchRequest(agent_command="flux run hostname")
 
         cmd = _build_runtime_command(
             config=config,
@@ -125,6 +129,46 @@ class TestDispatchBackend(unittest.TestCase):
 
         self.assertEqual(cmd[:4], ["wsl.exe", "-e", "sh", "-lc"])
         self.assertIn("podman run --rm", cmd[4])
+
+    def test_build_runtime_command_includes_runtime_mounts(self):
+        config = ComputeEnvironmentConfig(
+            path=Path("/tmp/compute-environment.json"),
+            platform="Linux",
+            image="docker.io/fluxrm/flux-sched:latest",
+            runtime=RuntimeConfig(engine="podman"),
+        )
+        dispatch = AgentLaunchRequest(
+            agent_command="python3 /tmp/adagio-agent/rpc-agent.pyz",
+            runtime_mounts=[
+                RuntimeMount(
+                    host_path=Path("/tmp/adagio-agent-host"),
+                    container_path="/tmp/adagio-agent",
+                    read_only=True,
+                )
+            ],
+        )
+        cmd = _build_runtime_command(
+            config=config,
+            request=dispatch,
+            agent_bridge_url="http://host.containers.internal:49152",
+            token="abc123",
+        )
+        self.assertIn("-v", cmd)
+        self.assertIn("/tmp/adagio-agent-host:/tmp/adagio-agent:ro", cmd)
+
+    def test_build_bundled_agent_zipapp(self):
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp) / "rpc-agent.pyz"
+            _build_bundled_agent_zipapp(target)
+
+            self.assertTrue(target.exists())
+            with zipfile.ZipFile(target) as archive:
+                names = set(archive.namelist())
+            self.assertIn("__main__.py", names)
+            self.assertIn("adagio/__init__.py", names)
+            self.assertIn("adagio/embedded_agent/__init__.py", names)
+            self.assertIn("adagio/embedded_agent/main.py", names)
+            self.assertNotIn("adagio/backend/dispatch.py", names)
 
     def test_rpc_session_resolve_result(self):
         session = FluxRPCSession(agent_command="true")
@@ -183,7 +227,7 @@ class TestDispatchBackend(unittest.TestCase):
         self.assertTrue(session.unsubscribe(sub_progress))
         self.assertTrue(session.unsubscribe(sub_all))
 
-    def test_serve_rpc_forever_with_context_emit(self):
+    def test_serve_rpc_loop_with_context_emit(self):
         class FakeClient:
             def __init__(self, calls: list[RPCRequest]):
                 self.calls = list(calls)
@@ -211,9 +255,7 @@ class TestDispatchBackend(unittest.TestCase):
             ctx.emit("progress", message=f"handler:{message}")
             return {"message": message}
 
-        from adagio.backend.dispatch import serve_rpc_forever
-
-        serve_rpc_forever(
+        serve_rpc_loop(
             handlers={"ping": ping},
             client=fake,  # type: ignore[arg-type]
             poll_interval=0,
@@ -226,7 +268,7 @@ class TestDispatchBackend(unittest.TestCase):
         self.assertEqual(fake.events[0][1]["call_id"], "call-1")
         self.assertEqual(fake.events[0][1]["method"], "ping")
 
-    def test_serve_rpc_forever_legacy_handler(self):
+    def test_serve_rpc_loop_legacy_handler(self):
         class FakeClient:
             def __init__(self, calls: list[RPCRequest]):
                 self.calls = list(calls)
@@ -249,9 +291,7 @@ class TestDispatchBackend(unittest.TestCase):
         def echo(value: int):
             return value
 
-        from adagio.backend.dispatch import serve_rpc_forever
-
-        serve_rpc_forever(
+        serve_rpc_loop(
             handlers={"echo": echo},
             client=fake,  # type: ignore[arg-type]
             poll_interval=0,
@@ -270,7 +310,7 @@ class TestDispatchBackend(unittest.TestCase):
             bind="127.0.0.1",
             port=0,
             token="token-1",
-            initial_tasks=[],
+            initial_commands=[],
         ) as server:
             server.add_rpc_call(
                 RPCRequest(id="call-1", method="echo", params={"value": 7})
@@ -293,12 +333,12 @@ class TestDispatchBackend(unittest.TestCase):
         _can_bind_loopback(),
         "Loopback socket binding unavailable in this environment",
     )
-    def test_bridge_server_events_and_tasks(self):
+    def test_bridge_server_events_and_commands(self):
         with BridgeServer(
             bind="127.0.0.1",
             port=0,
             token="token-1",
-            initial_tasks=["task-a"],
+            initial_commands=["command-a"],
         ) as server:
             send_bridge_event(
                 bridge_url=server.host_url,
@@ -313,24 +353,28 @@ class TestDispatchBackend(unittest.TestCase):
             self.assertEqual(events[0].payload["message"], "step 1")
 
             req = request.Request(
-                f"{server.host_url}/tasks/next",
+                f"{server.host_url}/commands/next",
                 headers={"Authorization": "Bearer token-1"},
                 method="GET",
             )
             with request.urlopen(req, timeout=5) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-            self.assertEqual(payload["task"], "task-a")
+            self.assertEqual(payload["command"], "command-a")
 
-            enqueue_bridge_task(server.host_url, token="token-1", task="task-b")
+            enqueue_bridge_command(
+                server.host_url,
+                token="token-1",
+                command="command-b",
+            )
 
             req = request.Request(
-                f"{server.host_url}/tasks/next",
+                f"{server.host_url}/commands/next",
                 headers={"Authorization": "Bearer token-1"},
                 method="GET",
             )
             with request.urlopen(req, timeout=5) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-            self.assertEqual(payload["task"], "task-b")
+            self.assertEqual(payload["command"], "command-b")
 
     @unittest.skipUnless(
         _can_bind_loopback(),
@@ -341,10 +385,10 @@ class TestDispatchBackend(unittest.TestCase):
             bind="127.0.0.1",
             port=0,
             token="token-1",
-            initial_tasks=[],
+            initial_commands=[],
         ) as server:
             req = request.Request(
-                f"{server.host_url}/tasks/next",
+                f"{server.host_url}/commands/next",
                 method="GET",
             )
             with self.assertRaises(error.HTTPError) as cm:

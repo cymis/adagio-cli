@@ -1,29 +1,35 @@
-from adagio.backend.miniforge import (
+from adagio.backend.environment_setup import (
     DEFAULT_FLUX_IMAGE,
     InstallRequest,
     install_compute_environment,
 )
 from adagio.backend.dispatch import (
+    AgentLaunchRequest,
+    AgentRunReport,
+    BridgeBinding,
     FluxRPCClient,
     FluxRPCSession,
-    DispatchRequest,
     RPCHandlerContext,
     RemoteCallError,
-    dispatch_to_flux,
-    enqueue_bridge_task,
-    serve_rpc_forever,
+    RuntimeMount,
+    enqueue_bridge_command,
+    run_agent_once,
+    serve_rpc_loop,
 )
 
 __all__ = [
+    "AgentLaunchRequest",
+    "AgentRunReport",
+    "BridgeBinding",
     "DEFAULT_FLUX_IMAGE",
-    "DispatchRequest",
     "FluxRPCClient",
     "FluxRPCSession",
     "InstallRequest",
     "RPCHandlerContext",
     "RemoteCallError",
-    "dispatch_to_flux",
-    "enqueue_bridge_task",
+    "RuntimeMount",
+    "enqueue_bridge_command",
     "install_compute_environment",
-    "serve_rpc_forever",
+    "run_agent_once",
+    "serve_rpc_loop",
 ]

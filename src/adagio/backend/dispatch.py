@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.abc
+import importlib.resources
 import json
 import os
 from pathlib import Path
@@ -12,14 +14,16 @@ import queue
 import secrets
 import shlex
 import subprocess
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Sequence
 from urllib import parse, request
 import uuid
 import inspect
+import zipapp
 
-from adagio.backend.miniforge import _default_config_path
+from adagio.backend.environment_setup import _default_config_path
 
 
 @dataclass(slots=True)
@@ -47,9 +51,9 @@ class BridgeEvent:
 
 
 @dataclass(slots=True)
-class DispatchRequest:
-    agent_command: str
-    tasks: list[str] = field(default_factory=list)
+class AgentLaunchRequest:
+    agent_command: str | None
+    commands: list[str] = field(default_factory=list)
     config_path: Path | None = None
     workdir: Path | None = None
     container_workdir: str = "/workspace"
@@ -57,10 +61,18 @@ class DispatchRequest:
     bridge_port: int = 0
     bridge_host: str | None = None
     bridge_token: str | None = None
+    runtime_mounts: list["RuntimeMount"] = field(default_factory=list)
 
 
 @dataclass(slots=True)
-class DispatchReport:
+class RuntimeMount:
+    host_path: Path
+    container_path: str
+    read_only: bool = False
+
+
+@dataclass(slots=True)
+class AgentRunReport:
     ok: bool
     returncode: int
     command: list[str]
@@ -71,7 +83,7 @@ class DispatchReport:
 
 
 @dataclass(slots=True)
-class DispatchSession:
+class BridgeBinding:
     command: list[str]
     host_bridge_url: str
     agent_bridge_url: str
@@ -80,7 +92,7 @@ class DispatchSession:
 
 OutputCallback = Callable[[str, str], None]
 EventCallback = Callable[[BridgeEvent], None]
-StartCallback = Callable[[DispatchSession], None]
+StartCallback = Callable[[BridgeBinding], None]
 
 
 @dataclass(slots=True)
@@ -120,13 +132,13 @@ class RPCHandlerContext:
 
 
 class _BridgeState:
-    def __init__(self, initial_tasks: Sequence[str]):
+    def __init__(self, initial_commands: Sequence[str]):
         self._events: queue.Queue[BridgeEvent] = queue.Queue()
-        self._tasks: queue.Queue[str] = queue.Queue()
+        self._commands: queue.Queue[str] = queue.Queue()
         self._rpc_calls: queue.Queue[RPCRequest] = queue.Queue()
         self._rpc_results: queue.Queue[RPCResult] = queue.Queue()
-        for item in initial_tasks:
-            self._tasks.put(item)
+        for item in initial_commands:
+            self._commands.put(item)
 
     def add_event(self, payload: dict[str, Any]):
         event_type = str(payload.get("type", "event"))
@@ -144,12 +156,12 @@ class _BridgeState:
         except queue.Empty:
             return None
 
-    def add_task(self, task: str):
-        self._tasks.put(task)
+    def add_command(self, command: str):
+        self._commands.put(command)
 
-    def next_task(self) -> str | None:
+    def next_command(self) -> str | None:
         try:
-            return self._tasks.get_nowait()
+            return self._commands.get_nowait()
         except queue.Empty:
             return None
 
@@ -178,10 +190,10 @@ class BridgeServer:
         bind: str,
         port: int,
         token: str,
-        initial_tasks: Sequence[str],
+        initial_commands: Sequence[str],
     ):
         self.token = token
-        self._state = _BridgeState(initial_tasks)
+        self._state = _BridgeState(initial_commands)
         handler = _make_bridge_handler(self._state, token)
         self._httpd = ThreadingHTTPServer((bind, port), handler)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
@@ -202,8 +214,8 @@ class BridgeServer:
         self._httpd.server_close()
         self._thread.join(timeout=2)
 
-    def add_task(self, task: str):
-        self._state.add_task(task)
+    def add_command(self, command: str):
+        self._state.add_command(command)
 
     def add_rpc_call(self, call: RPCRequest):
         self._state.add_rpc_call(call)
@@ -277,16 +289,16 @@ def _make_bridge_handler(state: _BridgeState, token: str):
                 self._send_json(HTTPStatus.OK, {"ok": True})
                 return
 
-            if path == "/tasks/next":
+            if path == "/commands/next":
                 if not self._authorized():
                     self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                     return
 
-                task = state.next_task()
-                if task is None:
+                command = state.next_command()
+                if command is None:
                     self._send_json(HTTPStatus.NO_CONTENT)
                 else:
-                    self._send_json(HTTPStatus.OK, {"task": task})
+                    self._send_json(HTTPStatus.OK, {"command": command})
                 return
 
             if path == "/rpc/next":
@@ -308,7 +320,7 @@ def _make_bridge_handler(state: _BridgeState, token: str):
 
         def do_POST(self):
             path = parse.urlparse(self.path).path
-            if path not in {"/events", "/tasks", "/rpc/result"}:
+            if path not in {"/events", "/commands", "/rpc/result"}:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not-found"})
                 return
 
@@ -341,12 +353,12 @@ def _make_bridge_handler(state: _BridgeState, token: str):
                 self._send_json(HTTPStatus.ACCEPTED, {"accepted": True})
                 return
 
-            task = payload.get("task")
-            if not isinstance(task, str) or not task.strip():
-                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "missing-task"})
+            command = payload.get("command")
+            if not isinstance(command, str) or not command.strip():
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "missing-command"})
                 return
 
-            state.add_task(task)
+            state.add_command(command)
             self._send_json(HTTPStatus.ACCEPTED, {"accepted": True})
 
     return BridgeHandler
@@ -384,28 +396,27 @@ def load_compute_environment(config_path: Path | None = None) -> ComputeEnvironm
 
 
 def _agent_env(
-    config: ComputeEnvironmentConfig,
     agent_bridge_url: str,
     token: str,
 ) -> dict[str, str]:
     return {
         "ADAGIO_BRIDGE_URL": agent_bridge_url,
-        "ADAGIO_BRIDGE_EVENTS_URL": f"{agent_bridge_url}/events",
-        "ADAGIO_BRIDGE_TASKS_URL": f"{agent_bridge_url}/tasks/next",
         "ADAGIO_BRIDGE_TOKEN": token,
-        "ADAGIO_RUNTIME_ENGINE": config.runtime.engine,
-        "ADAGIO_FLUX_IMAGE": config.image,
     }
 
 
 def _build_runtime_command(
     config: ComputeEnvironmentConfig,
-    request: DispatchRequest,
+    request: AgentLaunchRequest,
     agent_bridge_url: str,
     token: str,
 ) -> list[str]:
     engine = config.runtime.engine
-    env = _agent_env(config, agent_bridge_url, token)
+    env = _agent_env(agent_bridge_url, token)
+    agent_command = (request.agent_command or "").strip()
+    if not agent_command:
+        raise ValueError("agent_command is required")
+
     workdir = request.workdir.resolve() if request.workdir else None
 
     command: list[str]
@@ -418,16 +429,26 @@ def _build_runtime_command(
         if workdir:
             command.extend(["-v", f"{workdir}:{request.container_workdir}"])
             command.extend(["-w", request.container_workdir])
+        for mount in request.runtime_mounts:
+            spec = f"{mount.host_path.resolve()}:{mount.container_path}"
+            if mount.read_only:
+                spec = f"{spec}:ro"
+            command.extend(["-v", spec])
 
         for key, value in env.items():
             command.extend(["-e", f"{key}={value}"])
 
-        command.extend([config.image, "sh", "-lc", request.agent_command])
+        command.extend([config.image, "sh", "-lc", agent_command])
 
     elif engine in {"apptainer", "singularity"}:
         command = [engine, "exec"]
         if workdir:
             command.extend(["--bind", f"{workdir}:{request.container_workdir}"])
+        for mount in request.runtime_mounts:
+            spec = f"{mount.host_path.resolve()}:{mount.container_path}"
+            if mount.read_only:
+                spec = f"{spec}:ro"
+            command.extend(["--bind", spec])
 
         for key, value in env.items():
             command.extend(["--env", f"{key}={value}"])
@@ -438,7 +459,7 @@ def _build_runtime_command(
         else:
             image_ref = f"docker://{config.image}"
 
-        command.extend([image_ref, "sh", "-lc", request.agent_command])
+        command.extend([image_ref, "sh", "-lc", agent_command])
 
     else:
         raise ValueError(f"Unsupported runtime engine: {engine}")
@@ -446,6 +467,53 @@ def _build_runtime_command(
     if config.runtime.via_wsl:
         return ["wsl.exe", "-e", "sh", "-lc", shlex.join(command)]
     return command
+
+
+_BUNDLED_AGENT_CONTAINER_DIR = "/tmp/adagio-agent"
+_BUNDLED_AGENT_FILENAME = "rpc-agent.pyz"
+
+
+def _copy_bundled_agent_source(
+    source: importlib.abc.Traversable,
+    target_dir: Path,
+):
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for entry in source.iterdir():
+        name = entry.name
+        if name == "__pycache__":
+            continue
+        if entry.is_dir():
+            _copy_bundled_agent_source(entry, target_dir / name)
+            continue
+        if name.endswith(".pyc"):
+            continue
+        if name.startswith("test_") and name.endswith(".py"):
+            continue
+        (target_dir / name).write_bytes(entry.read_bytes())
+
+
+def _build_bundled_agent_zipapp(target: Path):
+    package_tree = importlib.resources.files("adagio.embedded_agent")
+    with tempfile.TemporaryDirectory(prefix="adagio-agent-build-") as build_tmp:
+        build_root = Path(build_tmp)
+        adagio_root = build_root / "adagio"
+        adagio_root.mkdir(parents=True, exist_ok=True)
+        (adagio_root / "__init__.py").write_text("", encoding="utf-8")
+        _copy_bundled_agent_source(package_tree, adagio_root / "embedded_agent")
+        (build_root / "__main__.py").write_text(
+            "from adagio.embedded_agent.main import main\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n",
+            encoding="utf-8",
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            target.unlink()
+        zipapp.create_archive(
+            source=build_root,
+            target=target,
+            interpreter="/usr/bin/env python3",
+        )
 
 
 def _post_bridge_json(url: str, token: str, payload: dict[str, Any]) -> None:
@@ -481,8 +549,8 @@ def _get_bridge_json(url: str, token: str) -> tuple[int, dict[str, Any] | None]:
         return int(response.status), json.loads(raw)
 
 
-def enqueue_bridge_task(bridge_url: str, token: str, task: str) -> None:
-    _post_bridge_json(f"{bridge_url.rstrip('/')}/tasks", token, {"task": task})
+def enqueue_bridge_command(bridge_url: str, token: str, command: str) -> None:
+    _post_bridge_json(f"{bridge_url.rstrip('/')}/commands", token, {"command": command})
 
 
 def _start_stream_reader(
@@ -509,12 +577,12 @@ def _drain_output(
             on_output(stream_name, line)
 
 
-def dispatch_to_flux(
-    request: DispatchRequest,
+def run_agent_once(
+    request: AgentLaunchRequest,
     on_start: StartCallback | None = None,
     on_output: OutputCallback | None = None,
     on_event: EventCallback | None = None,
-) -> DispatchReport:
+) -> AgentRunReport:
     config = load_compute_environment(request.config_path)
     token = request.bridge_token or secrets.token_urlsafe(18)
 
@@ -524,7 +592,7 @@ def dispatch_to_flux(
         bind=request.bridge_bind,
         port=request.bridge_port,
         token=token,
-        initial_tasks=request.tasks,
+        initial_commands=request.commands,
     )
     server.start()
 
@@ -532,7 +600,7 @@ def dispatch_to_flux(
     agent_bridge_url = f"http://{bridge_host}:{server.port}"
 
     runtime_command = _build_runtime_command(config, request, agent_bridge_url, token)
-    session = DispatchSession(
+    session = BridgeBinding(
         command=runtime_command,
         host_bridge_url=host_bridge_url,
         agent_bridge_url=agent_bridge_url,
@@ -594,7 +662,7 @@ def dispatch_to_flux(
     finally:
         server.stop()
 
-    return DispatchReport(
+    return AgentRunReport(
         ok=returncode == 0,
         returncode=returncode,
         command=runtime_command,
@@ -690,7 +758,7 @@ class FluxRPCClient:
         )
 
 
-def serve_rpc_forever(
+def serve_rpc_loop(
     handlers: dict[str, Callable[..., Any]],
     client: FluxRPCClient | None = None,
     *,
@@ -750,7 +818,7 @@ class FluxRPCSession:
     def __init__(
         self,
         *,
-        agent_command: str,
+        agent_command: str | None = None,
         config_path: Path | None = None,
         workdir: Path | None = None,
         container_workdir: str = "/workspace",
@@ -758,10 +826,11 @@ class FluxRPCSession:
         bridge_port: int = 0,
         bridge_host: str | None = None,
         bridge_token: str | None = None,
+        commands: list[str] | None = None,
         on_output: OutputCallback | None = None,
         on_event: EventCallback | None = None,
     ):
-        self._request = DispatchRequest(
+        self._request = AgentLaunchRequest(
             agent_command=agent_command,
             config_path=config_path,
             workdir=workdir,
@@ -770,7 +839,9 @@ class FluxRPCSession:
             bridge_port=bridge_port,
             bridge_host=bridge_host,
             bridge_token=bridge_token,
+            commands=list(commands or []),
         )
+        self._agent_command_override = agent_command
         self._on_output = on_output
         self._on_event = on_event
 
@@ -783,16 +854,17 @@ class FluxRPCSession:
         self._events: list[BridgeEvent] = []
         self._subscriptions: dict[str, tuple[str, EventCallback]] = {}
         self._subscription_lock = threading.Lock()
-        self._session: DispatchSession | None = None
+        self._session: BridgeBinding | None = None
         self._stop_requested = threading.Event()
         self._returncode: int | None = None
+        self._agent_bundle_tmpdir: tempfile.TemporaryDirectory[str] | None = None
 
     @property
     def started(self) -> bool:
         return self._process is not None and self._returncode is None
 
     @property
-    def session(self) -> DispatchSession:
+    def session(self) -> BridgeBinding:
         if self._session is None:
             raise RuntimeError("Session not started")
         return self._session
@@ -822,7 +894,7 @@ class FluxRPCSession:
         with self._subscription_lock:
             return self._subscriptions.pop(subscription_id, None) is not None
 
-    def start(self) -> DispatchSession:
+    def start(self) -> BridgeBinding:
         if self.started:
             return self.session
 
@@ -834,30 +906,78 @@ class FluxRPCSession:
             bind=self._request.bridge_bind,
             port=self._request.bridge_port,
             token=token,
-            initial_tasks=self._request.tasks,
+            initial_commands=self._request.commands,
         )
         server.start()
+        try:
+            host_bridge_url = server.host_url
+            agent_bridge_url = f"http://{bridge_host}:{server.port}"
+            launch_request = AgentLaunchRequest(
+                agent_command=self._request.agent_command,
+                commands=list(self._request.commands),
+                config_path=self._request.config_path,
+                workdir=self._request.workdir,
+                container_workdir=self._request.container_workdir,
+                bridge_bind=self._request.bridge_bind,
+                bridge_port=self._request.bridge_port,
+                bridge_host=self._request.bridge_host,
+                bridge_token=self._request.bridge_token,
+                runtime_mounts=list(self._request.runtime_mounts),
+            )
+            if self._agent_command_override is None:
+                bundle_dir: str | None = None
+                if self._request.workdir is not None:
+                    bundle_dir = str(self._request.workdir.resolve())
+                bundle_tmpdir = tempfile.TemporaryDirectory(
+                    prefix=".adagio-agent-runtime-",
+                    dir=bundle_dir,
+                )
+                bundle_file = Path(bundle_tmpdir.name) / _BUNDLED_AGENT_FILENAME
+                _build_bundled_agent_zipapp(bundle_file)
+                os.chmod(bundle_tmpdir.name, 0o755)
+                os.chmod(bundle_file, 0o644)
+                if self._request.workdir is not None:
+                    bundle_container_path = (
+                        f"{self._request.container_workdir.rstrip('/')}/{Path(bundle_tmpdir.name).name}"
+                    )
+                else:
+                    launch_request.runtime_mounts.append(
+                        RuntimeMount(
+                            host_path=Path(bundle_tmpdir.name),
+                            container_path=_BUNDLED_AGENT_CONTAINER_DIR,
+                            read_only=True,
+                        )
+                    )
+                    bundle_container_path = _BUNDLED_AGENT_CONTAINER_DIR
+                launch_request.agent_command = (
+                    f"python3 {bundle_container_path}/{_BUNDLED_AGENT_FILENAME}"
+                )
+                self._agent_bundle_tmpdir = bundle_tmpdir
 
-        host_bridge_url = server.host_url
-        agent_bridge_url = f"http://{bridge_host}:{server.port}"
-        runtime_command = _build_runtime_command(config, self._request, agent_bridge_url, token)
+            runtime_command = _build_runtime_command(config, launch_request, agent_bridge_url, token)
 
-        launch_env = os.environ.copy()
-        if config.runtime.engine == "docker" and config.runtime.docker_host:
-            launch_env.setdefault("DOCKER_HOST", config.runtime.docker_host)
+            launch_env = os.environ.copy()
+            if config.runtime.engine == "docker" and config.runtime.docker_host:
+                launch_env.setdefault("DOCKER_HOST", config.runtime.docker_host)
 
-        process = subprocess.Popen(
-            runtime_command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=launch_env,
-        )
+            process = subprocess.Popen(
+                runtime_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=launch_env,
+            )
+        except Exception:
+            server.stop()
+            if self._agent_bundle_tmpdir is not None:
+                self._agent_bundle_tmpdir.cleanup()
+                self._agent_bundle_tmpdir = None
+            raise
 
         self._server = server
         self._process = process
-        self._session = DispatchSession(
+        self._session = BridgeBinding(
             command=runtime_command,
             host_bridge_url=host_bridge_url,
             agent_bridge_url=agent_bridge_url,
@@ -922,6 +1042,9 @@ class FluxRPCSession:
                     f"RPC session ended with return code {self._returncode}; pending calls canceled"
                 )
             )
+            if self._agent_bundle_tmpdir is not None:
+                self._agent_bundle_tmpdir.cleanup()
+                self._agent_bundle_tmpdir = None
 
     def _dispatch_event(self, event: BridgeEvent):
         if self._on_event is not None:
@@ -976,6 +1099,11 @@ class FluxRPCSession:
     def call_blocking(self, method: str, timeout: float | None = None, **params: Any) -> Any:
         return self.call(method, **params).result(timeout=timeout)
 
+    def enqueue_command(self, command: str):
+        if self._server is None or self._returncode is not None:
+            raise RuntimeError("RPC session is not active; call start() first")
+        self._server.add_command(command)
+
     def close(self):
         if self._process is None:
             return
@@ -985,6 +1113,9 @@ class FluxRPCSession:
             self._monitor_thread.join(timeout=5)
         if self._process.poll() is None:
             self._process.kill()
+        if self._agent_bundle_tmpdir is not None:
+            self._agent_bundle_tmpdir.cleanup()
+            self._agent_bundle_tmpdir = None
 
     def wait(self, timeout: float | None = None) -> int | None:
         if self._monitor_thread is not None:
