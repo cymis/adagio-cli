@@ -136,6 +136,7 @@ class RichMonitor(Monitor):
             completed=task.completed_subtasks,
             row=self._render_row(task),
         )
+        self._progress.refresh()
 
     def _render_row(self, task: _TaskState) -> str:
         """Build a compact row for a task."""

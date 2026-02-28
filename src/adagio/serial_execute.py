@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import typing as t
+import warnings
 import zipfile
 from collections.abc import Mapping
 
@@ -11,6 +12,8 @@ from adagio.model.pipeline import AdagioPipeline
 from adagio.model.task import PluginActionTask, RootInputTask
 from adagio.monitor.api import Monitor
 from adagio.monitor.log import LogMonitor
+
+SERIAL_SUBTASK_COUNT = 1
 
 
 def execute_serial(
@@ -29,13 +32,6 @@ def execute_serial(
 
     monitor.start_pipeline(total_tasks=len(tasks))
     try:
-        for task in tasks:
-            monitor.queue_task(
-                task_id=task.id,
-                label=_task_label(task),
-                total_subtasks=1,
-            )
-
         plugin_manager = PluginManager()
         cache = get_cache()
         with cache:
@@ -46,9 +42,18 @@ def execute_serial(
             _load_inputs(sig=sig, arguments=arguments, scope=scope)
             monitor.finish_load_input()
 
+            execution_plan = _plan_execution_order(tasks=tasks, scope=scope)
+            for task in execution_plan:
+                monitor.queue_task(
+                    task_id=task.id,
+                    label=_task_label(task),
+                    # QIIME actions do not expose nested subtask progress.
+                    total_subtasks=SERIAL_SUBTASK_COUNT,
+                )
+
             params = sig.get_params(arguments)
 
-            for task in _iter_tasks_in_execution_order(tasks=tasks, scope=scope):
+            for task in execution_plan:
                 monitor.start_task(task_id=task.id)
                 try:
                     _execute_task(task=task, plugin_manager=plugin_manager, params=params, scope=scope)
@@ -168,7 +173,8 @@ def _execute_plugin_action(
     for name, value in metadata_inputs.items():
         kwargs[name] = value
 
-    results = action(**kwargs)
+    with _action_output_context():
+        results = action(**kwargs)
     for name, dest in task.outputs.items():
         scope[dest.id] = getattr(results, name)
 
@@ -230,35 +236,36 @@ def _as_metadata(value: t.Any) -> t.Any:
     return value
 
 
-def _iter_tasks_in_execution_order(*, tasks: list[t.Any], scope: dict[str, t.Any]) -> t.Iterator[t.Any]:
+def _plan_execution_order(*, tasks: list[t.Any], scope: dict[str, t.Any]) -> list[t.Any]:
+    """Return a dependency-respecting serial execution plan."""
+    available_ids = set(scope.keys())
     remaining = list(tasks)
+    planned: list[t.Any] = []
+
     while remaining:
         progressed = False
         for task in list(remaining):
-            missing = _missing_input_ids(task=task, scope=scope)
+            missing = [src.id for src in task.inputs.values() if src.id not in available_ids]
             if missing:
                 continue
+
+            planned.append(task)
             remaining.remove(task)
             progressed = True
-            yield task
+            for output in task.outputs.values():
+                available_ids.add(output.id)
 
         if not progressed:
             details = []
             for task in remaining:
-                missing = ", ".join(_missing_input_ids(task=task, scope=scope))
+                missing = ", ".join(src.id for src in task.inputs.values() if src.id not in available_ids)
                 details.append(f"{task.id}: missing [{missing}]")
             raise RuntimeError(
                 "Unable to resolve task dependencies for serial execution. "
                 + "; ".join(details)
             )
 
-
-def _missing_input_ids(*, task: t.Any, scope: dict[str, t.Any]) -> list[str]:
-    missing: list[str] = []
-    for src in task.inputs.values():
-        if src.id not in scope:
-            missing.append(src.id)
-    return missing
+    return planned
 
 
 def _save_outputs(
@@ -327,3 +334,40 @@ def _task_label(task: t.Any) -> str:
         name = getattr(task, "name", "built-in")
         return f"{task_id} ({name})"
     return task_id
+
+
+class _action_output_context:
+    """Suppress plugin stdout/stderr noise unless explicitly enabled."""
+
+    def __enter__(self):
+        mode = os.getenv("ADAGIO_ACTION_STDIO", "").strip().lower()
+        self._suppress = mode not in {"inherit", "show", "verbose", "1", "true", "yes"}
+        if not self._suppress:
+            return self
+
+        self._saved_fds: list[tuple[int, int]] = []
+        self._sink = open(os.devnull, "w", encoding="utf-8")
+        self._warnings = warnings.catch_warnings()
+        self._warnings.__enter__()
+        warnings.filterwarnings(
+            "ignore",
+            message="pkg_resources is deprecated as an API.*",
+            category=UserWarning,
+        )
+        for fd in (1, 2):
+            saved = os.dup(fd)
+            self._saved_fds.append((fd, saved))
+            os.dup2(self._sink.fileno(), fd)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if not getattr(self, "_suppress", False):
+            return False
+        for fd, saved in reversed(self._saved_fds):
+            try:
+                os.dup2(saved, fd)
+            finally:
+                os.close(saved)
+        self._warnings.__exit__(exc_type, exc, tb)
+        self._sink.close()
+        return False
