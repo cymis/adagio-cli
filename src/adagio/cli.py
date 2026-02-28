@@ -1,10 +1,12 @@
 from typing import Annotated
 import typer
 from pathlib import Path
+from concurrent.futures import TimeoutError as FutureTimeoutError
 
 from adagio.backend import (
     AgentLaunchRequest,
     DEFAULT_FLUX_IMAGE,
+    FluxRPCSession,
     InstallRequest,
     install_compute_environment,
     run_agent_once,
@@ -19,6 +21,8 @@ from rich.live import Live
 app = typer.Typer(
     help="Adagio command line tool for processing pipelines created with the Adagio GUI."
 )
+debug_app = typer.Typer(help="Debug and diagnostics commands.")
+app.add_typer(debug_app, name="debug")
 console = Console()
 
 
@@ -170,7 +174,7 @@ def install_cmd(
         raise typer.Exit(1)
 
 
-@app.command("dispatch")
+@debug_app.command("dispatch")
 def dispatch_cmd(
     command: Annotated[
         str,
@@ -242,6 +246,77 @@ def dispatch_cmd(
 
     if not report.ok:
         raise typer.Exit(report.returncode)
+
+
+@debug_app.command("ping")
+def ping_cmd(
+    message: Annotated[
+        str,
+        typer.Option(
+            "--message",
+            help="Message payload sent to the RPC ping handler.",
+        ),
+    ] = "hello from host",
+    timeout: Annotated[
+        float,
+        typer.Option(
+            "--timeout",
+            help="Seconds to wait for the ping RPC result.",
+        ),
+    ] = 30.0,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            help="Path to compute-environment.json. Defaults to the installer output location.",
+        ),
+    ] = None,
+    workdir: Annotated[
+        Path | None,
+        typer.Option(
+            "--workdir",
+            help="Host path bind-mounted into the runtime for the agent command.",
+        ),
+    ] = None,
+    container_workdir: Annotated[
+        str,
+        typer.Option(
+            "--container-workdir",
+            help="Target mount path inside the runtime for --workdir.",
+        ),
+    ] = "/workspace",
+):
+    """Verify RPC bridge health with a ping/pong roundtrip."""
+    try:
+        with FluxRPCSession(
+            config_path=config,
+            workdir=workdir,
+            container_workdir=container_workdir,
+        ) as session:
+            sub_id = session.subscribe(
+                lambda ev: console.print(
+                    f"[yellow]event>[/yellow] {ev.event_type}: {ev.payload}"
+                )
+            )
+            try:
+                result = session.call("ping", message=message).result(timeout=timeout)
+            finally:
+                session.unsubscribe(sub_id)
+    except FutureTimeoutError:
+        console.print(f"[red]RPC ping timed out after {timeout}s[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]RPC ping failed:[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print(
+        Panel.fit(
+            f"Ping request: [bold]{message}[/bold]\n"
+            f"Ping result: [bold]{result}[/bold]",
+            title="[cyan]Adagio RPC Ping[/cyan]",
+            border_style="cyan",
+        )
+    )
 
 
 @app.callback(invoke_without_command=True)

@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -15,12 +12,18 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Sequence
-from urllib import parse, request
+from typing import Any, Callable
 import uuid
-import inspect
 
-from adagio.backend.environment_setup import _default_config_path
+from adagio.backend.agent.protocol import (
+    BridgeEvent,
+    FluxRPCClient,
+    RPCRequest,
+    RPCResult,
+    RemoteCallError,
+)
+from adagio.backend.bridge import BridgeServer
+from adagio.backend.setup import _default_config_path
 from adagio.backend.util import build_zipapp_from_subpackage
 
 
@@ -29,6 +32,8 @@ class RuntimeConfig:
     engine: str
     docker_context: str | None = None
     docker_host: str | None = None
+    colima_profile: str | None = None
+    bridge_host: str | None = None
     via_wsl: bool = False
 
 
@@ -42,16 +47,8 @@ class ComputeEnvironmentConfig:
 
 
 @dataclass(slots=True)
-class BridgeEvent:
-    timestamp: str
-    event_type: str
-    payload: dict[str, Any]
-
-
-@dataclass(slots=True)
 class AgentLaunchRequest:
     agent_command: str | None
-    commands: list[str] = field(default_factory=list)
     config_path: Path | None = None
     workdir: Path | None = None
     container_workdir: str = "/workspace"
@@ -93,273 +90,12 @@ EventCallback = Callable[[BridgeEvent], None]
 StartCallback = Callable[[BridgeBinding], None]
 
 
-@dataclass(slots=True)
-class RPCRequest:
-    id: str
-    method: str
-    params: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class RPCResult:
-    id: str
-    result: Any | None = None
-    error: dict[str, Any] | None = None
-
-
-@dataclass(slots=True)
-class RPCHandlerContext:
-    client: "FluxRPCClient"
-    call: RPCRequest
-
-    @property
-    def call_id(self) -> str:
-        return self.call.id
-
-    @property
-    def method(self) -> str:
-        return self.call.method
-
-    def emit(self, event_type: str, **payload: Any):
-        self.client.send_event(
-            event_type=event_type,
-            call_id=self.call.id,
-            method=self.call.method,
-            **payload,
-        )
-
-
-class _BridgeState:
-    def __init__(self, initial_commands: Sequence[str]):
-        self._events: queue.Queue[BridgeEvent] = queue.Queue()
-        self._commands: queue.Queue[str] = queue.Queue()
-        self._rpc_calls: queue.Queue[RPCRequest] = queue.Queue()
-        self._rpc_results: queue.Queue[RPCResult] = queue.Queue()
-        for item in initial_commands:
-            self._commands.put(item)
-
-    def add_event(self, payload: dict[str, Any]):
-        event_type = str(payload.get("type", "event"))
-        self._events.put(
-            BridgeEvent(
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                event_type=event_type,
-                payload=payload,
-            )
-        )
-
-    def pop_event(self) -> BridgeEvent | None:
-        try:
-            return self._events.get_nowait()
-        except queue.Empty:
-            return None
-
-    def add_command(self, command: str):
-        self._commands.put(command)
-
-    def next_command(self) -> str | None:
-        try:
-            return self._commands.get_nowait()
-        except queue.Empty:
-            return None
-
-    def add_rpc_call(self, call: RPCRequest):
-        self._rpc_calls.put(call)
-
-    def next_rpc_call(self) -> RPCRequest | None:
-        try:
-            return self._rpc_calls.get_nowait()
-        except queue.Empty:
-            return None
-
-    def add_rpc_result(self, result: RPCResult):
-        self._rpc_results.put(result)
-
-    def pop_rpc_result(self) -> RPCResult | None:
-        try:
-            return self._rpc_results.get_nowait()
-        except queue.Empty:
-            return None
-
-
-class BridgeServer:
-    def __init__(
-        self,
-        bind: str,
-        port: int,
-        token: str,
-        initial_commands: Sequence[str],
-    ):
-        self.token = token
-        self._state = _BridgeState(initial_commands)
-        handler = _make_bridge_handler(self._state, token)
-        self._httpd = ThreadingHTTPServer((bind, port), handler)
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
-
-    @property
-    def port(self) -> int:
-        return int(self._httpd.server_address[1])
-
-    @property
-    def host_url(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
-
-    def start(self):
-        self._thread.start()
-
-    def stop(self):
-        self._httpd.shutdown()
-        self._httpd.server_close()
-        self._thread.join(timeout=2)
-
-    def add_command(self, command: str):
-        self._state.add_command(command)
-
-    def add_rpc_call(self, call: RPCRequest):
-        self._state.add_rpc_call(call)
-
-    def drain_events(self) -> list[BridgeEvent]:
-        events: list[BridgeEvent] = []
-        while (event := self._state.pop_event()) is not None:
-            events.append(event)
-        return events
-
-    def drain_rpc_results(self) -> list[RPCResult]:
-        results: list[RPCResult] = []
-        while (result := self._state.pop_rpc_result()) is not None:
-            results.append(result)
-        return results
-
-    def __enter__(self) -> "BridgeServer":
-        self.start()
-        return self
-
-    def __exit__(self, *_args):
-        self.stop()
-
-
 def _default_bridge_host(engine: str) -> str:
     if engine == "podman":
         return "host.containers.internal"
     if engine in {"docker", "nerdctl"}:
         return "host.docker.internal"
     return "127.0.0.1"
-
-
-def _make_bridge_handler(state: _BridgeState, token: str):
-    class BridgeHandler(BaseHTTPRequestHandler):
-        server_version = "AdagioBridge/0.1"
-
-        def log_message(self, _format: str, *_args):
-            # Keep CLI output clean and rely on explicit event logging.
-            return
-
-        def _authorized(self) -> bool:
-            auth = self.headers.get("Authorization", "")
-            if auth.startswith("Bearer ") and secrets.compare_digest(
-                auth.removeprefix("Bearer ").strip(), token
-            ):
-                return True
-
-            parsed = parse.urlparse(self.path)
-            query_token = parse.parse_qs(parsed.query).get("token", [""])[0]
-            return bool(query_token) and secrets.compare_digest(query_token, token)
-
-        def _read_json(self) -> dict[str, Any] | None:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length)
-            try:
-                value = json.loads(raw.decode("utf-8"))
-            except json.JSONDecodeError:
-                return None
-            return value if isinstance(value, dict) else None
-
-        def _send_json(self, status: int, payload: dict[str, Any] | None = None):
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            if payload is not None:
-                self.wfile.write(json.dumps(payload).encode("utf-8"))
-
-        def do_GET(self):
-            path = parse.urlparse(self.path).path
-            if path == "/health":
-                self._send_json(HTTPStatus.OK, {"ok": True})
-                return
-
-            if path == "/commands/next":
-                if not self._authorized():
-                    self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
-                    return
-
-                command = state.next_command()
-                if command is None:
-                    self._send_json(HTTPStatus.NO_CONTENT)
-                else:
-                    self._send_json(HTTPStatus.OK, {"command": command})
-                return
-
-            if path == "/rpc/next":
-                if not self._authorized():
-                    self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
-                    return
-
-                call = state.next_rpc_call()
-                if call is None:
-                    self._send_json(HTTPStatus.NO_CONTENT)
-                else:
-                    self._send_json(
-                        HTTPStatus.OK,
-                        {"id": call.id, "method": call.method, "params": call.params},
-                    )
-                return
-
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not-found"})
-
-        def do_POST(self):
-            path = parse.urlparse(self.path).path
-            if path not in {"/events", "/commands", "/rpc/result"}:
-                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not-found"})
-                return
-
-            if not self._authorized():
-                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
-                return
-
-            payload = self._read_json()
-            if payload is None:
-                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid-json"})
-                return
-
-            if path == "/events":
-                state.add_event(payload)
-                self._send_json(HTTPStatus.ACCEPTED, {"accepted": True})
-                return
-
-            if path == "/rpc/result":
-                call_id = payload.get("id")
-                if not isinstance(call_id, str) or not call_id:
-                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "missing-id"})
-                    return
-
-                result = RPCResult(
-                    id=call_id,
-                    result=payload.get("result"),
-                    error=payload.get("error") if isinstance(payload.get("error"), dict) else None,
-                )
-                state.add_rpc_result(result)
-                self._send_json(HTTPStatus.ACCEPTED, {"accepted": True})
-                return
-
-            command = payload.get("command")
-            if not isinstance(command, str) or not command.strip():
-                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "missing-command"})
-                return
-
-            state.add_command(command)
-            self._send_json(HTTPStatus.ACCEPTED, {"accepted": True})
-
-    return BridgeHandler
 
 
 def load_compute_environment(config_path: Path | None = None) -> ComputeEnvironmentConfig:
@@ -382,6 +118,8 @@ def load_compute_environment(config_path: Path | None = None) -> ComputeEnvironm
         engine=engine,
         docker_context=runtime_data.get("docker_context"),
         docker_host=runtime_data.get("docker_host"),
+        colima_profile=runtime_data.get("colima_profile"),
+        bridge_host=runtime_data.get("bridge_host"),
         via_wsl=bool(runtime_data.get("via_wsl", False)),
     )
     return ComputeEnvironmentConfig(
@@ -419,7 +157,10 @@ def _build_runtime_command(
 
     command: list[str]
     if engine in {"docker", "podman", "nerdctl"}:
-        command = [engine]
+        if engine == "nerdctl" and config.platform == "Darwin" and config.runtime.colima_profile:
+            command = ["colima", "--profile", config.runtime.colima_profile, "nerdctl"]
+        else:
+            command = [engine]
         if engine == "docker" and config.runtime.docker_context:
             command.extend(["--context", config.runtime.docker_context])
 
@@ -469,48 +210,11 @@ def _build_runtime_command(
 
 _BUNDLED_AGENT_CONTAINER_DIR = "/tmp/adagio-agent"
 _BUNDLED_AGENT_FILENAME = "rpc-agent.pyz"
-_BUNDLED_AGENT_SUBPACKAGE = "adagio.embedded_agent"
+_BUNDLED_AGENT_SUBPACKAGE = "adagio.backend.agent"
 
 
 def _build_bundled_agent_zipapp(target: Path):
     build_zipapp_from_subpackage(target, _BUNDLED_AGENT_SUBPACKAGE)
-
-
-def _post_bridge_json(url: str, token: str, payload: dict[str, Any]) -> None:
-    req = request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        },
-        method="POST",
-    )
-    with request.urlopen(req, timeout=10) as response:
-        if response.status not in {HTTPStatus.OK, HTTPStatus.ACCEPTED}:
-            raise RuntimeError(f"Bridge request failed with status {response.status}")
-
-
-def _get_bridge_json(url: str, token: str) -> tuple[int, dict[str, Any] | None]:
-    req = request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {token}",
-        },
-        method="GET",
-    )
-    with request.urlopen(req, timeout=10) as response:
-        if response.status == HTTPStatus.NO_CONTENT:
-            return int(response.status), None
-
-        raw = response.read().decode("utf-8")
-        if not raw:
-            return int(response.status), None
-        return int(response.status), json.loads(raw)
-
-
-def enqueue_bridge_command(bridge_url: str, token: str, command: str) -> None:
-    _post_bridge_json(f"{bridge_url.rstrip('/')}/commands", token, {"command": command})
 
 
 def _start_stream_reader(
@@ -546,13 +250,16 @@ def run_agent_once(
     config = load_compute_environment(request.config_path)
     token = request.bridge_token or secrets.token_urlsafe(18)
 
-    bridge_host = request.bridge_host or _default_bridge_host(config.runtime.engine)
+    bridge_host = (
+        request.bridge_host
+        or config.runtime.bridge_host
+        or _default_bridge_host(config.runtime.engine)
+    )
 
     server = BridgeServer(
         bind=request.bridge_bind,
         port=request.bridge_port,
         token=token,
-        initial_commands=request.commands,
     )
     server.start()
 
@@ -633,147 +340,6 @@ def run_agent_once(
     )
 
 
-def send_bridge_event(
-    bridge_url: str,
-    token: str,
-    event_type: str,
-    **payload: Any,
-):
-    body = {"type": event_type, **payload}
-    _post_bridge_json(f"{bridge_url.rstrip('/')}/events", token, body)
-
-
-class RemoteCallError(RuntimeError):
-    def __init__(self, call_id: str, detail: dict[str, Any]):
-        self.call_id = call_id
-        self.detail = detail
-        message = str(detail.get("message", "remote call failed"))
-        super().__init__(f"RPC call {call_id} failed: {message}")
-
-
-class FluxRPCClient:
-    def __init__(self, bridge_url: str, token: str):
-        self.bridge_url = bridge_url.rstrip("/")
-        self.token = token
-
-    @classmethod
-    def from_env(cls) -> "FluxRPCClient":
-        bridge_url = os.environ.get("ADAGIO_BRIDGE_URL", "").strip()
-        token = os.environ.get("ADAGIO_BRIDGE_TOKEN", "").strip()
-        if not bridge_url or not token:
-            raise ValueError(
-                "ADAGIO_BRIDGE_URL and ADAGIO_BRIDGE_TOKEN must be present in environment"
-            )
-        return cls(bridge_url=bridge_url, token=token)
-
-    def next_call(self) -> RPCRequest | None:
-        status, payload = _get_bridge_json(
-            f"{self.bridge_url}/rpc/next",
-            token=self.token,
-        )
-        if status == HTTPStatus.NO_CONTENT or payload is None:
-            return None
-
-        call_id = str(payload.get("id", "")).strip()
-        method = str(payload.get("method", "")).strip()
-        params = payload.get("params")
-        if not call_id or not method:
-            raise RuntimeError("Invalid RPC payload from bridge")
-        if not isinstance(params, dict):
-            params = {}
-        return RPCRequest(id=call_id, method=method, params=params)
-
-    def submit_result(self, call_id: str, result: Any) -> None:
-        _post_bridge_json(
-            f"{self.bridge_url}/rpc/result",
-            token=self.token,
-            payload={"id": call_id, "result": result},
-        )
-
-    def submit_error(
-        self,
-        call_id: str,
-        message: str,
-        *,
-        error_type: str = "RemoteError",
-    ) -> None:
-        _post_bridge_json(
-            f"{self.bridge_url}/rpc/result",
-            token=self.token,
-            payload={
-                "id": call_id,
-                "error": {
-                    "type": error_type,
-                    "message": message,
-                },
-            },
-        )
-
-    def send_event(self, event_type: str, **payload: Any):
-        send_bridge_event(
-            bridge_url=self.bridge_url,
-            token=self.token,
-            event_type=event_type,
-            **payload,
-        )
-
-
-def serve_rpc_loop(
-    handlers: dict[str, Callable[..., Any]],
-    client: FluxRPCClient | None = None,
-    *,
-    poll_interval: float = 0.2,
-    max_calls: int | None = None,
-):
-    rpc = client or FluxRPCClient.from_env()
-    handled_calls = 0
-    while True:
-        call = rpc.next_call()
-        if call is None:
-            time.sleep(poll_interval)
-            continue
-
-        handler = handlers.get(call.method)
-        if handler is None:
-            rpc.submit_error(
-                call.id,
-                f"Unknown method `{call.method}`",
-                error_type="UnknownMethod",
-            )
-            continue
-
-        ctx = RPCHandlerContext(client=rpc, call=call)
-        try:
-            result = _invoke_rpc_handler(handler, ctx, call.params)
-            rpc.submit_result(call.id, result)
-        except Exception as e:  # pragma: no cover - agent-side safety net
-            rpc.submit_error(call.id, str(e), error_type=type(e).__name__)
-
-        handled_calls += 1
-        if max_calls is not None and handled_calls >= max_calls:
-            return
-
-
-def _invoke_rpc_handler(
-    handler: Callable[..., Any],
-    ctx: RPCHandlerContext,
-    params: dict[str, Any],
-) -> Any:
-    try:
-        sig = inspect.signature(handler)
-        param_names = sig.parameters
-        supports_kwargs = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in param_names.values()
-        )
-        if "ctx" in param_names or supports_kwargs:
-            return handler(ctx=ctx, **params)
-    except (TypeError, ValueError):
-        # Some callables cannot be introspected; use a runtime fallback.
-        pass
-
-    return handler(**params)
-
-
 class FluxRPCSession:
     def __init__(
         self,
@@ -786,7 +352,6 @@ class FluxRPCSession:
         bridge_port: int = 0,
         bridge_host: str | None = None,
         bridge_token: str | None = None,
-        commands: list[str] | None = None,
         on_output: OutputCallback | None = None,
         on_event: EventCallback | None = None,
     ):
@@ -799,7 +364,6 @@ class FluxRPCSession:
             bridge_port=bridge_port,
             bridge_host=bridge_host,
             bridge_token=bridge_token,
-            commands=list(commands or []),
         )
         self._agent_command_override = agent_command
         self._on_output = on_output
@@ -860,13 +424,16 @@ class FluxRPCSession:
 
         config = load_compute_environment(self._request.config_path)
         token = self._request.bridge_token or secrets.token_urlsafe(18)
-        bridge_host = self._request.bridge_host or _default_bridge_host(config.runtime.engine)
+        bridge_host = (
+            self._request.bridge_host
+            or config.runtime.bridge_host
+            or _default_bridge_host(config.runtime.engine)
+        )
 
         server = BridgeServer(
             bind=self._request.bridge_bind,
             port=self._request.bridge_port,
             token=token,
-            initial_commands=self._request.commands,
         )
         server.start()
         try:
@@ -874,7 +441,6 @@ class FluxRPCSession:
             agent_bridge_url = f"http://{bridge_host}:{server.port}"
             launch_request = AgentLaunchRequest(
                 agent_command=self._request.agent_command,
-                commands=list(self._request.commands),
                 config_path=self._request.config_path,
                 workdir=self._request.workdir,
                 container_workdir=self._request.container_workdir,
@@ -982,6 +548,7 @@ class FluxRPCSession:
                 if self._stop_requested.is_set():
                     if process.poll() is None:
                         process.terminate()
+                    break
 
                 if process.poll() is not None and self._line_queue.empty():
                     break
@@ -1059,20 +626,19 @@ class FluxRPCSession:
     def call_blocking(self, method: str, timeout: float | None = None, **params: Any) -> Any:
         return self.call(method, **params).result(timeout=timeout)
 
-    def enqueue_command(self, command: str):
-        if self._server is None or self._returncode is not None:
-            raise RuntimeError("RPC session is not active; call start() first")
-        self._server.add_command(command)
-
     def close(self):
         if self._process is None:
             return
 
         self._stop_requested.set()
+        if self._process.poll() is None:
+            self._process.terminate()
         if self._monitor_thread is not None:
-            self._monitor_thread.join(timeout=5)
+            self._monitor_thread.join(timeout=1)
         if self._process.poll() is None:
             self._process.kill()
+        if self._monitor_thread is not None and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=1)
         if self._agent_bundle_tmpdir is not None:
             self._agent_bundle_tmpdir.cleanup()
             self._agent_bundle_tmpdir = None

@@ -1,20 +1,21 @@
-from adagio.backend.environment_setup import (
+from adagio.backend.setup import (
     DEFAULT_FLUX_IMAGE,
     InstallRequest,
     install_compute_environment,
+)
+from adagio.backend.agent.protocol import (
+    FluxRPCClient,
+    RPCHandlerContext,
+    RemoteCallError,
+    serve_rpc_loop,
 )
 from adagio.backend.dispatch import (
     AgentLaunchRequest,
     AgentRunReport,
     BridgeBinding,
-    FluxRPCClient,
     FluxRPCSession,
-    RPCHandlerContext,
-    RemoteCallError,
     RuntimeMount,
-    enqueue_bridge_command,
     run_agent_once,
-    serve_rpc_loop,
 )
 
 __all__ = [
@@ -28,7 +29,6 @@ __all__ = [
     "RPCHandlerContext",
     "RemoteCallError",
     "RuntimeMount",
-    "enqueue_bridge_command",
     "install_compute_environment",
     "run_agent_once",
     "serve_rpc_loop",

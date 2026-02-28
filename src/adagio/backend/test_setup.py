@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from adagio.backend.base import CommandResult
-from adagio.backend.environment_setup import (
+from adagio.backend.setup import (
     InstallRequest,
     _extract_wsl_runtime,
     _normalize_image_ref,
@@ -16,7 +16,7 @@ from adagio.backend.environment_setup import (
 )
 
 
-class TestEnvironmentSetup(unittest.TestCase):
+class TestSetup(unittest.TestCase):
     def test_select_linux_runtime_priority(self):
         def fake_which(cmd: str) -> str | None:
             installed = {
@@ -55,8 +55,8 @@ class TestEnvironmentSetup(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "compute-environment.json"
-            with patch("adagio.backend.environment_setup.platform.system", return_value="Linux"):
-                with patch("adagio.backend.environment_setup._default_config_path", return_value=cfg):
+            with patch("adagio.backend.setup.platform.system", return_value="Linux"):
+                with patch("adagio.backend.setup._default_config_path", return_value=cfg):
                     report = install_compute_environment(
                         InstallRequest(apply=True, image="example/flux:1"),
                         runner=fake_runner,
@@ -82,8 +82,8 @@ class TestEnvironmentSetup(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "compute-environment.json"
-            with patch("adagio.backend.environment_setup.platform.system", return_value="Linux"):
-                with patch("adagio.backend.environment_setup._default_config_path", return_value=cfg):
+            with patch("adagio.backend.setup.platform.system", return_value="Linux"):
+                with patch("adagio.backend.setup._default_config_path", return_value=cfg):
                     report = install_compute_environment(
                         InstallRequest(apply=False),
                         runner=fake_runner,
@@ -94,6 +94,44 @@ class TestEnvironmentSetup(unittest.TestCase):
             self.assertFalse(cfg.exists())
             skipped = [step for step in report.steps if step.status == "skipped"]
             self.assertGreaterEqual(len(skipped), 2)
+
+    def test_macos_apply_uses_colima_nerdctl(self):
+        calls: list[list[str]] = []
+
+        def fake_runner(cmd: list[str]) -> CommandResult:
+            calls.append(cmd)
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+        def fake_which(cmd: str) -> str | None:
+            if cmd == "colima":
+                return "/opt/homebrew/bin/colima"
+            return None
+
+        with TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "compute-environment.json"
+            with patch("adagio.backend.setup.platform.system", return_value="Darwin"):
+                with patch("adagio.backend.setup._default_config_path", return_value=cfg):
+                    report = install_compute_environment(
+                        InstallRequest(apply=True, image="example/flux:2", macos_profile="adagio"),
+                        runner=fake_runner,
+                        which=fake_which,
+                    )
+
+            self.assertTrue(report.ok)
+            self.assertEqual(report.runtime, "nerdctl")
+            self.assertTrue(cfg.exists())
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertEqual(data["runtime"]["engine"], "nerdctl")
+            self.assertEqual(data["runtime"]["colima_profile"], "adagio")
+            self.assertEqual(data["runtime"]["bridge_host"], "host.lima.internal")
+            self.assertIn(
+                ["colima", "start", "--profile", "adagio", "--runtime", "containerd"],
+                calls,
+            )
+            self.assertIn(
+                ["colima", "--profile", "adagio", "nerdctl", "pull", "docker.io/example/flux:2"],
+                calls,
+            )
 
 
 if __name__ == "__main__":
