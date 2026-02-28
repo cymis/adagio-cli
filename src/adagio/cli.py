@@ -2,6 +2,8 @@ from typing import Annotated
 import typer
 from pathlib import Path
 from concurrent.futures import TimeoutError as FutureTimeoutError
+import shlex
+import json
 
 from adagio.backend import (
     AgentLaunchRequest,
@@ -11,6 +13,7 @@ from adagio.backend import (
     install_compute_environment,
     run_agent_once,
 )
+from adagio.backend.dispatch import load_compute_environment
 from rich.console import Console
 from rich.panel import Panel
 
@@ -21,7 +24,7 @@ from rich.live import Live
 app = typer.Typer(
     help="Adagio command line tool for processing pipelines created with the Adagio GUI."
 )
-debug_app = typer.Typer(help="Debug and diagnostics commands.")
+debug_app = typer.Typer(help="Debug and diagnostics commands.", no_args_is_help=True)
 app.add_typer(debug_app, name="debug")
 console = Console()
 
@@ -176,13 +179,19 @@ def install_cmd(
 
 @debug_app.command("dispatch")
 def dispatch_cmd(
-    command: Annotated[
-        str,
+    command_parts: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="Command and arguments. Use `--` before this to stop option parsing.",
+        ),
+    ] = None,
+    command_opt: Annotated[
+        str | None,
         typer.Option(
             "--command",
             help="One-off shell command executed inside the standardized compute environment.",
         ),
-    ],
+    ] = None,
     config: Annotated[
         Path | None,
         typer.Option(
@@ -205,7 +214,23 @@ def dispatch_cmd(
         ),
     ] = "/workspace",
 ):
-    """Run a one-off command in the configured compute environment."""
+    """Run a one-off command in the configured compute environment.
+
+    Use either:
+    1. `adagio debug dispatch [opts] -- <cmd> [args...]`
+    2. `adagio debug dispatch [opts] --command \"<cmd> [args...]\"`
+    """
+
+    command_from_args = shlex.join(command_parts) if command_parts else None
+
+    if command_from_args and command_opt and command_from_args != command_opt:
+        console.print("[red]Provide command either as an argument or with --command, not both.[/red]")
+        raise typer.Exit(2)
+
+    command = command_opt or command_from_args
+    if not command:
+        console.print("[red]Missing command. Provide it as an argument or with --command.[/red]")
+        raise typer.Exit(2)
 
     def _print_output(stream_name: str, line: str):
         style = "cyan" if stream_name == "stdout" else "magenta"
@@ -295,7 +320,7 @@ def ping_cmd(
         ) as session:
             sub_id = session.subscribe(
                 lambda ev: console.print(
-                    f"[yellow]event>[/yellow] {ev.event_type}: {ev.payload}"
+                    f"[yellow]event>[/yellow] {ev.event_type}: {ev.payload['message']}"
                 )
             )
             try:
@@ -317,6 +342,64 @@ def ping_cmd(
             border_style="cyan",
         )
     )
+
+
+@debug_app.command("info")
+def info_cmd(
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            help="Path to compute-environment.json. Defaults to the installer output location.",
+        ),
+    ] = None,
+):
+    """Show compute environment configuration and how to update it."""
+    try:
+        env = load_compute_environment(config)
+    except FileNotFoundError as e:
+        path = Path(e.filename) if e.filename else (config or Path("compute-environment.json"))
+        console.print(
+            Panel.fit(
+                f"Config file not found:\n[bold]{path}[/bold]\n\n"
+                "Create it by running:\n"
+                "[bold]adagio install --apply[/bold]\n\n"
+                "Or provide an explicit path with:\n"
+                "[bold]adagio debug info --config /path/to/compute-environment.json[/bold]",
+                title="[red]Adagio Debug Info[/red]",
+                border_style="red",
+            )
+        )
+        raise typer.Exit(1)
+    except ValueError as e:
+        console.print(f"[red]Invalid compute environment config:[/red] {e}")
+        raise typer.Exit(1)
+
+    runtime = env.runtime
+    console.print(
+        Panel.fit(
+            f"Config path: [bold]{env.path}[/bold]\n"
+            f"Platform: [bold]{env.platform}[/bold]\n"
+            f"Image: [bold]{env.image}[/bold]\n"
+            f"Runtime engine: [bold]{runtime.engine}[/bold]\n"
+            f"Bridge host: [bold]{runtime.bridge_host or 'auto'}[/bold]\n"
+            f"Docker context: [bold]{runtime.docker_context or 'unset'}[/bold]\n"
+            f"Docker host: [bold]{runtime.docker_host or 'unset'}[/bold]\n"
+            f"Colima profile: [bold]{runtime.colima_profile or 'unset'}[/bold]\n"
+            f"WSL wrapper: [bold]{runtime.via_wsl}[/bold]",
+            title="[cyan]Adagio Debug Info[/cyan]",
+            border_style="cyan",
+        )
+    )
+
+    console.print("[bold]Raw config JSON[/bold]")
+    console.print(Panel.fit(json.dumps(env.raw, indent=2), border_style="blue"))
+
+    console.print("[bold]Modify this config[/bold]")
+    console.print("1. Edit the JSON file shown in Config path.")
+    console.print("2. Update values like `runtime.engine`, `runtime.bridge_host`, or `flux.image`.")
+    console.print("3. Re-run `adagio debug info` to verify changes.")
+    console.print("4. Use `--config <path>` with debug commands if you keep multiple configs.")
 
 
 @app.callback(invoke_without_command=True)
