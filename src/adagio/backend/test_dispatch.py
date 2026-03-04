@@ -25,6 +25,7 @@ from adagio.backend.dispatch import (
     FluxRPCSession,
     RuntimeMount,
     RuntimeConfig,
+    _bundle_temp_parent,
     _build_bundled_agent_zipapp,
     _build_runtime_command,
     _default_bridge_host,
@@ -181,6 +182,39 @@ class TestDispatchBackend(unittest.TestCase):
         )
         self.assertIn("-v", cmd)
         self.assertIn("/tmp/adagio-agent-host:/tmp/adagio-agent:ro", cmd)
+
+    def test_bundle_temp_parent_uses_workdir(self):
+        config = ComputeEnvironmentConfig(
+            path=Path("/tmp/compute-environment.json"),
+            platform="Linux",
+            image="docker.io/fluxrm/flux-sched:latest",
+            runtime=RuntimeConfig(engine="podman"),
+        )
+        parent = _bundle_temp_parent(config, Path("/tmp/work"))
+        self.assertEqual(parent, Path("/tmp/work").resolve())
+
+    def test_bundle_temp_parent_macos_colima_nerdctl_uses_cache(self):
+        config = ComputeEnvironmentConfig(
+            path=Path("/tmp/compute-environment.json"),
+            platform="Darwin",
+            image="docker.io/fluxrm/flux-sched:latest",
+            runtime=RuntimeConfig(
+                engine="nerdctl",
+                colima_profile="adagio",
+            ),
+        )
+        parent = _bundle_temp_parent(config, None)
+        self.assertEqual(parent, Path.home() / ".cache" / "adagio")
+
+    def test_bundle_temp_parent_default_none(self):
+        config = ComputeEnvironmentConfig(
+            path=Path("/tmp/compute-environment.json"),
+            platform="Linux",
+            image="docker.io/fluxrm/flux-sched:latest",
+            runtime=RuntimeConfig(engine="podman"),
+        )
+        parent = _bundle_temp_parent(config, None)
+        self.assertIsNone(parent)
 
     def test_build_bundled_agent_zipapp(self):
         with TemporaryDirectory() as tmp:

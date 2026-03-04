@@ -209,6 +209,24 @@ def _build_runtime_command(
     return command
 
 
+def _bundle_temp_parent(
+    config: ComputeEnvironmentConfig,
+    workdir: Path | None,
+) -> Path | None:
+    if workdir is not None:
+        return workdir.resolve()
+
+    # Colima + nerdctl on macOS may not expose system temp paths into the VM.
+    if (
+        config.platform == "Darwin"
+        and config.runtime.engine == "nerdctl"
+        and config.runtime.colima_profile
+    ):
+        return Path.home() / ".cache" / "adagio"
+
+    return None
+
+
 _BUNDLED_AGENT_CONTAINER_DIR = "/tmp/adagio-agent"
 _BUNDLED_AGENT_FILENAME = "rpc-agent.pyz"
 _BUNDLED_AGENT_SUBPACKAGE = "adagio.backend.agent"
@@ -457,12 +475,12 @@ class FluxRPCSession:
                 runtime_mounts=list(self._request.runtime_mounts),
             )
             if self._agent_command_override is None:
-                bundle_dir: str | None = None
-                if self._request.workdir is not None:
-                    bundle_dir = str(self._request.workdir.resolve())
+                bundle_parent = _bundle_temp_parent(config, self._request.workdir)
+                if bundle_parent is not None and self._request.workdir is None:
+                    bundle_parent.mkdir(parents=True, exist_ok=True)
                 bundle_tmpdir = tempfile.TemporaryDirectory(
                     prefix=".adagio-agent-runtime-",
-                    dir=bundle_dir,
+                    dir=str(bundle_parent) if bundle_parent is not None else None,
                 )
                 bundle_file = Path(bundle_tmpdir.name) / _BUNDLED_AGENT_FILENAME
                 _build_bundled_agent_zipapp(bundle_file)
