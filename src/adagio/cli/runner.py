@@ -10,6 +10,7 @@ from rich.console import Console
 
 DEFAULT_CONTAINER_IMAGE = "sloth-adagio-cli:latest"
 HOST_MOUNT_POINT = "/host"
+DEFAULT_OUTPUT_DIRNAME = "adagio-outputs"
 
 
 def run_pipeline_from_kwargs(
@@ -31,9 +32,11 @@ def run_pipeline_from_kwargs(
     pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
     parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
     arguments = parsed_pipeline.signature.to_default_arguments()
+    output_names = [output.name for output in parsed_pipeline.signature.outputs]
 
     input_names = {name for _, name in input_bindings}
     param_names = {name for _, name in param_bindings}
+    output_name_set = set(output_names)
 
     if arguments_file is not None:
         file_data = json.loads(arguments_file.read_text(encoding="utf-8"))
@@ -51,9 +54,17 @@ def run_pipeline_from_kwargs(
                 "Unknown parameters in arguments file: " + ", ".join(unknown_params)
             )
 
+        unknown_outputs: list[str] = []
+        if isinstance(arguments_data.outputs, dict):
+            unknown_outputs = sorted(set(arguments_data.outputs) - output_name_set)
+        if unknown_outputs:
+            raise SystemExit(
+                "Unknown outputs in arguments file: " + ", ".join(unknown_outputs)
+            )
+
         arguments.inputs.update(arguments_data.inputs)
         arguments.parameters.update(arguments_data.parameters)
-        if arguments_data.outputs:
+        if arguments_data.outputs is not None:
             arguments.outputs = arguments_data.outputs
 
     for ident, original in input_bindings:
@@ -77,6 +88,12 @@ def run_pipeline_from_kwargs(
             f"param:{name}" for name in missing_params
         ]
         raise SystemExit("Missing required arguments: " + ", ".join(missing))
+
+    arguments.outputs = _resolve_output_destinations(
+        outputs=arguments.outputs,
+        output_names=output_names,
+        cwd=Path.cwd().resolve(),
+    )
 
     suppress_header = _is_truthy(os.getenv("ADAGIO_SUPPRESS_RUN_HEADER"))
     if not suppress_header:
@@ -113,6 +130,35 @@ def run_pipeline_from_kwargs(
 def _is_missing(value: Any) -> bool:
     """Treat placeholders and null values as missing."""
     return value is None or value == "<fill me>"
+
+
+def _is_missing_output(value: Any) -> bool:
+    if not isinstance(value, str):
+        return True
+    return value == "" or value == "<fill me>"
+
+
+def _resolve_output_destinations(
+    *,
+    outputs: str | dict[str, str],
+    output_names: list[str],
+    cwd: Path,
+) -> str | dict[str, str]:
+    default_output_dir = (cwd / DEFAULT_OUTPUT_DIRNAME).resolve()
+    if isinstance(outputs, str):
+        if _is_missing_output(outputs):
+            return str(default_output_dir)
+        return outputs
+
+    if not isinstance(outputs, dict):
+        raise TypeError("Unsupported outputs configuration.")
+
+    resolved = dict(outputs)
+    for output_name in output_names:
+        value = resolved.get(output_name)
+        if _is_missing_output(value):
+            resolved[output_name] = str((default_output_dir / output_name).resolve())
+    return resolved
 
 
 def _probe_local_qiime_error() -> str | None:
