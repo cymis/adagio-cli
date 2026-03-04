@@ -153,7 +153,7 @@ class TestDispatchBackend(unittest.TestCase):
             agent_bridge_url="http://host.lima.internal:49152",
             token="abc123",
         )
-        self.assertEqual(cmd[:5], ["colima", "--profile", "adagio", "nerdctl", "run"])
+        self.assertEqual(cmd[:6], ["colima", "--profile", "adagio", "nerdctl", "--", "run"])
         self.assertIn("ADAGIO_BRIDGE_URL=http://host.lima.internal:49152", cmd)
 
     def test_build_runtime_command_includes_runtime_mounts(self):
@@ -235,6 +235,19 @@ class TestDispatchBackend(unittest.TestCase):
         )
         with self.assertRaises(RemoteCallError):
             future.result(timeout=1)
+
+    def test_rpc_session_end_exception_includes_stderr_tail(self):
+        session = FluxRPCSession(agent_command="true")
+        session._returncode = 1
+        session._capture_output_line("stdout", "ignored")
+        session._capture_output_line("stderr", "line 1")
+        session._capture_output_line("stderr", "line 2")
+
+        message = str(session._session_end_exception())
+        self.assertIn("RPC session ended with return code 1", message)
+        self.assertIn("Runtime stderr tail:", message)
+        self.assertIn("line 1", message)
+        self.assertIn("line 2", message)
 
     def test_rpc_session_subscribe_filters(self):
         session = FluxRPCSession(agent_command="true")

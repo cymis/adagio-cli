@@ -158,7 +158,8 @@ def _build_runtime_command(
     command: list[str]
     if engine in {"docker", "podman", "nerdctl"}:
         if engine == "nerdctl" and config.platform == "Darwin" and config.runtime.colima_profile:
-            command = ["colima", "--profile", config.runtime.colima_profile, "nerdctl"]
+            # `colima nerdctl` needs `--` to pass container-runtime flags (e.g. `--rm`).
+            command = ["colima", "--profile", config.runtime.colima_profile, "nerdctl", "--"]
         else:
             command = [engine]
         if engine == "docker" and config.runtime.docker_context:
@@ -230,6 +231,7 @@ def _start_stream_reader(
 def _drain_output(
     line_queue: "queue.Queue[tuple[str, str]]",
     on_output: OutputCallback | None,
+    on_line: OutputCallback | None = None,
 ):
     while True:
         try:
@@ -237,6 +239,8 @@ def _drain_output(
         except queue.Empty:
             return
 
+        if on_line is not None:
+            on_line(stream_name, line)
         if on_output is not None:
             on_output(stream_name, line)
 
@@ -382,6 +386,7 @@ class FluxRPCSession:
         self._stop_requested = threading.Event()
         self._returncode: int | None = None
         self._agent_bundle_tmpdir: tempfile.TemporaryDirectory[str] | None = None
+        self._stderr_tail: list[str] = []
 
     @property
     def started(self) -> bool:
@@ -422,6 +427,7 @@ class FluxRPCSession:
         if self.started:
             return self.session
 
+        self._stderr_tail.clear()
         config = load_compute_environment(self._request.config_path)
         token = self._request.bridge_token or secrets.token_urlsafe(18)
         bridge_host = (
@@ -536,7 +542,11 @@ class FluxRPCSession:
 
         try:
             while True:
-                _drain_output(self._line_queue, self._on_output)
+                _drain_output(
+                    self._line_queue,
+                    self._on_output,
+                    on_line=self._capture_output_line,
+                )
 
                 for event in server.drain_events():
                     self._events.append(event)
@@ -555,7 +565,11 @@ class FluxRPCSession:
 
                 time.sleep(0.1)
 
-            _drain_output(self._line_queue, self._on_output)
+            _drain_output(
+                self._line_queue,
+                self._on_output,
+                on_line=self._capture_output_line,
+            )
             for event in server.drain_events():
                 self._events.append(event)
                 self._dispatch_event(event)
@@ -564,14 +578,27 @@ class FluxRPCSession:
         finally:
             self._returncode = process.wait()
             server.stop()
-            self._fail_unresolved(
-                RuntimeError(
-                    f"RPC session ended with return code {self._returncode}; pending calls canceled"
-                )
-            )
+            self._fail_unresolved(self._session_end_exception())
             if self._agent_bundle_tmpdir is not None:
                 self._agent_bundle_tmpdir.cleanup()
                 self._agent_bundle_tmpdir = None
+
+    def _capture_output_line(self, stream_name: str, line: str):
+        if stream_name != "stderr":
+            return
+        self._stderr_tail.append(line)
+        if len(self._stderr_tail) > 20:
+            self._stderr_tail.pop(0)
+
+    def _session_end_exception(self) -> RuntimeError:
+        message = (
+            f"RPC session ended with return code {self._returncode}; pending calls canceled"
+        )
+        if not self._stderr_tail:
+            return RuntimeError(message)
+
+        tail = "\n".join(self._stderr_tail)
+        return RuntimeError(f"{message}\nRuntime stderr tail:\n{tail}")
 
     def _dispatch_event(self, event: BridgeEvent):
         if self._on_event is not None:
