@@ -1,9 +1,0 @@
-{
-  "inputs": {},
-  "outputs": {},
-  "parameters": {
-    "barcodes": "barcodes",
-    "trunc_len": 120,
-    "trim_foobar": 150
-  }
-}
