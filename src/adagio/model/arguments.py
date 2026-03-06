@@ -1,5 +1,5 @@
 import typing as t
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .task import AllowableValue
 
@@ -27,3 +27,9 @@ class AdagioArguments(BaseModel):
 
         return lines
 
+
+class AdagioArgumentsFile(BaseModel):
+    version: int = 1
+    inputs: dict[str, str] = Field(default_factory=dict)
+    parameters: dict[str, AllowableValue] = Field(default_factory=dict)
+    outputs: dict[str, str] = Field(default_factory=dict)
