@@ -10,6 +10,7 @@ class AdagioArguments(BaseModel):
     outputs: str | dict[str, str]
 
     def __repr__(self):
+        """Format arguments for display."""
         return '\n'.join([
             *self._format_repr_sect(self.inputs, 'inputs'),
             *self._format_repr_sect(self.parameters, 'parameters'),
@@ -17,6 +18,7 @@ class AdagioArguments(BaseModel):
         ])
 
     def _format_repr_sect(self, section, name):
+        """Format a single argument section."""
         lines = []
         if not section:
             lines.append(f'{name}: {{}}')
@@ -29,7 +31,9 @@ class AdagioArguments(BaseModel):
 
 
 class AdagioArgumentsFile(BaseModel):
+    """Represent arguments loaded from a JSON file."""
+
     version: int = 1
     inputs: dict[str, str] = Field(default_factory=dict)
     parameters: dict[str, AllowableValue] = Field(default_factory=dict)
-    outputs: dict[str, str] = Field(default_factory=dict)
+    outputs: str | dict[str, str] | None = None

@@ -1,4 +1,5 @@
 import inspect
+import re
 from pathlib import Path
 from typing import Any, Annotated, Callable
 
@@ -10,7 +11,43 @@ from .args import ParamType, ShowParamsMode, dynamic_opt, to_identifier
 
 
 def _spec_py_type(type_name: str) -> type:
-    return {"str": str, "int": int, "float": float, "bool": bool}.get(type_name, str)
+    """Map pipeline type text to a Python type."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", (type_name or "").lower()).strip()
+    tokens = set(normalized.split())
+
+    if {"bool", "boolean"} & tokens or "bool" in normalized:
+        return bool
+    if {"int", "integer"} & tokens or "int" in normalized:
+        return int
+    if {"float", "double", "number", "numeric", "real"} & tokens:
+        return float
+    if {"str", "string", "text"} & tokens:
+        return str
+    return str
+
+
+def _default_py_type(default: Any) -> type | None:
+    """Infer a Python type from a default value."""
+    if isinstance(default, bool):
+        return bool
+    if isinstance(default, int):
+        return int
+    if isinstance(default, float):
+        return float
+    if isinstance(default, str):
+        return str
+    return None
+
+
+def _resolve_param_type(type_name: str, default: Any) -> type:
+    """Resolve the CLI parameter type from type text and default."""
+    declared = _spec_py_type(type_name)
+    inferred = _default_py_type(default)
+    if inferred is None:
+        return declared
+    if declared is str and inferred is not str:
+        return inferred
+    return declared
 
 
 def build_dynamic_run(
@@ -30,6 +67,7 @@ def build_dynamic_run(
         None,
     ],
 ):
+    """Build a dynamic run command from pipeline input and parameter specs."""
     input_bindings: list[tuple[str, str]] = []
     param_bindings: list[tuple[str, str]] = []
     required_inputs: list[str] = []
@@ -87,7 +125,7 @@ def build_dynamic_run(
         ident: str,
         opt: str,
         required: bool,
-        py_type: type,
+        py_type: Any,
         help_text: str,
         default: Any,
     ) -> None:
@@ -152,8 +190,10 @@ def build_dynamic_run(
 
         default = spec.default
         required = spec.required
-        opt = dynamic_opt(original, ParamType.PARAM)
         is_required = bool(required and default is None)
+        param_default = None
+        param_type: Any = _resolve_param_type(spec.type, default)
+        opt = dynamic_opt(original, ParamType.PARAM)
         if is_required:
             required_params.append(original)
         default_text = f" [default: {default}]" if default is not None else ""
@@ -161,13 +201,13 @@ def build_dynamic_run(
             ident=ident,
             opt=opt,
             required=False,
-            py_type=_spec_py_type(spec.type),
+            py_type=param_type,
             help_text=(
                 f"Pipeline parameter: {original}"
                 + (" [required]" if is_required else "")
                 + default_text
             ),
-            default=None,
+            default=param_default,
         )
 
     def run(

@@ -1,10 +1,6 @@
 import typing as t
 from pydantic import BaseModel, Field
 
-from adagio.io import convert_metadata
-
-
-
 
 class _BaseTask(BaseModel):
     id: str
@@ -24,6 +20,8 @@ class PluginActionTask(_BaseTask):
     action: str
 
     def exec(self, ctx, params, scope):
+        from adagio.io import convert_metadata
+
         action = ctx.get_action(self.plugin, self.action)
         kwargs = {}
         metadata = {}

@@ -118,7 +118,7 @@ class _InputDef(_Def):
 
 class _ParameterDef(_Def):
     required: bool
-    default: 'AllowableValue'
+    default: 'AllowableValue | None' = None
 
 
 class _OutputDef(_Def):

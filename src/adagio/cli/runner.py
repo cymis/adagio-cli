@@ -16,18 +16,15 @@ def run_pipeline_from_kwargs(
     *,
     console: Console,
 ) -> None:
-    try:
-        from ..execute import execute_pipeline
-        from ..model.arguments import AdagioArgumentsFile
-        from ..model.pipeline import AdagioPipeline
-    except ModuleNotFoundError as exc:
-        raise SystemExit(
-            "Execution dependencies are missing. "
-            "Install runtime requirements (for example, qiime2/parsl) to run pipelines."
-        ) from exc
+    """Run a pipeline from resolved CLI keyword arguments."""
+    from ..dummy_execute import execute
+    from ..model.arguments import AdagioArgumentsFile
+    from ..model.pipeline import AdagioPipeline
+    from ..monitor.tty import RichMonitor
 
     data = json.loads(pipeline.read_text(encoding="utf-8"))
-    parsed_pipeline = AdagioPipeline.model_validate(data)
+    pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
+    parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
     arguments = parsed_pipeline.signature.to_default_arguments()
 
     input_names = {name for _, name in input_bindings}
@@ -64,7 +61,9 @@ def run_pipeline_from_kwargs(
         if value is not None:
             arguments.parameters[original] = value
 
-    missing_inputs = [name for name in required_inputs if _is_missing(arguments.inputs.get(name))]
+    missing_inputs = [
+        name for name in required_inputs if _is_missing(arguments.inputs.get(name))
+    ]
     missing_params = [
         name for name in required_params if _is_missing(arguments.parameters.get(name))
     ]
@@ -75,9 +74,14 @@ def run_pipeline_from_kwargs(
         raise SystemExit("Missing required arguments: " + ", ".join(missing))
 
     console.print(f"[bold]Pipeline:[/bold] {pipeline}")
-    console.print("[bold]Executing pipeline[/bold]")
-    execute_pipeline(pipeline=parsed_pipeline, arguments=arguments)
+    console.print("[bold]Executing pipeline[/bold] (dummy mode)")
+    execute(
+        pipeline=parsed_pipeline,
+        arguments=arguments,
+        monitor=RichMonitor(console=console),
+    )
 
 
 def _is_missing(value: Any) -> bool:
+    """Treat placeholders and null values as missing."""
     return value is None or value == "<fill me>"
