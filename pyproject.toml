@@ -4,15 +4,14 @@ version = "0.0.0"
 description = "Adagio command line tool"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["rich>=14.1.0", "typer>=0.17.4"]
-dependencies = ["rich>=14.1.0", "typer>=0.17.4"]
+dependencies = ["cyclopts>=4.5.3", "pydantic>=2.12.5", "rich>=14.1.0"]
 
 
 [dependency-groups]
 dev = ["ruff>=0.13.0"]
 
 [project.scripts]
-adagio = "adagio.cli:app"
+adagio = "adagio.cli.main:main"
 
 [build-system]
 requires = ["uv_build>=0.8.17,<0.9.0"]
@@ -24,9 +23,6 @@ indent-style = "space"
 docstring-code-format = true
 
 [tool.ruff.lint.isort]
-
-<<<<<<< HEAD
-=======
 
 
 known-first-party = ["adagio"]
@@ -42,6 +38,5 @@ plugins = ['pydantic.mypy']
 
 [[tool.mypy.overrides]]
 
->>>>>>> main
 module = ["qiime2.*"]
 ignore_missing_imports = true
