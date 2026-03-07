@@ -12,6 +12,7 @@ from ..app.parsers.pipeline import Parameter as ParamSpec
 from ..app.parsers.pipeline import parse_inputs, parse_parameters
 from .args import ShowParamsMode, extract_flag_value, promote_positional_pipeline
 from .dynamic import build_dynamic_run
+from .qapi import build_qapi
 from .runner import run_pipeline_from_kwargs
 
 
@@ -39,6 +40,7 @@ def main(argv: list[str] | None = None) -> None:
         name="adagio",
         help="Adagio command line tool for processing pipelines created with the Adagio GUI.",
     )
+    app.command(build_qapi, name="build-qapi")
 
     if not pipeline_str:
 
