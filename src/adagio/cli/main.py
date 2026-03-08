@@ -4,7 +4,7 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
 
-from cyclopts import App, Parameter
+from cyclopts import App, Group, Parameter
 from rich.console import Console
 
 from ..app.parsers.pipeline import Input as InputSpec
@@ -21,6 +21,12 @@ console = Console()
 
 def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
+
+    if argv and argv[0] == "runtime":
+        from .runtime import run_runtime
+
+        run_runtime(argv[1:], console=console)
+        return
 
     argv, positional_pipeline = promote_positional_pipeline(argv)
     pipeline_str = extract_flag_value(argv, "--pipeline", "-p")
@@ -43,6 +49,7 @@ def main(argv: list[str] | None = None) -> None:
     app.command(build_qapi, name="build-qapi")
 
     if not pipeline_str:
+        command_group = Group("Command Options", sort_key=0)
 
         @app.command
         def run(
@@ -50,13 +57,16 @@ def main(argv: list[str] | None = None) -> None:
             pipeline: Annotated[
                 Path,
                 Parameter(
-                    name=("--pipeline", "-p"), help="Path to the pipeline JSON file."
+                    name=("--pipeline", "-p"),
+                    group=command_group,
+                    help="Path to the pipeline JSON file.",
                 ),
             ],
             arguments: Annotated[
                 Path | None,
                 Parameter(
                     name=("--arguments",),
+                    group=command_group,
                     help="Path to a JSON arguments file.",
                 ),
             ] = None,
@@ -64,12 +74,13 @@ def main(argv: list[str] | None = None) -> None:
                 ShowParamsMode,
                 Parameter(
                     name=("--show-params",),
+                    group=command_group,
                     help="Parameter display mode: all, missing, or required.",
                 ),
             ] = ShowParamsMode.REQUIRED,
         ):
-            _ = show_params
             """Run a pipeline (requires --pipeline; dynamic options come from that file)."""
+            _ = show_params
             raise SystemExit(
                 "Missing --pipeline. Try:\n  adagio run --pipeline pipeline.json --help"
             )

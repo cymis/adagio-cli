@@ -3,11 +3,61 @@ import re
 from pathlib import Path
 from typing import Any, Annotated, Callable
 
+from cyclopts import Group
 from cyclopts import Parameter as CliParameter
 
 from ..app.parsers.pipeline import Input as InputSpec
 from ..app.parsers.pipeline import Parameter as ParamSpec
 from .args import ParamType, ShowParamsMode, dynamic_opt, to_identifier
+
+
+class _PipelineGroupFormatter:
+    """Render pipeline options in one panel with nested subsections."""
+
+    def __call__(self, console: Any, options: Any, panel: Any) -> None:
+        from rich.console import Group as RichGroup
+        from rich.console import NewLine
+        from rich.text import Text
+
+        from cyclopts.help.specs import PanelSpec, TableSpec, get_default_parameter_columns
+
+        input_entries, parameter_entries = _split_pipeline_entries(panel.entries)
+        renderables: list[Any] = []
+
+        if panel.description:
+            renderables.append(panel.description)
+
+        def add_section(title: str, entries: list[Any]) -> None:
+            if not entries:
+                return
+            if renderables:
+                renderables.append(NewLine())
+            renderables.append(Text(title, style="bold"))
+            columns = get_default_parameter_columns(console, options, entries)
+            renderables.append(TableSpec().build(columns, entries))
+
+        add_section("Inputs", input_entries)
+        add_section("Parameters", parameter_entries)
+
+        if not renderables:
+            return
+
+        console.print(PanelSpec().build(RichGroup(*renderables), title=panel.title))
+
+
+def _split_pipeline_entries(entries: list[Any]) -> tuple[list[Any], list[Any]]:
+    input_entries: list[Any] = []
+    parameter_entries: list[Any] = []
+
+    for entry in entries:
+        options = entry.all_options if hasattr(entry, "all_options") else ()
+        long_name = next((name for name in options if name.startswith("--")), "")
+        if long_name.startswith("--input-"):
+            input_entries.append(entry)
+        else:
+            parameter_entries.append(entry)
+
+    return input_entries, parameter_entries
 
 
 def _spec_py_type(type_name: str) -> type:
@@ -74,12 +124,19 @@ def build_dynamic_run(
     required_params: list[str] = []
     seen_idents: set[str] = set()
     seen_opts: set[str] = {"--pipeline", "-p", "--arguments", "--show-params"}
+    command_group = Group("Command Options", sort_key=0)
+    pipeline_group = Group(
+        "Pipeline",
+        sort_key=1,
+        help_formatter=_PipelineGroupFormatter(),
+    )
 
     annotations: dict[str, Any] = {
         "pipeline": Annotated[
             Path,
             CliParameter(
                 name=("--pipeline", "-p"),
+                group=command_group,
                 help="Path to the pipeline JSON file.",
             ),
         ]
@@ -89,6 +146,7 @@ def build_dynamic_run(
         Path | None,
         CliParameter(
             name=("--arguments",),
+            group=command_group,
             help="Path to a JSON arguments file. Values are applied before CLI overrides.",
         ),
     ]
@@ -96,6 +154,7 @@ def build_dynamic_run(
         ShowParamsMode,
         CliParameter(
             name=("--show-params",),
+            group=command_group,
             help="Parameter display mode: all, missing, or required.",
         ),
     ]
@@ -128,6 +187,7 @@ def build_dynamic_run(
         py_type: Any,
         help_text: str,
         default: Any,
+        group: Group | tuple[Group, ...],
     ) -> None:
         if opt in seen_opts:
             raise ValueError(f"Conflicting CLI option generated: {opt!r}.")
@@ -138,6 +198,7 @@ def build_dynamic_run(
             annotation_type,
             CliParameter(
                 name=(opt,),
+                group=group,
                 help=help_text,
                 required=required,
             ),
@@ -176,6 +237,7 @@ def build_dynamic_run(
                 + (" [required]" if spec.required else "")
             ),
             default=None,
+            group=pipeline_group,
         )
 
     for spec in param_specs:
@@ -208,6 +270,7 @@ def build_dynamic_run(
                 + default_text
             ),
             default=param_default,
+            group=pipeline_group,
         )
 
     def run(
