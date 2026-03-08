@@ -10,7 +10,9 @@ def submit_qapi_payload(
     *,
     action_url: str | None = None,
     timeout: int = 60,
-) -> tuple[str, int, str]:
+    dry_run: bool = False,
+    force_overwrite: bool = False,
+) -> tuple[str, int, Any]:
     resolved_action_url = action_url or os.getenv("ACTION_URL")
     if not resolved_action_url:
         raise SystemExit(
@@ -18,9 +20,14 @@ def submit_qapi_payload(
         )
 
     url = resolved_action_url.rstrip("/") + "/qapi/"
+    request_body = {
+        **payload,
+        "dry_run": dry_run,
+        "force_overwrite": force_overwrite,
+    }
     req = Request(
         url=url,
-        data=json.dumps(payload).encode("utf-8"),
+        data=json.dumps(request_body).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -35,4 +42,10 @@ def submit_qapi_payload(
     except URLError as exc:
         raise SystemExit(f"QAPI submit failed: {exc.reason}") from exc
 
-    return url, status, response_body
+    if not response_body.strip():
+        return url, status, ""
+
+    try:
+        return url, status, json.loads(response_body)
+    except json.JSONDecodeError:
+        return url, status, response_body
