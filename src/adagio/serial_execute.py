@@ -281,7 +281,15 @@ def _save_outputs(
         if isinstance(arguments.outputs, str):
             destination = os.path.join(arguments.outputs, output.name)
         elif isinstance(arguments.outputs, dict):
-            destination = arguments.outputs[output.name]
+            destination = arguments.outputs.get(output.name)
+            if destination is None:
+                expected_outputs = ", ".join(sorted(item.name for item in sig.outputs))
+                provided_outputs = ", ".join(sorted(arguments.outputs.keys())) or "<none>"
+                raise KeyError(
+                    "Missing destination for output "
+                    f"{output.name!r}. Expected output names: [{expected_outputs}]. "
+                    f"Provided output names: [{provided_outputs}]."
+                )
         else:
             raise TypeError("Unsupported outputs configuration.")
 

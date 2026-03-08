@@ -21,10 +21,17 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     """Runtime entrypoint used by the runtime-adapter job container."""
     parser = argparse.ArgumentParser(
         prog="adagio runtime",
-        description="Execute a pipeline from spec/config/arguments files.",
+        description=(
+            "Execute a pipeline from spec/config/arguments files. "
+            "The config file is currently validated for compatibility but does not alter runtime behavior."
+        ),
     )
     parser.add_argument("--spec", required=True, help="Path to pipeline spec JSON.")
-    parser.add_argument("--config", required=True, help="Path to config JSON.")
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to config JSON. The file is validated for compatibility but otherwise unused.",
+    )
     parser.add_argument("--arguments", required=False, help="Path to run arguments JSON.")
     parser.add_argument("--job-id", required=False, help="Runtime job ID.")
     parser.add_argument("--output-dir", required=False, help="Directory for output artifacts.")
@@ -38,7 +45,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     opts = parser.parse_args(argv)
 
     spec_data = _load_json(Path(opts.spec))
-    _ = _load_json(Path(opts.config))
+    _load_runtime_config(Path(opts.config))
     runtime_arguments: Any = {}
     if opts.arguments:
         runtime_arguments = _load_json(Path(opts.arguments))
@@ -95,6 +102,13 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
 
 def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_runtime_config(path: Path) -> dict[str, Any]:
+    config = _load_json(path)
+    if not isinstance(config, dict):
+        raise SystemExit("Invalid runtime config: expected a JSON object.")
+    return config
 
 
 def _parse_pipeline(data: Any) -> AdagioPipeline:

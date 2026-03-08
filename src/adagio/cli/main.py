@@ -77,8 +77,8 @@ def main(argv: list[str] | None = None) -> None:
                 ),
             ] = ShowParamsMode.REQUIRED,
         ):
-            _ = show_params
             """Run a pipeline (requires --pipeline; dynamic options come from that file)."""
+            _ = show_params
             raise SystemExit(
                 "Missing --pipeline. Try:\n  adagio run --pipeline pipeline.json --help"
             )
