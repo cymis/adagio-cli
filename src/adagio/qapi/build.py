@@ -1,10 +1,31 @@
 import collections
+from collections.abc import Sequence
 from typing import Any, cast
 
 DEFAULT_SCHEMA_VERSION = "0.1.0"
 
 
-def generate_qapi_payload(*, schema_version: str = DEFAULT_SCHEMA_VERSION) -> dict[str, Any]:
+def normalize_plugin_selection(plugin_names: Sequence[str] | None) -> list[str] | None:
+    """Normalize repeated or comma-separated plugin names."""
+    if plugin_names is None:
+        return None
+
+    normalized: list[str] = []
+    for plugin_name in plugin_names:
+        for token in plugin_name.split(","):
+            stripped = token.strip()
+            if stripped:
+                normalized.append(stripped)
+
+    return normalized
+
+
+def generate_qapi_payload(
+    *,
+    schema_version: str = DEFAULT_SCHEMA_VERSION,
+    plugins: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Generate a QAPI payload for all plugins or a selected subset."""
     import qiime2
     import qiime2.core.transform as transform
     import qiime2.sdk
@@ -114,7 +135,17 @@ def generate_qapi_payload(*, schema_version: str = DEFAULT_SCHEMA_VERSION) -> di
         return result
 
     qapi: dict[str, Any] = {}
-    for plugin_name in sorted(plugin_manager.plugins):
+    requested_plugins = normalize_plugin_selection(plugins)
+    selected_plugins = sorted(plugin_manager.plugins)
+    if requested_plugins is not None:
+        available_plugins = set(plugin_manager.plugins)
+        missing_plugins = sorted(set(requested_plugins) - available_plugins)
+        if missing_plugins:
+            missing = ", ".join(missing_plugins)
+            raise ValueError(f"Unknown plugin name(s): {missing}")
+        selected_plugins = sorted(set(requested_plugins))
+
+    for plugin_name in selected_plugins:
         plugin = plugin_manager.plugins[plugin_name]
         methods_dict = build_data_dict(plugin.actions)
         methods_dict.update(build_data_dict(plugin.pipelines))
