@@ -104,6 +104,8 @@ def build_dynamic_run(
     *,
     input_specs: list[InputSpec],
     param_specs: list[ParamSpec],
+    argument_inputs: dict[str, Any] | None = None,
+    argument_params: dict[str, Any] | None = None,
     run_handler: Callable[
         [
             Path,
@@ -124,6 +126,8 @@ def build_dynamic_run(
     required_params: list[str] = []
     seen_idents: set[str] = set()
     seen_opts: set[str] = {"--pipeline", "-p", "--arguments", "--show-params"}
+    argument_inputs = argument_inputs or {}
+    argument_params = argument_params or {}
     command_group = Group("Command Options", sort_key=0)
     pipeline_group = Group(
         "Pipeline",
@@ -221,6 +225,8 @@ def build_dynamic_run(
             )
         seen_idents.add(ident)
         input_bindings.append((ident, original))
+        argument_value = argument_inputs.get(original)
+        display_required = bool(spec.required and _is_missing(argument_value))
         if spec.required:
             required_inputs.append(original)
 
@@ -234,7 +240,7 @@ def build_dynamic_run(
             help_text=(
                 f"Pipeline input: {original}"
                 + (f" ({type_text})" if type_text else "")
-                + (" [required]" if spec.required else "")
+                + (" [required]" if display_required else "")
             ),
             default=None,
             group=pipeline_group,
@@ -253,12 +259,18 @@ def build_dynamic_run(
         default = spec.default
         required = spec.required
         is_required = bool(required and default is None)
+        argument_value = argument_params.get(original)
+        has_argument_default = not _is_missing(argument_value)
+        display_default = (
+            default if default is not None else (argument_value if has_argument_default else None)
+        )
+        display_required = is_required and display_default is None
         param_default = None
         param_type: Any = _resolve_param_type(spec.type, default)
         opt = dynamic_opt(original, ParamType.PARAM)
         if is_required:
             required_params.append(original)
-        default_text = f" [default: {default}]" if default is not None else ""
+        default_text = f" [default: {display_default}]" if display_default is not None else ""
         add_dynamic_option(
             ident=ident,
             opt=opt,
@@ -266,7 +278,7 @@ def build_dynamic_run(
             py_type=param_type,
             help_text=(
                 f"Pipeline parameter: {original}"
-                + (" [required]" if is_required else "")
+                + (" [required]" if display_required else "")
                 + default_text
             ),
             default=param_default,
@@ -298,3 +310,7 @@ def build_dynamic_run(
         "Use: adagio run --pipeline PATH --help"
     )
     return run
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or value == "<fill me>"

@@ -1,4 +1,4 @@
-ARG QIIME_BASE_IMAGE=quay.io/qiime2/amplicon:2024.10
+ARG QIIME_BASE_IMAGE=quay.io/qiime2/amplicon:2026.1
 FROM ${QIIME_BASE_IMAGE} AS base
 
 ENV PYTHONUNBUFFERED=1
