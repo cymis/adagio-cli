@@ -5,7 +5,7 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 FROM base AS dev
 
-COPY ./pyproject.toml ./uv.lock /app/
+COPY ./pyproject.toml /app/
 COPY ./README.md /app/
 COPY ./src /app/src
 
