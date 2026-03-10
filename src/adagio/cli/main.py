@@ -106,6 +106,8 @@ def main(argv: list[str] | None = None) -> None:
     dynamic_run = build_dynamic_run(
         input_specs=visible_inputs,
         param_specs=visible_params,
+        argument_inputs=arguments_data.get("inputs", {}) if arguments_data else None,
+        argument_params=arguments_data.get("parameters", {}) if arguments_data else None,
         run_handler=partial(run_pipeline_from_kwargs, console=console),
     )
     app.command(dynamic_run, name="run")
@@ -130,9 +132,19 @@ def _filter_visible_specs(
         state_params.update(arguments_data.get("parameters", {}))
 
     if show_mode is ShowParamsMode.REQUIRED:
-        filtered_inputs = [spec for spec in input_specs if spec.required]
+        filtered_inputs = [
+            spec
+            for spec in input_specs
+            if spec.required and _is_missing(state_inputs.get(spec.name))
+        ]
         filtered_params = [
-            spec for spec in param_specs if bool(spec.required and spec.default is None)
+            spec
+            for spec in param_specs
+            if bool(
+                spec.required
+                and spec.default is None
+                and _is_missing(state_params.get(spec.name))
+            )
         ]
         return filtered_inputs, filtered_params
 
