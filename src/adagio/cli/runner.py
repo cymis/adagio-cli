@@ -1,15 +1,10 @@
 import json
 import os
-import subprocess
-import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from rich.console import Console
 
-DEFAULT_CONTAINER_IMAGE = "sloth-adagio-cli:latest"
-HOST_MOUNT_POINT = "/host"
 DEFAULT_OUTPUT_DIRNAME = "adagio-outputs"
 
 
@@ -99,31 +94,17 @@ def run_pipeline_from_kwargs(
     if not suppress_header:
         console.print(f"[bold]Pipeline:[/bold] {pipeline}")
 
-    force_container = _is_truthy(os.getenv("ADAGIO_FORCE_CONTAINER"))
-    local_qiime_error = _probe_local_qiime_error()
-    if force_container or local_qiime_error is not None:
-        if force_container:
-            if not suppress_header:
-                console.print("[bold]Executing pipeline[/bold] (container mode; forced)")
-        else:
-            if not suppress_header:
-                console.print("[bold]Executing pipeline[/bold] (container mode)")
-                console.print(
-                    "[yellow]Local QIIME unavailable, falling back to Docker:[/yellow] "
-                    f"{local_qiime_error}"
-                )
-        _execute_via_container(pipeline=pipeline, arguments=arguments, console=console)
-        return
+    from ..executors import select_default_executor
 
-    from ..monitor.tty import RichMonitor
-    from ..serial_execute import execute_serial
+    executor = select_default_executor()
 
     if not suppress_header:
-        console.print("[bold]Executing pipeline[/bold] (qiime serial mode)")
-    execute_serial(
+        console.print(f"[bold]Executing pipeline[/bold] ({executor.mode_label})")
+
+    executor.execute(
         pipeline=parsed_pipeline,
         arguments=arguments,
-        monitor=RichMonitor(console=console),
+        console=console,
     )
 
 
@@ -161,240 +142,7 @@ def _resolve_output_destinations(
     return resolved
 
 
-def _probe_local_qiime_error() -> str | None:
-    """Return an error string if local QIIME cannot satisfy serial execution imports."""
-    try:
-        import qiime2  # noqa: F401
-        from qiime2 import get_cache  # noqa: F401
-        from qiime2.sdk import PluginManager  # noqa: F401
-    except Exception as exc:  # noqa: BLE001
-        return str(exc)
-    return None
-
-
-def _execute_via_container(*, pipeline: Path, arguments: Any, console: Console) -> None:
-    """Execute pipeline in the shared adagio-cli Docker image."""
-    image = (os.getenv("ADAGIO_CONTAINER_IMAGE") or DEFAULT_CONTAINER_IMAGE).strip()
-    host_cwd = Path.cwd().resolve()
-    host_src_root = _local_source_root()
-    host_paths = _collect_host_paths(
-        pipeline=pipeline.resolve(),
-        arguments=arguments,
-        cwd=host_cwd,
-    )
-    host_paths.append(host_src_root)
-    run_arguments = _to_container_run_arguments(arguments=arguments)
-
-    with tempfile.TemporaryDirectory(prefix="adagio-runtime-") as temp_dir:
-        temp_path = Path(temp_dir)
-        args_path = temp_path / "arguments.json"
-        host_paths.append(args_path.resolve())
-
-        args_path.write_text(
-            json.dumps(run_arguments, ensure_ascii=True),
-            encoding="utf-8",
-        )
-
-        command = [
-            "docker",
-            "run",
-            "--rm",
-            *_docker_tty_flags(),
-            "-e",
-            f"PYTHONPATH={_containerize_path(host_src_root)}",
-            "-e",
-            "ADAGIO_SUPPRESS_RUN_HEADER=1",
-            *_python_warning_env_flags(),
-            "-w",
-            _containerize_path(host_cwd),
-            image,
-            "python",
-            "-m",
-            "adagio.cli.main",
-            "run",
-            "--pipeline",
-            _containerize_path(pipeline.resolve()),
-            "--arguments",
-            _containerize_path(args_path),
-            "--show-params",
-            "all",
-        ]
-        command = _with_mounts(command=command, host_paths=host_paths)
-
-        console.print(f"[dim]Container image:[/dim] {image}")
-        try:
-            result = subprocess.run(
-                command,
-                check=False,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except FileNotFoundError as exc:
-            raise SystemExit(
-                "Docker is required for container fallback but was not found in PATH."
-            ) from exc
-
-        _print_filtered_container_stderr(console=console, stderr_text=result.stderr or "")
-
-        if result.returncode != 0:
-            raise SystemExit(result.returncode)
-
-
-def _to_container_run_arguments(*, arguments: Any) -> dict[str, Any]:
-    """Serialize `adagio run` arguments and rewrite absolute host paths."""
-    data = arguments.model_dump() if hasattr(arguments, "model_dump") else dict(arguments)
-    inputs = data.get("inputs", {})
-    outputs = data.get("outputs")
-
-    if isinstance(inputs, dict):
-        data["inputs"] = {
-            key: _containerize_host_value(value) if isinstance(value, str) else value
-            for key, value in inputs.items()
-        }
-
-    if isinstance(outputs, str):
-        data["outputs"] = (
-            _containerize_host_value(outputs)
-            if not _is_missing(outputs)
-            else outputs
-        )
-    elif isinstance(outputs, dict):
-        data["outputs"] = {
-            key: _containerize_host_value(value)
-            if isinstance(value, str) and not _is_missing(value)
-            else value
-            for key, value in outputs.items()
-        }
-
-    return {
-        "version": 1,
-        "inputs": data.get("inputs", {}),
-        "parameters": data.get("parameters", {}),
-        "outputs": data.get("outputs"),
-    }
-
-
-def _collect_host_paths(
-    *, pipeline: Path, arguments: Any, cwd: Path
-) -> list[Path]:
-    """Collect absolute host paths that must be visible in the container."""
-    data = arguments.model_dump() if hasattr(arguments, "model_dump") else dict(arguments)
-    paths = [pipeline, cwd]
-
-    inputs = data.get("inputs", {})
-    if isinstance(inputs, dict):
-        for value in inputs.values():
-            if isinstance(value, str) and not _is_uri(value):
-                as_path = Path(value)
-                if as_path.is_absolute():
-                    paths.append(as_path)
-
-    outputs = data.get("outputs")
-    if isinstance(outputs, str):
-        if not _is_missing(outputs) and not _is_uri(outputs):
-            as_path = Path(outputs)
-            if as_path.is_absolute():
-                paths.append(as_path)
-    elif isinstance(outputs, dict):
-        for value in outputs.values():
-            if isinstance(value, str) and not _is_missing(value) and not _is_uri(value):
-                as_path = Path(value)
-                if as_path.is_absolute():
-                    paths.append(as_path)
-
-    return [path.resolve() for path in paths]
-
-
-def _with_mounts(*, command: list[str], host_paths: list[Path]) -> list[str]:
-    """Attach bind mounts for top-level host roots needed by this execution."""
-    roots = _mount_roots(host_paths)
-    mount_flags: list[str] = []
-    for root in roots:
-        mount_flags.extend(
-            [
-                "-v",
-                f"{root}:{_containerize_path(root)}:rw",
-            ]
-        )
-    return [*command[:3], *mount_flags, *command[3:]]
-
-
-def _docker_tty_flags() -> list[str]:
-    """Allocate Docker TTY when the current session is interactive."""
-    if sys.stdin.isatty() and sys.stdout.isatty():
-        return ["-t"]
-    return []
-
-
-def _python_warning_env_flags() -> list[str]:
-    """Suppress known noisy runtime warnings in container mode."""
-    filters = os.getenv("ADAGIO_PYTHONWARNINGS")
-    if filters is None:
-        filters = "ignore:pkg_resources is deprecated as an API:UserWarning"
-    filters = filters.strip()
-    if not filters:
-        return []
-    return ["-e", f"PYTHONWARNINGS={filters}"]
-
-
-def _mount_roots(paths: list[Path]) -> list[Path]:
-    """Map paths to their first-level filesystem roots for portable bind mounts."""
-    roots: set[Path] = set()
-    for path in paths:
-        parts = path.parts
-        if len(parts) < 2:
-            continue
-        root = Path("/", parts[1])
-        if root.exists():
-            roots.add(root)
-    return sorted(roots)
-
-
-def _containerize_host_value(value: str) -> str:
-    """Map an absolute host path into the container mount."""
-    if _is_uri(value):
-        return value
-    as_path = Path(value)
-    if as_path.is_absolute():
-        return _containerize_path(as_path)
-    return value
-
-
-def _containerize_path(path: Path) -> str:
-    """Convert absolute host path to mounted container path."""
-    resolved = path.resolve()
-    return f"{HOST_MOUNT_POINT}{resolved}"
-
-
-def _is_uri(value: str) -> bool:
-    return "://" in value
-
-
 def _is_truthy(value: str | None) -> bool:
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _local_source_root() -> Path:
-    """Return the local `adagio-cli/src` path for container PYTHONPATH."""
-    return Path(__file__).resolve().parents[2]
-
-
-def _print_filtered_container_stderr(*, console: Console, stderr_text: str) -> None:
-    """Print relevant stderr lines while dropping known noisy platform warnings."""
-    if not stderr_text:
-        return
-    for line in stderr_text.splitlines():
-        if _is_docker_platform_warning(line):
-            continue
-        if not line.strip():
-            continue
-        console.print(line)
-
-
-def _is_docker_platform_warning(line: str) -> bool:
-    return (
-        "requested image's platform" in line
-        and "does not match the detected host platform" in line
-    )

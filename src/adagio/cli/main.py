@@ -22,6 +22,12 @@ console = Console()
 def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
 
+    if argv and argv[0] == "exec-task":
+        from .task_exec import run_task_exec
+
+        run_task_exec(argv[1:])
+        return
+
     if argv and argv[0] == "runtime":
         from .runtime import run_runtime
 

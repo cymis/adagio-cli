@@ -79,10 +79,17 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
             payload={"event": "job_status", "status": "running"},
         )
 
-    from ..serial_execute import execute_serial
+    from ..executors import select_default_executor
+
+    executor = select_default_executor()
 
     try:
-        execute_serial(pipeline=pipeline, arguments=arguments, monitor=monitor)
+        executor.execute(
+            pipeline=pipeline,
+            arguments=arguments,
+            console=console,
+            monitor=monitor,
+        )
     except Exception as exc:  # noqa: BLE001
         if connected and runtime_url and opts.job_id:
             _post_job_event(
