@@ -1,6 +1,3 @@
-from __future__ import annotations
-
-import json
 import subprocess
 from pathlib import Path
 
@@ -15,13 +12,20 @@ from .base import (
 from .container_support import (
     containerize_host_value,
     containerize_path,
-    docker_tty_flags,
     host_path_from_container,
     is_uri,
     local_source_root,
     print_filtered_container_stderr,
+    docker_tty_flags,
     python_warning_env_flags,
     with_mounts,
+)
+from .task_contract import (
+    build_task_spec,
+    read_json_file,
+    result_manifest_path,
+    task_spec_path,
+    write_json_file,
 )
 
 
@@ -49,21 +53,19 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             for name, path in request.outputs.items()
         }
 
-        safe_id = task.id.replace("/", "_").replace(" ", "_")
-        result_manifest_path = (request.work_path / f"{safe_id}_results.json").resolve()
-        task_spec = {
-            "plugin": task.plugin,
-            "action": task.action,
-            "archive_inputs": archive_inputs,
-            "metadata_inputs": metadata_inputs,
-            "params": dict(request.params),
-            "metadata_column_kwargs": dict(request.metadata_column_kwargs),
-            "outputs": outputs,
-            "result_manifest": containerize_path(result_manifest_path),
-        }
-
-        task_spec_path = (request.work_path / f"{safe_id}_spec.json").resolve()
-        task_spec_path.write_text(json.dumps(task_spec, ensure_ascii=True), encoding="utf-8")
+        manifest_path = result_manifest_path(task_id=task.id, work_path=request.work_path)
+        spec_path = task_spec_path(task_id=task.id, work_path=request.work_path)
+        task_spec = build_task_spec(
+            plugin=task.plugin,
+            action=task.action,
+            archive_inputs=archive_inputs,
+            metadata_inputs=metadata_inputs,
+            params=dict(request.params),
+            metadata_column_kwargs=dict(request.metadata_column_kwargs),
+            outputs=outputs,
+            result_manifest=containerize_path(manifest_path),
+        )
+        write_json_file(spec_path, task_spec)
 
         src_root = local_source_root()
         command = [
@@ -81,7 +83,7 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             "-m",
             "adagio.cli.task_exec",
             "--task",
-            containerize_path(task_spec_path),
+            containerize_path(spec_path),
         ]
 
         host_paths = [request.cwd, request.work_path, src_root]
@@ -128,12 +130,12 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 f"with exit code {result.returncode}.{detail}"
             )
 
-        if not result_manifest_path.exists():
+        if not manifest_path.exists():
             raise RuntimeError(
                 f"Task {task.id!r} completed but did not write an output manifest."
             )
 
-        output_manifest = json.loads(result_manifest_path.read_text(encoding="utf-8"))
+        output_manifest = read_json_file(manifest_path)
         outputs = {}
         for output_name in request.outputs:
             actual_path = output_manifest.get(output_name)

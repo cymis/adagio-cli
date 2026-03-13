@@ -1,15 +1,14 @@
 """Internal exec-task subcommand: runs a single QIIME action inside a plugin container."""
 
-from __future__ import annotations
-
 import argparse
-import json
 import os
 import sys
 import warnings
 import zipfile
 from pathlib import Path
 from typing import Any
+
+from adagio.executors.task_contract import read_json_file, write_json_file
 
 
 def run_task_exec(argv: list[str]) -> None:
@@ -21,7 +20,7 @@ def run_task_exec(argv: list[str]) -> None:
     parser.add_argument("--task", required=True, help="Path to the task spec JSON file.")
     opts = parser.parse_args(argv)
 
-    task_spec = json.loads(Path(opts.task).read_text(encoding="utf-8"))
+    task_spec = read_json_file(Path(opts.task))
     _run_task(task_spec)
 
 
@@ -89,10 +88,7 @@ def _run_task(spec: dict[str, Any]) -> None:
         saved_outputs[name] = artifact.save(dest_path)
 
     if result_manifest:
-        Path(result_manifest).write_text(
-            json.dumps(saved_outputs, ensure_ascii=True),
-            encoding="utf-8",
-        )
+        write_json_file(Path(result_manifest), saved_outputs)
 
 
 def _resolve_key(mapping: Any, requested: str) -> Any:

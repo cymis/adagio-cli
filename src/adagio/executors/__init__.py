@@ -1,10 +1,11 @@
-from .base import PipelineExecutor
-from .defaults import DefaultTaskEnvironmentResolver
-from .docker import DockerTaskEnvironmentLauncher
-from .task_environments import TaskEnvironmentExecutor
+__all__ = ["select_default_executor"]
 
 
-def select_default_executor() -> PipelineExecutor:
+def select_default_executor():
+    from .defaults import DefaultTaskEnvironmentResolver
+    from .docker import DockerTaskEnvironmentLauncher
+    from .task_environments import TaskEnvironmentExecutor
+
     return TaskEnvironmentExecutor(
         environment_resolver=DefaultTaskEnvironmentResolver(),
         launchers={

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from adagio.model.task import PluginActionTask
 
 from .base import TaskEnvironmentResolver, TaskEnvironmentSpec
