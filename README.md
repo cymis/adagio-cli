@@ -6,7 +6,7 @@ Command-line runner for Adagio pipeline files
 
 - Python 3.10+
 - `uv` (recommended for development)
-- Optional: Docker (used automatically when local QIIME imports are unavailable)
+- Docker (currently required for pipeline execution)
 
 ## Installation
 
@@ -44,6 +44,10 @@ Run with a pipeline file:
 ```bash
 adagio run --pipeline path/to/pipeline.json
 ```
+
+`adagio run` executes each plugin task in its own task environment.
+Today the default task environment is a Docker image in GHCR derived from the plugin
+name in the pipeline spec, for example `dada2` -> `ghcr.io/cymis/qiime2-plugin-dada2:2026.1`.
 
 Equivalent positional form:
 
