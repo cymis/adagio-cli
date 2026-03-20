@@ -34,3 +34,46 @@ class DefaultTaskEnvironmentResolver(TaskEnvironmentResolver):
             reference=reference,
             description=f"default plugin image for {task.plugin}",
         )
+
+
+class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
+    def __init__(
+        self,
+        *,
+        base: TaskEnvironmentResolver,
+        plugin_image_overrides: dict[str, str] | None = None,
+        task_image_overrides: dict[str, str] | None = None,
+    ) -> None:
+        self._base = base
+        self._plugin_image_overrides = plugin_image_overrides or {}
+        self._task_image_overrides = task_image_overrides or {}
+
+    def resolve(self, *, task: PluginActionTask) -> TaskEnvironmentSpec:
+        override = self._find_override(task=task)
+        if override is None:
+            return self._base.resolve(task=task)
+
+        return TaskEnvironmentSpec(
+            kind="docker",
+            reference=override,
+            description=f"configured image override for {task.name or task.id}",
+        )
+
+    def _find_override(self, *, task: PluginActionTask) -> str | None:
+        candidates = [task.id]
+        if task.name:
+            candidates.insert(0, task.name)
+        candidates.append(f"{task.plugin}.{task.action}")
+
+        for candidate in candidates:
+            override = self._task_image_overrides.get(candidate)
+            if override:
+                return override
+
+        plugin_candidates = [task.plugin, task.plugin.lower()]
+        for candidate in plugin_candidates:
+            override = self._plugin_image_overrides.get(candidate)
+            if override:
+                return override
+
+        return None

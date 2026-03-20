@@ -16,6 +16,7 @@ class _BaseTask(BaseModel):
 class PluginActionTask(_BaseTask):
     id: str
     kind: t.Literal['plugin-action']
+    name: str | None = None
     plugin: str
     action: str
 
@@ -32,7 +33,7 @@ class PluginActionTask(_BaseTask):
                 # store for second pass in params
                 metadata[name] = scope[src.id]
             else:
-                raise NotImplemented('impossible')
+                raise NotImplementedError('impossible')
 
         for name, param in self.parameters.items():
             if param.kind == 'metadata':

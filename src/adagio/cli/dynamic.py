@@ -114,6 +114,7 @@ def build_dynamic_run(
         [
             Path,
             Path | None,
+            Path | None,
             dict[str, Any],
             list[tuple[str, str]],
             list[tuple[str, str]],
@@ -133,6 +134,7 @@ def build_dynamic_run(
         "--pipeline",
         "-p",
         "--arguments",
+        "--config",
         "--show-params",
         "--cache-dir",
         "--reuse",
@@ -174,6 +176,14 @@ def build_dynamic_run(
             help="Parameter display mode: all, missing, or required.",
         ),
     ]
+    annotations["config_file"] = Annotated[
+        Path | None,
+        CliParameter(
+            name=("--config",),
+            group=command_group,
+            help="Path to a TOML runtime config file.",
+        ),
+    ]
     annotations["cache_dir"] = Annotated[
         Path,
         CliParameter(
@@ -209,6 +219,12 @@ def build_dynamic_run(
             kind=inspect.Parameter.KEYWORD_ONLY,
             default=ShowParamsMode.REQUIRED,
             annotation=annotations["show_params"],
+        ),
+        inspect.Parameter(
+            name="config_file",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation=annotations["config_file"],
         ),
         inspect.Parameter(
             name="cache_dir",
@@ -329,12 +345,14 @@ def build_dynamic_run(
         pipeline: Path,
         arguments_file: Path | None = None,
         show_params: ShowParamsMode = ShowParamsMode.REQUIRED,
+        config_file: Path | None = None,
         **kwargs: Any,
     ) -> None:
         _ = show_params
         run_handler(
             pipeline,
             arguments_file,
+            config_file,
             kwargs,
             input_bindings,
             param_bindings,

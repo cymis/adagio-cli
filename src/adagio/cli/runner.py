@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from .config import load_run_config
 from ..executors.cache_support import (
     describe_cache_config,
     resolve_cache_config,
@@ -33,6 +34,7 @@ DEFAULT_OUTPUT_DIRNAME = "adagio-outputs"
 def run_pipeline_from_kwargs(
     pipeline: Path,
     arguments_file: Path | None,
+    config_file: Path | None,
     kwargs: dict[str, Any],
     input_bindings: list[tuple[str, str]],
     param_bindings: list[tuple[str, str]],
@@ -52,6 +54,7 @@ def run_pipeline_from_kwargs(
     pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
     parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
     arguments = parsed_pipeline.signature.to_default_arguments()
+    run_config = load_run_config(config_file)
     output_names = [output.name for output in parsed_pipeline.signature.outputs]
 
     input_names = {name for _, name in input_bindings}
@@ -126,7 +129,18 @@ def run_pipeline_from_kwargs(
 
     from ..executors import select_default_executor
 
-    executor = select_default_executor()
+    executor = select_default_executor(
+        plugin_image_overrides=(
+            {name: override.image for name, override in run_config.plugins.items()}
+            if run_config is not None
+            else None
+        ),
+        task_image_overrides=(
+            {name: override.image for name, override in run_config.tasks.items()}
+            if run_config is not None
+            else None
+        )
+    )
 
     if not suppress_header:
         console.print(f"[bold]Executing pipeline[/bold] ({executor.mode_label})")
