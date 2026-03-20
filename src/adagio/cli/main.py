@@ -61,6 +61,16 @@ def main(argv: list[str] | None = None) -> None:
     )
     app.command(build_qapi, name="build-qapi")
 
+    @app.command
+    def cache() -> None:
+        """Manage the shared QIIME cache directory."""
+        raise SystemExit("Try: adagio cache --help")
+
+    @app.command
+    def runtime() -> None:
+        """Execute a pipeline from spec/config/arguments files."""
+        raise SystemExit("Try: adagio runtime --help")
+
     if not pipeline_str:
         command_group = Group("Command Options", sort_key=0)
 

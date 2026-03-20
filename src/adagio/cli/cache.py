@@ -1,48 +1,44 @@
-import argparse
 import re
 import shutil
 from pathlib import Path
+from typing import Annotated
 
+from cyclopts import App, Group, Parameter
 from rich.console import Console
 
 from ..executors.cache_support import CACHE_DIR_HELP, resolve_cache_dir_path
 
 QIIME_CACHE_CONTENTS = {"VERSION", "data", "keys", "pools", "processes"}
-QIIME_CACHE_VERSION_RE = re.compile(r"^QIIME 2\ncache: v?\d+\nframework: 20\d\d\.\d+\Z")
+QIIME_CACHE_LINE_RE = re.compile(r"cache: v?\d+\Z")
 
 
 def run_cache(argv: list[str], *, console: Console) -> None:
-    parser = argparse.ArgumentParser(
-        prog="adagio cache",
-        description="Manage Adagio's shared QIIME cache directory.",
+    app = App(
+        name="adagio cache",
+        help="Manage Adagio's shared QIIME cache directory.",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    command_group = Group("Command Options", sort_key=0)
 
-    clear_parser = subparsers.add_parser(
-        "clear",
-        help="Delete an existing cache directory.",
-        description=(
-            "Delete an existing QIIME cache directory. "
-            "Only run this when no jobs are actively using the cache."
-        ),
-    )
-    clear_parser.add_argument(
-        "--cache-dir",
-        required=True,
-        help=CACHE_DIR_HELP,
-    )
-
-    opts = parser.parse_args(argv)
-
-    if opts.command == "clear":
-        cache_dir = resolve_cache_dir_path(
+    @app.command
+    def clear(
+        *,
+        cache_dir: Annotated[
+            Path,
+            Parameter(
+                name=("--cache-dir",),
+                group=command_group,
+                help=CACHE_DIR_HELP,
+            ),
+        ],
+    ) -> None:
+        """Delete an existing QIIME cache directory."""
+        resolved_cache_dir = resolve_cache_dir_path(
             cwd=Path.cwd().resolve(),
-            raw_value=opts.cache_dir,
+            raw_value=str(cache_dir),
         )
-        _clear_cache(cache_dir=cache_dir, console=console)
-        return
+        _clear_cache(cache_dir=resolved_cache_dir, console=console)
 
-    raise SystemExit(f"Unknown cache command: {opts.command}")
+    app(argv)
 
 
 def _clear_cache(*, cache_dir: Path, console: Console) -> None:
@@ -67,5 +63,20 @@ def _require_qiime_cache(cache_dir: Path) -> None:
     except OSError as exc:
         raise SystemExit(f"Could not read cache version file: {version_file}") from exc
 
-    if not QIIME_CACHE_VERSION_RE.fullmatch(version_text):
+    if not _looks_like_qiime_cache_version(version_text):
         raise SystemExit(f"Path is not a QIIME cache: {cache_dir}")
+
+
+def _looks_like_qiime_cache_version(version_text: str) -> bool:
+    lines = version_text.splitlines()
+    if len(lines) != 3:
+        return False
+
+    if lines[0] != "QIIME 2":
+        return False
+
+    if not QIIME_CACHE_LINE_RE.fullmatch(lines[1]):
+        return False
+
+    framework_prefix = "framework: "
+    return lines[2].startswith(framework_prefix) and bool(lines[2][len(framework_prefix) :].strip())
