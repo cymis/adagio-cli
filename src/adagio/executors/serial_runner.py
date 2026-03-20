@@ -11,6 +11,7 @@ from adagio.monitor.api import Monitor
 from adagio.monitor.log import LogMonitor
 from adagio.monitor.tty import RichMonitor
 
+from .cache_support import ExecutionCacheConfig
 from .common import plan_execution_order, task_label
 from .path_utils import resolve_host_path
 
@@ -23,6 +24,7 @@ class SerialExecutionState:
     work_path: Path
     params: dict[str, t.Any]
     scope: dict[str, str]
+    cache_config: ExecutionCacheConfig | None
 
 
 def run_serial_pipeline(
@@ -34,6 +36,7 @@ def run_serial_pipeline(
     console: Console | None = None,
     monitor: Monitor | None = None,
     total_subtasks: int = CONTAINER_SUBTASK_COUNT,
+    cache_config: ExecutionCacheConfig | None = None,
 ) -> None:
     sig = pipeline.signature
     tasks = list(pipeline.iter_tasks())
@@ -50,6 +53,7 @@ def run_serial_pipeline(
             work_path=Path(work_dir),
             params=sig.get_params(arguments),
             scope={},
+            cache_config=cache_config,
         )
         completed_task_ids: set[str] = set()
 

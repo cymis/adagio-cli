@@ -5,6 +5,12 @@ from typing import Any
 
 from rich.console import Console
 
+from ..executors.cache_support import (
+    describe_cache_config,
+    resolve_cache_config,
+    validate_cache_settings,
+)
+
 DEFAULT_OUTPUT_DIRNAME = "adagio-outputs"
 
 
@@ -22,6 +28,11 @@ def run_pipeline_from_kwargs(
     """Run a pipeline from resolved CLI keyword arguments."""
     from ..model.arguments import AdagioArgumentsFile
     from ..model.pipeline import AdagioPipeline
+
+    cache_dir = kwargs.pop("cache_dir", None)
+    recycle_pool = kwargs.pop("recycle_pool", None)
+    no_recycle = bool(kwargs.pop("no_recycle", False))
+    validate_cache_settings(recycle_pool=recycle_pool, no_recycle=no_recycle)
 
     data = json.loads(pipeline.read_text(encoding="utf-8"))
     pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
@@ -94,6 +105,16 @@ def run_pipeline_from_kwargs(
     if not suppress_header:
         console.print(f"[bold]Pipeline:[/bold] {pipeline}")
 
+    cache_config = resolve_cache_config(
+        cwd=Path.cwd().resolve(),
+        cache_dir=cache_dir,
+        recycle_pool=recycle_pool,
+        no_recycle=no_recycle,
+    )
+
+    if not suppress_header:
+        console.print(f"[bold]Cache:[/bold] {describe_cache_config(cache_config)}")
+
     from ..executors import select_default_executor
 
     executor = select_default_executor()
@@ -105,6 +126,7 @@ def run_pipeline_from_kwargs(
         pipeline=parsed_pipeline,
         arguments=arguments,
         console=console,
+        cache_config=cache_config,
     )
 
 

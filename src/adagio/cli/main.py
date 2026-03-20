@@ -9,6 +9,7 @@ from rich.console import Console
 
 from ..app.parsers.pipeline import Input as InputSpec
 from ..app.parsers.pipeline import Parameter as ParamSpec
+from ..executors.cache_support import CACHE_DIR_HELP, NO_RECYCLE_HELP, RECYCLE_POOL_HELP
 from ..app.parsers.pipeline import parse_inputs, parse_parameters
 from .args import ShowParamsMode, extract_flag_value, promote_positional_pipeline
 from .dynamic import build_dynamic_run
@@ -84,9 +85,33 @@ def main(argv: list[str] | None = None) -> None:
                     help="Parameter display mode: all, missing, or required.",
                 ),
             ] = ShowParamsMode.REQUIRED,
+            cache_dir: Annotated[
+                Path | None,
+                Parameter(
+                    name=("--cache-dir", "--use-cache"),
+                    group=command_group,
+                    help=CACHE_DIR_HELP,
+                ),
+            ] = None,
+            recycle_pool: Annotated[
+                str | None,
+                Parameter(
+                    name=("--recycle-pool",),
+                    group=command_group,
+                    help=RECYCLE_POOL_HELP,
+                ),
+            ] = None,
+            no_recycle: Annotated[
+                bool,
+                Parameter(
+                    name=("--no-recycle",),
+                    group=command_group,
+                    help=NO_RECYCLE_HELP,
+                ),
+            ] = False,
         ):
             """Run a pipeline (requires --pipeline; dynamic options come from that file)."""
-            _ = show_params
+            _ = (show_params, cache_dir, recycle_pool, no_recycle)
             raise SystemExit(
                 "Missing --pipeline. Try:\n  adagio run --pipeline pipeline.json --help"
             )

@@ -9,6 +9,7 @@ from .base import (
     TaskExecutionRequest,
     TaskExecutionResult,
 )
+from .cache_support import mount_path_for_cache
 from .container_support import (
     containerize_host_value,
     containerize_path,
@@ -64,6 +65,12 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             metadata_column_kwargs=dict(request.metadata_column_kwargs),
             outputs=outputs,
             result_manifest=containerize_path(manifest_path),
+            cache_path=(
+                containerize_path(Path(request.cache_path))
+                if request.cache_path is not None
+                else None
+            ),
+            recycle_pool=request.recycle_pool,
         )
         write_json_file(spec_path, task_spec)
 
@@ -93,6 +100,8 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             path = Path(value)
             if path.is_absolute():
                 host_paths.append(path)
+        if request.cache_path is not None:
+            host_paths.append(mount_path_for_cache(Path(request.cache_path)))
 
         command = with_mounts(command=command, host_paths=host_paths)
 

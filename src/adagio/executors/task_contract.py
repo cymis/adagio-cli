@@ -38,6 +38,8 @@ def build_task_spec(
     metadata_column_kwargs: dict[str, dict[str, str]],
     outputs: dict[str, str],
     result_manifest: str | None,
+    cache_path: str | None,
+    recycle_pool: str | None,
 ) -> dict[str, Any]:
     return {
         "plugin": plugin,
@@ -48,6 +50,8 @@ def build_task_spec(
         "metadata_column_kwargs": metadata_column_kwargs,
         "outputs": outputs,
         "result_manifest": result_manifest,
+        "cache_path": cache_path,
+        "recycle_pool": recycle_pool,
     }
 
 

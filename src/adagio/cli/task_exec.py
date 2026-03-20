@@ -1,6 +1,7 @@
 """Internal exec-task subcommand: runs a single QIIME action inside a plugin container."""
 
 import argparse
+from contextlib import nullcontext
 import os
 import sys
 import warnings
@@ -25,7 +26,7 @@ def run_task_exec(argv: list[str]) -> None:
 
 
 def _run_task(spec: dict[str, Any]) -> None:
-    from qiime2 import Artifact, Metadata
+    from qiime2 import Artifact, Cache, Metadata
     from qiime2.sdk import PluginManager
 
     plugin_name: str = spec["plugin"]
@@ -36,6 +37,8 @@ def _run_task(spec: dict[str, Any]) -> None:
     metadata_column_kwargs: dict[str, dict[str, str]] = spec.get("metadata_column_kwargs", {})
     outputs: dict[str, str] = spec["outputs"]
     result_manifest: str | None = spec.get("result_manifest")
+    cache_path: str | None = spec.get("cache_path")
+    recycle_pool: str | None = spec.get("recycle_pool")
 
     plugin_manager = PluginManager()
 
@@ -55,32 +58,46 @@ def _run_task(spec: dict[str, Any]) -> None:
             f"Available actions (first 30): [{available}]"
         )
 
-    kwargs: dict[str, Any] = {}
+    cache = Cache(cache_path) if cache_path else None
+    cache_context = cache if cache is not None else nullcontext()
 
-    for name, path in archive_inputs.items():
-        kwargs[name] = Artifact.load(path)
+    with cache_context:
+        kwargs: dict[str, Any] = {}
 
-    loaded_metadata: dict[str, Metadata] = {}
-    for name, path in metadata_inputs.items():
-        if zipfile.is_zipfile(path):
-            loaded_metadata[name] = Artifact.load(path).view(Metadata)
-        else:
-            loaded_metadata[name] = Metadata.load(path)
+        for name, path in archive_inputs.items():
+            loaded = Artifact.load(path)
+            kwargs[name] = _cache_loaded_input(cache=cache, value=loaded)
 
-    for param_name, col_spec in metadata_column_kwargs.items():
-        source_name: str = col_spec["source"]
-        column_name: str = col_spec["column"]
-        metadata = loaded_metadata.pop(source_name)
-        kwargs[param_name] = metadata.get_column(column_name)
+        loaded_metadata: dict[str, Metadata] = {}
+        for name, path in metadata_inputs.items():
+            if zipfile.is_zipfile(path):
+                loaded_metadata[name] = Artifact.load(path).view(Metadata)
+            else:
+                loaded_metadata[name] = Metadata.load(path)
 
-    for name, metadata in loaded_metadata.items():
-        kwargs[name] = metadata
+        for param_name, col_spec in metadata_column_kwargs.items():
+            source_name: str = col_spec["source"]
+            column_name: str = col_spec["column"]
+            metadata = loaded_metadata.pop(source_name)
+            kwargs[param_name] = metadata.get_column(column_name)
 
-    for name, value in params.items():
-        kwargs[name] = _coerce_param(action=action, name=name, value=value)
+        for name, metadata in loaded_metadata.items():
+            kwargs[name] = metadata
 
-    with action_output_context():
-        results = action(**kwargs)
+        for name, value in params.items():
+            kwargs[name] = _coerce_param(action=action, name=name, value=value)
+
+        if recycle_pool is not None and cache is None:
+            raise ValueError("A recycle pool requires a configured cache path.")
+
+        recycle_context = (
+            cache.create_pool(key=recycle_pool, reuse=True)
+            if recycle_pool is not None and cache is not None
+            else nullcontext()
+        )
+        with recycle_context:
+            with action_output_context():
+                results = action(**kwargs)
 
     saved_outputs: dict[str, str] = {}
     for name, dest_path in outputs.items():
@@ -89,6 +106,12 @@ def _run_task(spec: dict[str, Any]) -> None:
 
     if result_manifest:
         write_json_file(Path(result_manifest), saved_outputs)
+
+
+def _cache_loaded_input(*, cache: Any, value: Any) -> Any:
+    if cache is None:
+        return value
+    return cache.process_pool.save(value)
 
 
 def _resolve_key(mapping: Any, requested: str) -> Any:
