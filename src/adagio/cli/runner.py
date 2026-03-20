@@ -8,7 +8,6 @@ from rich.console import Console
 from ..executors.cache_support import (
     describe_cache_config,
     resolve_cache_config,
-    validate_cache_settings,
 )
 
 DEFAULT_OUTPUT_DIRNAME = "adagio-outputs"
@@ -30,9 +29,7 @@ def run_pipeline_from_kwargs(
     from ..model.pipeline import AdagioPipeline
 
     cache_dir = kwargs.pop("cache_dir", None)
-    recycle_pool = kwargs.pop("recycle_pool", None)
-    no_recycle = bool(kwargs.pop("no_recycle", False))
-    validate_cache_settings(recycle_pool=recycle_pool, no_recycle=no_recycle)
+    reuse = bool(kwargs.pop("reuse", True))
 
     data = json.loads(pipeline.read_text(encoding="utf-8"))
     pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
@@ -108,8 +105,7 @@ def run_pipeline_from_kwargs(
     cache_config = resolve_cache_config(
         cwd=Path.cwd().resolve(),
         cache_dir=cache_dir,
-        recycle_pool=recycle_pool,
-        no_recycle=no_recycle,
+        reuse=reuse,
     )
 
     if not suppress_header:

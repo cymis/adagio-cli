@@ -22,6 +22,7 @@ from .container_support import (
     with_mounts,
 )
 from .task_contract import (
+    parse_result_manifest,
     build_task_spec,
     read_json_file,
     result_manifest_path,
@@ -145,13 +146,14 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             )
 
         output_manifest = read_json_file(manifest_path)
+        reported_outputs, reused = parse_result_manifest(output_manifest)
         outputs = {}
         for output_name in request.outputs:
-            actual_path = output_manifest.get(output_name)
+            actual_path = reported_outputs.get(output_name)
             if not isinstance(actual_path, str):
                 raise RuntimeError(
                     f"Task {task.id!r} did not report output {output_name!r}."
                 )
             outputs[output_name] = str(host_path_from_container(actual_path))
 
-        return TaskExecutionResult(outputs=outputs)
+        return TaskExecutionResult(outputs=outputs, reused=reused)

@@ -31,7 +31,7 @@ def run_serial_pipeline(
     *,
     pipeline: AdagioPipeline,
     arguments: AdagioArguments,
-    resolve_task: t.Callable[[t.Any, SerialExecutionState, Console | None], None],
+    resolve_task: t.Callable[[t.Any, SerialExecutionState, Console | None], bool],
     finish_outputs: t.Callable[[t.Any, AdagioArguments, SerialExecutionState, Monitor | None], None],
     console: Console | None = None,
     monitor: Monitor | None = None,
@@ -75,9 +75,12 @@ def run_serial_pipeline(
             for task in execution_plan:
                 active_monitor.start_task(task_id=task.id)
                 try:
-                    resolve_task(task, state, console)
+                    reused = resolve_task(task, state, console)
                     active_monitor.advance_task(task_id=task.id, advance=1)
-                    active_monitor.finish_task(task_id=task.id, status="completed")
+                    active_monitor.finish_task(
+                        task_id=task.id,
+                        status="cached" if reused else "completed",
+                    )
                     completed_task_ids.add(task.id)
                 except Exception as exc:  # noqa: BLE001
                     active_monitor.finish_task(task_id=task.id, status="failed", error=str(exc))

@@ -51,6 +51,7 @@ class TaskExecutionRequest:
 @dataclass(frozen=True)
 class TaskExecutionResult:
     outputs: Mapping[str, str]
+    reused: bool = False
 
 
 class TaskEnvironmentResolver(Protocol):

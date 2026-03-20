@@ -1,6 +1,7 @@
 """Internal exec-task subcommand: runs a single QIIME action inside a plugin container."""
 
 import argparse
+from collections.abc import Mapping
 from contextlib import nullcontext
 import os
 import sys
@@ -9,7 +10,11 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from adagio.executors.task_contract import read_json_file, write_json_file
+from adagio.executors.task_contract import (
+    build_result_manifest,
+    read_json_file,
+    write_json_file,
+)
 
 
 def run_task_exec(argv: list[str]) -> None:
@@ -60,6 +65,7 @@ def _run_task(spec: dict[str, Any]) -> None:
 
     cache = Cache(cache_path) if cache_path else None
     cache_context = cache if cache is not None else nullcontext()
+    reused = False
 
     with cache_context:
         kwargs: dict[str, Any] = {}
@@ -87,6 +93,8 @@ def _run_task(spec: dict[str, Any]) -> None:
         for name, value in params.items():
             kwargs[name] = _coerce_param(action=action, name=name, value=value)
 
+        _materialize_default_parameters(action=action, kwargs=kwargs)
+
         if recycle_pool is not None and cache is None:
             raise ValueError("A recycle pool requires a configured cache path.")
 
@@ -96,8 +104,13 @@ def _run_task(spec: dict[str, Any]) -> None:
             else nullcontext()
         )
         with recycle_context:
-            with action_output_context():
-                results = action(**kwargs)
+            cached_results = _load_cached_results(cache=cache, action=action, kwargs=kwargs)
+            if cached_results is not None:
+                reused = True
+                results = cached_results
+            else:
+                with action_output_context():
+                    results = action(**kwargs)
 
     saved_outputs: dict[str, str] = {}
     for name, dest_path in outputs.items():
@@ -105,13 +118,96 @@ def _run_task(spec: dict[str, Any]) -> None:
         saved_outputs[name] = artifact.save(dest_path)
 
     if result_manifest:
-        write_json_file(Path(result_manifest), saved_outputs)
+        write_json_file(
+            Path(result_manifest),
+            build_result_manifest(outputs=saved_outputs, reused=reused),
+        )
 
 
 def _cache_loaded_input(*, cache: Any, value: Any) -> Any:
     if cache is None:
         return value
     return cache.process_pool.save(value)
+
+
+def _materialize_default_parameters(*, action: Any, kwargs: dict[str, Any]) -> None:
+    signature = getattr(action, "signature", None)
+    parameters = getattr(signature, "parameters", None)
+    if not isinstance(parameters, Mapping):
+        return
+
+    for name, spec in parameters.items():
+        has_default = getattr(spec, "has_default", None)
+        if name in kwargs or not callable(has_default) or not has_default():
+            continue
+        kwargs[name] = spec.default
+
+
+def _load_cached_results(*, cache: Any, action: Any, kwargs: dict[str, Any]) -> Any:
+    if cache is None:
+        return None
+
+    named_pool = getattr(cache, "named_pool", None)
+    if named_pool is None:
+        return None
+
+    named_pool.create_index()
+    invocation = _build_invocation(action=action, kwargs=kwargs)
+    if invocation not in named_pool.index:
+        return None
+
+    from qiime2.core.type.util import is_collection_type
+    from qiime2.sdk import ResultCollection, Results
+
+    try:
+        cached_outputs = named_pool.index[invocation]
+        loaded_outputs: dict[str, Any] = {}
+        for name, output_spec in action.signature.outputs.items():
+            if is_collection_type(output_spec.qiime_type):
+                cached_collection = cached_outputs[name]
+                collection_order = list(cached_collection.keys())
+                if not _validate_collection_order(collection_order):
+                    return None
+
+                collection_order.sort(key=lambda x: x.idx)
+                loaded_collection = ResultCollection()
+                for elem_info in collection_order:
+                    loaded_collection[elem_info.item_name] = named_pool.load(
+                        cached_collection[elem_info]
+                    )
+                loaded_outputs[name] = loaded_collection
+            else:
+                loaded_outputs[name] = named_pool.load(cached_outputs[name])
+    except KeyError:
+        return None
+
+    return Results(loaded_outputs.keys(), loaded_outputs.values())
+
+
+def _build_invocation(*, action: Any, kwargs: dict[str, Any]) -> Any:
+    from rachis.core.type.signature import HashableInvocation
+
+    plugin = action.plugin_id.replace("_", "-")
+    plugin_action = f"{plugin}:{action.id}"
+    collated_inputs = action.signature.collate_inputs(**kwargs)
+    callable_args = action.signature.coerce_user_input(**collated_inputs)
+    arguments = []
+    for name, value in callable_args.items():
+        arguments.append({name: value})
+    return HashableInvocation(plugin_action, arguments)
+
+
+def _validate_collection_order(collection_order: list[Any]) -> bool:
+    if not collection_order:
+        return True
+    if not all(
+        elem.total == collection_order[0].total for elem in collection_order
+    ) or len(collection_order) != collection_order[0].total:
+        warnings.warn(
+            "Incomplete collection found when recycling, collection will be remade"
+        )
+        return False
+    return True
 
 
 def _resolve_key(mapping: Any, requested: str) -> Any:

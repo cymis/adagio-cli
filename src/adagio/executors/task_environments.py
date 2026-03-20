@@ -56,20 +56,19 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         task,
         state: SerialExecutionState,
         console: Console | None,
-    ) -> None:
+    ) -> bool:
         if isinstance(task, RootInputTask):
             for name, src in task.inputs.items():
                 dst = task.outputs[name]
                 state.scope[dst.id] = state.scope[src.id]
-            return
+            return False
 
         if isinstance(task, PluginActionTask):
-            self._execute_plugin_action(
+            return self._execute_plugin_action(
                 task=task,
                 state=state,
                 console=console,
             )
-            return
 
         raise TypeError(f"Unsupported task type: {type(task)}")
 
@@ -79,7 +78,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         task: PluginActionTask,
         state: SerialExecutionState,
         console: Console | None,
-    ) -> None:
+    ) -> bool:
         environment = self._environment_resolver.resolve(task=task)
         launcher = self._launchers.get(environment.kind)
         if launcher is None:
@@ -155,6 +154,8 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                     f"Task {task.id!r} did not produce output {output_name!r}."
                 )
             state.scope[dest.id] = actual_path
+
+        return result.reused
 
 
 def _save_outputs(
