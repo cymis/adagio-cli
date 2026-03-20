@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from cyclopts import App, Group, Parameter
+from cyclopts.panel import CycloptsPanel
 from rich.console import Console
 
 from ..app.parsers.pipeline import Input as InputSpec
@@ -48,10 +49,9 @@ def main(argv: list[str] | None = None) -> None:
         show_mode = (
             ShowParamsMode(show_mode_str) if show_mode_str else ShowParamsMode.REQUIRED
         )
-    except ValueError as exc:
-        raise SystemExit(
-            "Invalid --show-params value. Use one of: all, missing, required."
-        ) from exc
+    except ValueError:
+        console.print(CycloptsPanel("Invalid --show-params value. Use one of: all, missing, required."))
+        sys.exit(1)
     if pipeline_str is None:
         pipeline_str = positional_pipeline
 
@@ -64,12 +64,14 @@ def main(argv: list[str] | None = None) -> None:
     @app.command
     def cache() -> None:
         """Manage the shared QIIME cache directory."""
-        raise SystemExit("Try: adagio cache --help")
+        console.print(CycloptsPanel("Try: adagio cache --help"))
+        sys.exit(1)
 
     @app.command
     def runtime() -> None:
         """Execute a pipeline from spec/config/arguments files."""
-        raise SystemExit("Try: adagio runtime --help")
+        console.print(CycloptsPanel("Try: adagio runtime --help"))
+        sys.exit(1)
 
     if not pipeline_str:
         command_group = Group("Command Options", sort_key=0)
@@ -121,9 +123,8 @@ def main(argv: list[str] | None = None) -> None:
         ):
             """Run a pipeline (requires --pipeline; dynamic options come from that file)."""
             _ = (show_params, cache_dir, reuse)
-            raise SystemExit(
-                "Missing --pipeline. Try:\n  adagio run --pipeline pipeline.json --help"
-            )
+            console.print(CycloptsPanel("Missing --pipeline. Try:\n  adagio run --pipeline pipeline.json --help"))
+            sys.exit(1)
 
         app(argv)
         return
@@ -134,7 +135,7 @@ def main(argv: list[str] | None = None) -> None:
     param_specs = parse_parameters(data)
     arguments_path_str = extract_flag_value(argv, "--arguments")
     arguments_data = (
-        _load_arguments_data(Path(arguments_path_str)) if arguments_path_str else None
+        _load_arguments_data(Path(arguments_path_str), console) if arguments_path_str else None
     )
     visible_inputs, visible_params = _filter_visible_specs(
         input_specs=input_specs,
@@ -197,10 +198,12 @@ def _filter_visible_specs(
     return filtered_inputs, filtered_params
 
 
-def _load_arguments_data(path: Path) -> dict[str, Any]:
+def _load_arguments_data(path: Path, _console: Console | None = None) -> dict[str, Any]:
+    _con = _console or Console(stderr=True)
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise SystemExit("Invalid arguments file: expected a JSON object.")
+        _con.print(CycloptsPanel("Invalid arguments file: expected a JSON object."))
+        sys.exit(1)
     if "inputs" not in data:
         data["inputs"] = {}
     if "parameters" not in data:
@@ -208,7 +211,8 @@ def _load_arguments_data(path: Path) -> dict[str, Any]:
     if not isinstance(data.get("inputs"), dict) or not isinstance(
         data.get("parameters"), dict
     ):
-        raise SystemExit("Invalid arguments file: 'inputs' and 'parameters' must be objects.")
+        _con.print(CycloptsPanel("Invalid arguments file: 'inputs' and 'parameters' must be objects."))
+        sys.exit(1)
     return data
 
 
