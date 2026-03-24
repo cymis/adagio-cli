@@ -9,11 +9,18 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 class ImageOverride(BaseModel):
-    image: str
+    image: str | None = None
+    platform: str | None = None
+
+
+class DefaultOverride(BaseModel):
+    image: str | None = None
+    platform: str | None = None
 
 
 class AdagioRunConfig(BaseModel):
     version: int = 1
+    defaults: DefaultOverride = Field(default_factory=DefaultOverride)
     plugins: dict[str, ImageOverride] = Field(default_factory=dict)
     tasks: dict[str, ImageOverride] = Field(default_factory=dict)
 

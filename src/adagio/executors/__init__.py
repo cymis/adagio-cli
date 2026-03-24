@@ -3,8 +3,9 @@ __all__ = ["select_default_executor"]
 
 def select_default_executor(
     *,
-    plugin_image_overrides: dict[str, str] | None = None,
-    task_image_overrides: dict[str, str] | None = None,
+    default_override=None,
+    plugin_overrides=None,
+    task_overrides=None,
 ):
     from .defaults import (
         ConfigurableTaskEnvironmentResolver,
@@ -16,8 +17,9 @@ def select_default_executor(
     return TaskEnvironmentExecutor(
         environment_resolver=ConfigurableTaskEnvironmentResolver(
             base=DefaultTaskEnvironmentResolver(),
-            plugin_image_overrides=plugin_image_overrides,
-            task_image_overrides=task_image_overrides,
+            default_override=default_override,
+            plugin_overrides=plugin_overrides,
+            task_overrides=task_overrides,
         ),
         launchers={
             "docker": DockerTaskEnvironmentLauncher(),

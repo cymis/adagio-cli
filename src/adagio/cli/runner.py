@@ -10,6 +10,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .config import load_run_config
+from ..executors.base import TaskEnvironmentOverride
 from ..executors.cache_support import (
     describe_cache_config,
     resolve_cache_config,
@@ -130,16 +131,13 @@ def run_pipeline_from_kwargs(
     from ..executors import select_default_executor
 
     executor = select_default_executor(
-        plugin_image_overrides=(
-            {name: override.image for name, override in run_config.plugins.items()}
-            if run_config is not None
-            else None
+        default_override=_config_default_override(run_config),
+        plugin_overrides=_config_named_overrides(
+            run_config.plugins if run_config is not None else {}
         ),
-        task_image_overrides=(
-            {name: override.image for name, override in run_config.tasks.items()}
-            if run_config is not None
-            else None
-        )
+        task_overrides=_config_named_overrides(
+            run_config.tasks if run_config is not None else {}
+        ),
     )
 
     if not suppress_header:
@@ -191,3 +189,31 @@ def _is_truthy(value: str | None) -> bool:
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _config_default_override(run_config: Any) -> TaskEnvironmentOverride | None:
+    if run_config is None:
+        return None
+
+    defaults = run_config.defaults
+    if defaults.image is None and defaults.platform is None:
+        return None
+
+    return TaskEnvironmentOverride(
+        reference=defaults.image,
+        platform=defaults.platform,
+    )
+
+
+def _config_named_overrides(
+    raw_overrides: dict[str, Any],
+) -> dict[str, TaskEnvironmentOverride] | None:
+    resolved = {
+        name: TaskEnvironmentOverride(
+            reference=override.image,
+            platform=override.platform,
+        )
+        for name, override in raw_overrides.items()
+        if override.image is not None or override.platform is not None
+    }
+    return resolved or None

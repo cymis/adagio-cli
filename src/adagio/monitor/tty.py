@@ -226,7 +226,7 @@ def _bar_text(completed: int, total: int, color: str, width: int = 28) -> str:
     ratio = min(max(completed / total, 0.0), 1.0)
     filled = int(round(ratio * width))
     empty = width - filled
-    return f"[{color}]{'━' * filled}[/]{' ' * empty}"
+    return f"[{color}]{'━' * filled}[/][dim]{'─' * empty}[/]"
 
 
 def _elapsed(task: _TaskState) -> str:

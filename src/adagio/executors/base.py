@@ -35,6 +35,12 @@ class TaskEnvironmentSpec:
 
 
 @dataclass(frozen=True)
+class TaskEnvironmentOverride:
+    reference: str | None = None
+    platform: str | None = None
+
+
+@dataclass(frozen=True)
 class TaskExecutionRequest:
     task: PluginActionTask
     cwd: Path

@@ -1,6 +1,10 @@
 from adagio.model.task import PluginActionTask
 
-from .base import TaskEnvironmentResolver, TaskEnvironmentSpec
+from .base import (
+    TaskEnvironmentOverride,
+    TaskEnvironmentResolver,
+    TaskEnvironmentSpec,
+)
 
 DEFAULT_REGISTRY = "ghcr.io/cymis"
 DEFAULT_IMAGE_PREFIX = "qiime2-plugin-"
@@ -41,38 +45,62 @@ class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
         self,
         *,
         base: TaskEnvironmentResolver,
-        plugin_image_overrides: dict[str, str] | None = None,
-        task_image_overrides: dict[str, str] | None = None,
+        default_override: TaskEnvironmentOverride | None = None,
+        plugin_overrides: dict[str, TaskEnvironmentOverride] | None = None,
+        task_overrides: dict[str, TaskEnvironmentOverride] | None = None,
     ) -> None:
         self._base = base
-        self._plugin_image_overrides = plugin_image_overrides or {}
-        self._task_image_overrides = task_image_overrides or {}
+        self._default_override = default_override
+        self._plugin_overrides = plugin_overrides or {}
+        self._task_overrides = task_overrides or {}
 
     def resolve(self, *, task: PluginActionTask) -> TaskEnvironmentSpec:
-        override = self._find_override(task=task)
-        if override is None:
-            return self._base.resolve(task=task)
+        base_environment = self._base.resolve(task=task)
+        reference = base_environment.reference
+        options = dict(base_environment.options or {})
+        configured = False
+
+        for override in (
+            self._default_override,
+            self._find_plugin_override(task=task),
+            self._find_task_override(task=task),
+        ):
+            if override is None:
+                continue
+            if override.reference is not None:
+                reference = override.reference
+                configured = True
+            if override.platform is not None:
+                options["platform"] = override.platform
+                configured = True
 
         return TaskEnvironmentSpec(
-            kind="docker",
-            reference=override,
-            description=f"configured image override for {task.name or task.id}",
+            kind=base_environment.kind,
+            reference=reference,
+            description=(
+                f"configured environment for {task.name or task.id}"
+                if configured
+                else base_environment.description
+            ),
+            options=options or None,
         )
 
-    def _find_override(self, *, task: PluginActionTask) -> str | None:
+    def _find_task_override(self, *, task: PluginActionTask) -> TaskEnvironmentOverride | None:
         candidates = [task.id]
         if task.name:
             candidates.insert(0, task.name)
         candidates.append(f"{task.plugin}.{task.action}")
 
         for candidate in candidates:
-            override = self._task_image_overrides.get(candidate)
+            override = self._task_overrides.get(candidate)
             if override:
                 return override
+        return None
 
+    def _find_plugin_override(self, *, task: PluginActionTask) -> TaskEnvironmentOverride | None:
         plugin_candidates = [task.plugin, task.plugin.lower()]
         for candidate in plugin_candidates:
-            override = self._plugin_image_overrides.get(candidate)
+            override = self._plugin_overrides.get(candidate)
             if override:
                 return override
 

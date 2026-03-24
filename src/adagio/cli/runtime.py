@@ -8,6 +8,7 @@ from typing import Any
 
 from rich.console import Console
 
+from ..executors.base import TaskEnvironmentOverride
 from ..executors.cache_support import (
     CACHE_DIR_HELP,
     REUSE_HELP,
@@ -27,7 +28,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         prog="adagio runtime",
         description=(
             "Execute a pipeline from spec/config/arguments files. "
-            "The config file may define per-plugin and per-task container image overrides."
+            "The config file may define default, per-plugin, and per-task image/platform overrides."
         ),
     )
     parser.add_argument("--spec", required=True, help="Path to pipeline spec JSON.")
@@ -102,8 +103,9 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     from ..executors import select_default_executor
 
     executor = select_default_executor(
-        plugin_image_overrides=_plugin_image_overrides(run_config),
-        task_image_overrides=_task_image_overrides(run_config),
+        default_override=_default_override(run_config),
+        plugin_overrides=_named_overrides(run_config.plugins if run_config is not None else {}),
+        task_overrides=_named_overrides(run_config.tasks if run_config is not None else {}),
     )
 
     try:
@@ -151,16 +153,30 @@ def _resolve_output_dir(raw_output_dir: str | None, job_id: str | None) -> str:
     return output_dir
 
 
-def _task_image_overrides(run_config: Any) -> dict[str, str] | None:
+def _default_override(run_config: Any) -> TaskEnvironmentOverride | None:
     if run_config is None:
         return None
-    return {name: override.image for name, override in run_config.tasks.items()}
-
-
-def _plugin_image_overrides(run_config: Any) -> dict[str, str] | None:
-    if run_config is None:
+    defaults = run_config.defaults
+    if defaults.image is None and defaults.platform is None:
         return None
-    return {name: override.image for name, override in run_config.plugins.items()}
+    return TaskEnvironmentOverride(
+        reference=defaults.image,
+        platform=defaults.platform,
+    )
+
+
+def _named_overrides(
+    raw_overrides: dict[str, Any],
+) -> dict[str, TaskEnvironmentOverride] | None:
+    resolved = {
+        name: TaskEnvironmentOverride(
+            reference=override.image,
+            platform=override.platform,
+        )
+        for name, override in raw_overrides.items()
+        if override.image is not None or override.platform is not None
+    }
+    return resolved or None
 
 
 def _build_arguments(
