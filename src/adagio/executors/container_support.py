@@ -21,6 +21,20 @@ def with_mounts(*, command: list[str], host_paths: list[Path]) -> list[str]:
     return [*command[:3], *mount_flags, *command[3:]]
 
 
+def with_apptainer_binds(*, command: list[str], host_paths: list[Path]) -> list[str]:
+    """Attach bind mounts for top-level host roots needed by Apptainer/Singularity."""
+    roots = mount_roots(host_paths)
+    bind_flags: list[str] = []
+    for root in roots:
+        bind_flags.extend(
+            [
+                "--bind",
+                f"{root}:{containerize_path(root)}:rw",
+            ]
+        )
+    return [*command[:2], *bind_flags, *command[2:]]
+
+
 def docker_tty_flags() -> list[str]:
     """Allocate Docker TTY when the current session is interactive."""
     if sys.stdin.isatty() and sys.stdout.isatty():
@@ -28,15 +42,23 @@ def docker_tty_flags() -> list[str]:
     return []
 
 
-def python_warning_env_flags() -> list[str]:
-    """Suppress known noisy runtime warnings in container mode."""
+def python_warning_env_assignments() -> list[str]:
+    """Return runtime warning environment assignments for container execution."""
     filters = os.getenv("ADAGIO_PYTHONWARNINGS")
     if filters is None:
         filters = "ignore:pkg_resources is deprecated as an API:UserWarning"
     filters = filters.strip()
     if not filters:
         return []
-    return ["-e", f"PYTHONWARNINGS={filters}"]
+    return [f"PYTHONWARNINGS={filters}"]
+
+
+def python_warning_env_flags() -> list[str]:
+    """Suppress known noisy runtime warnings in container mode."""
+    flags: list[str] = []
+    for assignment in python_warning_env_assignments():
+        flags.extend(["-e", assignment])
+    return flags
 
 
 def mount_roots(paths: list[Path]) -> list[Path]:

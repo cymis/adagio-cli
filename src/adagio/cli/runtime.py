@@ -28,7 +28,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         prog="adagio runtime",
         description=(
             "Execute a pipeline from spec/config/arguments files. "
-            "The config file may define default, per-plugin, and per-task image/platform overrides."
+            "The config file may define default, per-plugin, and per-task environment overrides."
         ),
     )
     parser.add_argument("--spec", required=True, help="Path to pipeline spec JSON.")
@@ -37,10 +37,16 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         required=True,
         help="Path to runtime config TOML.",
     )
-    parser.add_argument("--arguments", required=False, help="Path to run arguments JSON.")
+    parser.add_argument(
+        "--arguments", required=False, help="Path to run arguments JSON."
+    )
     parser.add_argument("--job-id", required=False, help="Runtime job ID.")
-    parser.add_argument("--output-dir", required=False, help="Directory for output artifacts.")
-    parser.add_argument("--runtime-url", required=False, help="Runtime adapter API base URL.")
+    parser.add_argument(
+        "--output-dir", required=False, help="Directory for output artifacts."
+    )
+    parser.add_argument(
+        "--runtime-url", required=False, help="Runtime adapter API base URL."
+    )
     parser.add_argument(
         "--cache-dir",
         required=True,
@@ -82,7 +88,11 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         reuse=opts.reuse,
     )
 
-    connected = bool(opts.connected and opts.job_id and (opts.runtime_url or os.getenv("RUNTIME_URL")))
+    connected = bool(
+        opts.connected
+        and opts.job_id
+        and (opts.runtime_url or os.getenv("RUNTIME_URL"))
+    )
     runtime_url = opts.runtime_url or os.getenv("RUNTIME_URL")
 
     log_monitor = LogMonitor(console=console)
@@ -104,8 +114,12 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
 
     executor = select_default_executor(
         default_override=_default_override(run_config),
-        plugin_overrides=_named_overrides(run_config.plugins if run_config is not None else {}),
-        task_overrides=_named_overrides(run_config.tasks if run_config is not None else {}),
+        plugin_overrides=_named_overrides(
+            run_config.plugins if run_config is not None else {}
+        ),
+        task_overrides=_named_overrides(
+            run_config.tasks if run_config is not None else {}
+        ),
     )
 
     try:
@@ -157,9 +171,10 @@ def _default_override(run_config: Any) -> TaskEnvironmentOverride | None:
     if run_config is None:
         return None
     defaults = run_config.defaults
-    if defaults.image is None and defaults.platform is None:
+    if defaults.kind is None and defaults.image is None and defaults.platform is None:
         return None
     return TaskEnvironmentOverride(
+        kind=defaults.kind,
         reference=defaults.image,
         platform=defaults.platform,
     )
@@ -170,11 +185,14 @@ def _named_overrides(
 ) -> dict[str, TaskEnvironmentOverride] | None:
     resolved = {
         name: TaskEnvironmentOverride(
+            kind=override.kind,
             reference=override.image,
             platform=override.platform,
         )
         for name, override in raw_overrides.items()
-        if override.image is not None or override.platform is not None
+        if override.kind is not None
+        or override.image is not None
+        or override.platform is not None
     }
     return resolved or None
 
@@ -190,7 +208,11 @@ def _build_arguments(
 
     if isinstance(runtime_arguments, dict):
         if isinstance(runtime_arguments.get("inputs"), dict):
-            _apply_named_arguments(arguments=arguments, runtime_arguments=runtime_arguments, storage_root=storage_root)
+            _apply_named_arguments(
+                arguments=arguments,
+                runtime_arguments=runtime_arguments,
+                storage_root=storage_root,
+            )
         else:
             _apply_legacy_arguments(
                 pipeline=pipeline,
@@ -199,7 +221,9 @@ def _build_arguments(
                 storage_root=storage_root,
             )
 
-        resolved_outputs = _resolve_outputs(runtime_arguments.get("outputs"), storage_root=storage_root)
+        resolved_outputs = _resolve_outputs(
+            runtime_arguments.get("outputs"), storage_root=storage_root
+        )
         if resolved_outputs is not None:
             arguments.outputs = resolved_outputs
 
@@ -215,7 +239,9 @@ def _apply_named_arguments(
     raw_inputs = runtime_arguments.get("inputs", {})
     if isinstance(raw_inputs, dict):
         for name, value in raw_inputs.items():
-            arguments.inputs[name] = _resolve_input_path(value, storage_root=storage_root)
+            arguments.inputs[name] = _resolve_input_path(
+                value, storage_root=storage_root
+            )
 
     raw_parameters = runtime_arguments.get("parameters", {})
     if isinstance(raw_parameters, dict):
@@ -230,7 +256,11 @@ def _apply_legacy_arguments(
     storage_root: str,
 ) -> None:
     preprocessing = runtime_arguments.get("preprocessing", {})
-    root_artifacts = preprocessing.get("root_artifacts", []) if isinstance(preprocessing, dict) else []
+    root_artifacts = (
+        preprocessing.get("root_artifacts", [])
+        if isinstance(preprocessing, dict)
+        else []
+    )
     token_lookup: dict[str, Any] = {}
     if isinstance(root_artifacts, list):
         for artifact in root_artifacts:
@@ -246,12 +276,16 @@ def _apply_legacy_arguments(
         token = token_lookup.get(str(input_def.id))
         if token is None:
             continue
-        arguments.inputs[input_def.name] = _resolve_input_path(token, storage_root=storage_root)
+        arguments.inputs[input_def.name] = _resolve_input_path(
+            token, storage_root=storage_root
+        )
 
     named_inputs = runtime_arguments.get("inputs", {})
     if isinstance(named_inputs, dict):
         for name, value in named_inputs.items():
-            arguments.inputs[name] = _resolve_input_path(value, storage_root=storage_root)
+            arguments.inputs[name] = _resolve_input_path(
+                value, storage_root=storage_root
+            )
 
     task_arguments = runtime_arguments.get("arguments", {})
     if isinstance(task_arguments, dict):
@@ -314,7 +348,9 @@ def _is_missing(value: Any) -> bool:
     return value is None or value == "" or value == "<fill me>"
 
 
-def _validate_required_arguments(pipeline: AdagioPipeline, arguments: AdagioArguments) -> None:
+def _validate_required_arguments(
+    pipeline: AdagioPipeline, arguments: AdagioArguments
+) -> None:
     missing_inputs = [
         input_def.name
         for input_def in pipeline.signature.inputs
@@ -323,11 +359,15 @@ def _validate_required_arguments(pipeline: AdagioPipeline, arguments: AdagioArgu
     missing_params = [
         param.name
         for param in pipeline.signature.parameters
-        if param.required and param.default is None and _is_missing(arguments.parameters.get(param.name))
+        if param.required
+        and param.default is None
+        and _is_missing(arguments.parameters.get(param.name))
     ]
 
     if missing_inputs or missing_params:
-        missing = [f"input:{name}" for name in missing_inputs] + [f"param:{name}" for name in missing_params]
+        missing = [f"input:{name}" for name in missing_inputs] + [
+            f"param:{name}" for name in missing_params
+        ]
         raise SystemExit("Missing required runtime arguments: " + ", ".join(missing))
 
 

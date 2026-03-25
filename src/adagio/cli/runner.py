@@ -29,6 +29,7 @@ def _error_exit(console: Console, message: str) -> None:
     console.print(panel)
     sys.exit(1)
 
+
 DEFAULT_OUTPUT_DIRNAME = "adagio-outputs"
 
 
@@ -68,17 +69,26 @@ def run_pipeline_from_kwargs(
 
         unknown_inputs = sorted(set(arguments_data.inputs) - input_names)
         if unknown_inputs:
-            _error_exit(console, "Unknown inputs in arguments file: " + ", ".join(unknown_inputs))
+            _error_exit(
+                console,
+                "Unknown inputs in arguments file: " + ", ".join(unknown_inputs),
+            )
 
         unknown_params = sorted(set(arguments_data.parameters) - param_names)
         if unknown_params:
-            _error_exit(console, "Unknown parameters in arguments file: " + ", ".join(unknown_params))
+            _error_exit(
+                console,
+                "Unknown parameters in arguments file: " + ", ".join(unknown_params),
+            )
 
         unknown_outputs: list[str] = []
         if isinstance(arguments_data.outputs, dict):
             unknown_outputs = sorted(set(arguments_data.outputs) - output_name_set)
         if unknown_outputs:
-            _error_exit(console, "Unknown outputs in arguments file: " + ", ".join(unknown_outputs))
+            _error_exit(
+                console,
+                "Unknown outputs in arguments file: " + ", ".join(unknown_outputs),
+            )
 
         arguments.inputs.update(arguments_data.inputs)
         arguments.parameters.update(arguments_data.parameters)
@@ -102,10 +112,9 @@ def run_pipeline_from_kwargs(
         name for name in required_params if _is_missing(arguments.parameters.get(name))
     ]
     if missing_inputs or missing_params:
-        missing_opts = (
-            [f"--input-{n.replace('_', '-')}" for n in missing_inputs]
-            + [f"--param-{n.replace('_', '-')}" for n in missing_params]
-        )
+        missing_opts = [f"--input-{n.replace('_', '-')}" for n in missing_inputs] + [
+            f"--param-{n.replace('_', '-')}" for n in missing_params
+        ]
         formatted = ", ".join(f"[cyan]{opt}[/cyan]" for opt in missing_opts)
         _error_exit(console, f"Missing required arguments: {formatted}")
 
@@ -196,10 +205,11 @@ def _config_default_override(run_config: Any) -> TaskEnvironmentOverride | None:
         return None
 
     defaults = run_config.defaults
-    if defaults.image is None and defaults.platform is None:
+    if defaults.kind is None and defaults.image is None and defaults.platform is None:
         return None
 
     return TaskEnvironmentOverride(
+        kind=defaults.kind,
         reference=defaults.image,
         platform=defaults.platform,
     )
@@ -210,10 +220,13 @@ def _config_named_overrides(
 ) -> dict[str, TaskEnvironmentOverride] | None:
     resolved = {
         name: TaskEnvironmentOverride(
+            kind=override.kind,
             reference=override.image,
             platform=override.platform,
         )
         for name, override in raw_overrides.items()
-        if override.image is not None or override.platform is not None
+        if override.kind is not None
+        or override.image is not None
+        or override.platform is not None
     }
     return resolved or None

@@ -36,6 +36,7 @@ class TaskEnvironmentSpec:
 
 @dataclass(frozen=True)
 class TaskEnvironmentOverride:
+    kind: str | None = None
     reference: str | None = None
     platform: str | None = None
 
