@@ -11,13 +11,13 @@ from .base import (
 )
 from .cache_support import mount_path_for_cache
 from .container_support import (
+    container_python_root,
     containerize_host_value,
     containerize_path,
+    docker_tty_flags,
     host_path_from_container,
     is_uri,
-    local_source_root,
     print_filtered_container_stderr,
-    docker_tty_flags,
     python_warning_env_flags,
     with_mounts,
 )
@@ -75,7 +75,7 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         )
         write_json_file(spec_path, task_spec)
 
-        src_root = local_source_root()
+        python_root = container_python_root(work_path=request.work_path)
         platform = None
         if environment.options is not None:
             raw_platform = environment.options.get("platform")
@@ -88,7 +88,9 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             "--rm",
             *docker_tty_flags(),
             "-e",
-            f"PYTHONPATH={containerize_path(src_root)}",
+            f"PYTHONPATH={containerize_path(python_root)}",
+            "-e",
+            "PYTHONNOUSERSITE=1",
             *python_warning_env_flags(),
             "-w",
             containerize_path(request.cwd),
@@ -104,7 +106,7 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             containerize_path(spec_path),
         ])
 
-        host_paths = [request.cwd, request.work_path, src_root]
+        host_paths = [request.cwd, request.work_path, python_root]
         for value in list(request.archive_inputs.values()) + list(request.metadata_inputs.values()):
             if is_uri(value):
                 continue

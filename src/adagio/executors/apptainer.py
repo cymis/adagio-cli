@@ -12,11 +12,11 @@ from .base import (
 )
 from .cache_support import mount_path_for_cache
 from .container_support import (
+    container_python_root,
     containerize_host_value,
     containerize_path,
     host_path_from_container,
     is_uri,
-    local_source_root,
     print_filtered_container_stderr,
     python_warning_env_assignments,
     with_apptainer_binds,
@@ -80,16 +80,17 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         )
         write_json_file(spec_path, task_spec)
 
-        src_root = local_source_root()
+        python_root = container_python_root(work_path=request.work_path)
         command = [
             runtime_executable,
             "exec",
+            "--cleanenv",
             "--no-home",
             "--pwd",
             containerize_path(request.cwd),
         ]
 
-        host_paths = [request.cwd, request.work_path, src_root]
+        host_paths = [request.cwd, request.work_path, python_root]
         for value in list(request.archive_inputs.values()) + list(
             request.metadata_inputs.values()
         ):
@@ -106,7 +107,8 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             [
                 str(image_path),
                 "env",
-                f"PYTHONPATH={containerize_path(src_root)}",
+                f"PYTHONPATH={containerize_path(python_root)}",
+                "PYTHONNOUSERSITE=1",
                 *python_warning_env_assignments(),
                 "python",
                 "-m",

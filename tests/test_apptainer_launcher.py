@@ -7,8 +7,8 @@ from unittest.mock import patch
 from adagio.executors.apptainer import ApptainerTaskEnvironmentLauncher
 from adagio.executors.base import TaskEnvironmentSpec, TaskExecutionRequest
 from adagio.executors.container_support import (
+    container_python_root,
     containerize_path,
-    local_source_root,
     mount_roots,
 )
 from adagio.executors.task_contract import (
@@ -96,21 +96,24 @@ class ApptainerLauncherTests(unittest.TestCase):
                 )
 
         command = run_mock.call_args.args[0]
+        python_root = container_python_root(work_path=work_path)
         bind_targets = {
             f"{root_path}:{containerize_path(root_path)}:rw"
             for root_path in mount_roots(
-                [cwd, work_path, input_path, local_source_root()]
+                [cwd, work_path, input_path, python_root]
             )
         }
 
         self.assertEqual(command[0], "/usr/bin/apptainer")
         self.assertEqual(command[1], "exec")
+        self.assertIn("--cleanenv", command)
         self.assertIn("--no-home", command)
         self.assertIn("--pwd", command)
         self.assertIn(containerize_path(cwd), command)
         self.assertIn(str(image_path), command)
         self.assertIn("env", command)
-        self.assertIn(f"PYTHONPATH={containerize_path(local_source_root())}", command)
+        self.assertIn(f"PYTHONPATH={containerize_path(python_root)}", command)
+        self.assertIn("PYTHONNOUSERSITE=1", command)
         self.assertIn("python", command)
         self.assertIn("-m", command)
         self.assertIn("adagio.cli.task_exec", command)

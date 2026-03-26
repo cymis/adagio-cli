@@ -1,10 +1,12 @@
 import os
+import shutil
 import sys
 from pathlib import Path
 
 from rich.console import Console
 
 HOST_MOUNT_POINT = "/host"
+STAGED_CONTAINER_PYTHON_ROOT = ".adagio-container-python"
 
 
 def with_mounts(*, command: list[str], host_paths: list[Path]) -> list[str]:
@@ -103,7 +105,22 @@ def is_uri(value: str) -> bool:
 
 def local_source_root() -> Path:
     """Return the local `adagio-cli/src` path for container PYTHONPATH."""
-    return Path(__file__).resolve().parents[2]
+    source_root = _adagio_source_root()
+    if source_root is None:
+        raise RuntimeError("Adagio source root is unavailable from this installation.")
+    return source_root
+
+
+def container_python_root(*, work_path: Path, module_file: Path | None = None) -> Path:
+    """Return an isolated Python root that exposes only the Adagio package."""
+    source_root = _adagio_source_root(module_file=module_file)
+    if source_root is not None:
+        return source_root
+
+    package_dir = _adagio_package_dir(module_file=module_file)
+    staged_root = (work_path / STAGED_CONTAINER_PYTHON_ROOT).resolve()
+    _stage_adagio_package(package_dir=package_dir, staged_root=staged_root)
+    return staged_root
 
 
 def print_filtered_container_stderr(*, console: Console, stderr_text: str) -> None:
@@ -122,4 +139,31 @@ def is_docker_platform_warning(line: str) -> bool:
     return (
         "requested image's platform" in line
         and "does not match the detected host platform" in line
+    )
+
+
+def _adagio_source_root(*, module_file: Path | None = None) -> Path | None:
+    package_dir = _adagio_package_dir(module_file=module_file)
+    candidate = package_dir.parent
+    if candidate.name != "src":
+        return None
+    if not (candidate / "adagio" / "__init__.py").is_file():
+        return None
+    return candidate
+
+
+def _adagio_package_dir(*, module_file: Path | None = None) -> Path:
+    resolved = (module_file or Path(__file__)).resolve()
+    return resolved.parents[1]
+
+
+def _stage_adagio_package(*, package_dir: Path, staged_root: Path) -> None:
+    staged_package_dir = staged_root / package_dir.name
+    if staged_package_dir.exists():
+        shutil.rmtree(staged_package_dir)
+    staged_root.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        package_dir,
+        staged_package_dir,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
