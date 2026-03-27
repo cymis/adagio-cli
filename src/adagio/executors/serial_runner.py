@@ -1,6 +1,6 @@
 import tempfile
 import typing as t
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich.console import Console
@@ -25,6 +25,8 @@ class SerialExecutionState:
     params: dict[str, t.Any]
     scope: dict[str, str]
     cache_config: ExecutionCacheConfig | None
+    saved_output_ids: set[str] = field(default_factory=set)
+    save_output_started: bool = False
 
 
 def run_serial_pipeline(
@@ -32,7 +34,9 @@ def run_serial_pipeline(
     pipeline: AdagioPipeline,
     arguments: AdagioArguments,
     resolve_task: t.Callable[[t.Any, SerialExecutionState, Console | None], bool],
-    finish_outputs: t.Callable[[t.Any, AdagioArguments, SerialExecutionState, Monitor | None], None],
+    finish_outputs: t.Callable[
+        [t.Any, AdagioArguments, SerialExecutionState, Monitor | None, bool], None
+    ],
     console: Console | None = None,
     monitor: Monitor | None = None,
     total_subtasks: int = CONTAINER_SUBTASK_COUNT,
@@ -76,6 +80,13 @@ def run_serial_pipeline(
                 active_monitor.start_task(task_id=task.id)
                 try:
                     reused = resolve_task(task, state, console)
+                    finish_outputs(
+                        sig=sig,
+                        arguments=arguments,
+                        state=state,
+                        monitor=active_monitor,
+                        require_all=False,
+                    )
                     active_monitor.advance_task(task_id=task.id, advance=1)
                     active_monitor.finish_task(
                         task_id=task.id,
@@ -83,25 +94,35 @@ def run_serial_pipeline(
                     )
                     completed_task_ids.add(task.id)
                 except Exception as exc:  # noqa: BLE001
-                    active_monitor.finish_task(task_id=task.id, status="failed", error=str(exc))
+                    active_monitor.finish_task(
+                        task_id=task.id, status="failed", error=str(exc)
+                    )
                     for skipped_task in tasks:
-                        if skipped_task.id == task.id or skipped_task.id in completed_task_ids:
+                        if (
+                            skipped_task.id == task.id
+                            or skipped_task.id in completed_task_ids
+                        ):
                             continue
                         active_monitor.finish_task(
                             task_id=skipped_task.id,
                             status="skipped",
                             error=f"Skipped because task {task.id!r} failed.",
                         )
+                    if state.save_output_started:
+                        active_monitor.finish_save_output()
                     raise
 
-            active_monitor.start_save_output()
-            finish_outputs(
-                sig=sig,
-                arguments=arguments,
-                state=state,
-                monitor=active_monitor,
-            )
-            active_monitor.finish_save_output()
+            try:
+                finish_outputs(
+                    sig=sig,
+                    arguments=arguments,
+                    state=state,
+                    monitor=active_monitor,
+                    require_all=True,
+                )
+            finally:
+                if state.save_output_started:
+                    active_monitor.finish_save_output()
         finally:
             active_monitor.finish_pipeline()
 
