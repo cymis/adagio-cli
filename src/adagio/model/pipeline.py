@@ -110,6 +110,7 @@ class _Def(BaseModel):
     name: str
     type: str
     ast: TypeAST
+    description: str | None = None
 
 
 class _InputDef(_Def):
