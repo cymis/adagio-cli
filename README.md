@@ -92,6 +92,14 @@ Clear an existing cache directory:
 adagio cache clear --cache-dir /path/to/cache
 ```
 
+### Inspect a pipeline
+
+Print a dependency-ordered summary of the plugin actions in a pipeline:
+
+```bash
+adagio pipeline show path/to/pipeline.json
+```
+
 ### Arguments file format
 
 `--arguments` can be downloaded from Adagio directly in the "Run" workflow :
@@ -173,19 +181,19 @@ tasks serially; no scheduler submission or remote image pull behavior is include
 Generate and submit plugin metadata from the active QIIME environment:
 
 ```bash
-adagio build-qapi --action-url http://localhost:81/api/v1
+adagio qapi build --action-url http://localhost:81/api/v1
 ```
 
 Write payload to disk without submitting:
 
 ```bash
-adagio build-qapi --output qapi.json --dry-run
+adagio qapi build --output qapi.json --dry-run
 ```
 
 Submit selected plugins only:
 
 ```bash
-adagio build-qapi --plugin dada2 --plugin feature-table
+adagio qapi build --plugin dada2 --plugin feature-table
 ```
 
 ## Development
