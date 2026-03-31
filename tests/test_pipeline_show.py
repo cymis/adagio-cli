@@ -120,6 +120,54 @@ def _sample_pipeline_dict() -> dict:
     }
 
 
+def _collection_pipeline_dict() -> dict:
+    return {
+        "type": "pipeline",
+        "signature": {
+            "inputs": [
+                {
+                    "id": "input-table-a",
+                    "name": "table_a",
+                    "type": "FeatureTable[Frequency]",
+                    "ast": AST,
+                    "required": True,
+                    "description": "First table.",
+                },
+                {
+                    "id": "input-table-b",
+                    "name": "table_b",
+                    "type": "FeatureTable[Frequency]",
+                    "ast": AST,
+                    "required": True,
+                    "description": "Second table.",
+                },
+            ],
+            "parameters": [],
+            "outputs": [],
+        },
+        "graph": [
+            {
+                "id": "task-merge",
+                "kind": "plugin-action",
+                "plugin": "feature_table",
+                "action": "merge",
+                "inputs": {
+                    "tables": {
+                        "kind": "archive-collection",
+                        "style": "list",
+                        "items": [
+                            {"key": "0", "id": "input-table-a"},
+                            {"key": "1", "id": "input-table-b"},
+                        ],
+                    }
+                },
+                "parameters": {},
+                "outputs": {},
+            }
+        ],
+    }
+
+
 def _render_plain(renderable: object) -> str:
     console = Console(record=True, width=160, file=io.StringIO())
     console.print(renderable, soft_wrap=True)
@@ -176,6 +224,17 @@ class PipelineShowTests(unittest.TestCase):
         self.assertIn("Inputs:", result.stdout)
         self.assertIn('barcodes: (MetadataColumn[Categorical]) pipeline input "barcodes"', result.stdout)
         self.assertIn('table (FeatureTable[Frequency])', result.stdout)
+
+    def test_render_pipeline_text_displays_collection_inputs(self) -> None:
+        pipeline = AdagioPipeline.model_validate(_collection_pipeline_dict())
+
+        rendered = _render_plain(render_pipeline_text(pipeline))
+
+        self.assertIn("feature_table.merge", rendered)
+        self.assertIn(
+            'tables: list [pipeline input "table_a", pipeline input "table_b"]',
+            rendered,
+        )
 
 
 if __name__ == "__main__":

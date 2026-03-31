@@ -49,6 +49,10 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             name: containerize_host_value(value)
             for name, value in request.archive_inputs.items()
         }
+        archive_collection_inputs = {
+            name: [containerize_host_value(value) for value in values]
+            for name, values in request.archive_collection_inputs.items()
+        }
         metadata_inputs = {
             name: containerize_host_value(value)
             for name, value in request.metadata_inputs.items()
@@ -66,6 +70,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             plugin=task.plugin,
             action=task.action,
             archive_inputs=archive_inputs,
+            archive_collection_inputs=archive_collection_inputs,
             metadata_inputs=metadata_inputs,
             params=dict(request.params),
             metadata_column_kwargs=dict(request.metadata_column_kwargs),
@@ -91,8 +96,10 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         ]
 
         host_paths = [request.cwd, request.work_path, python_root]
-        for value in list(request.archive_inputs.values()) + list(
-            request.metadata_inputs.values()
+        for value in (
+            list(request.archive_inputs.values())
+            + [item for values in request.archive_collection_inputs.values() for item in values]
+            + list(request.metadata_inputs.values())
         ):
             if is_uri(value):
                 continue

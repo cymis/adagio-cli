@@ -13,6 +13,7 @@ from adagio.executors.container_support import (
 from adagio.executors.docker import DockerTaskEnvironmentLauncher
 from adagio.executors.task_contract import (
     build_result_manifest,
+    read_json_file,
     result_manifest_path,
     task_spec_path,
     write_json_file,
@@ -47,13 +48,18 @@ class DockerLauncherTests(unittest.TestCase):
             work_path.mkdir()
             output_path = work_path / "summary.qzv"
             input_path = cwd / "input.qza"
+            collection_input_path = cwd / "collection-input.qza"
             input_path.write_text("input", encoding="utf-8")
+            collection_input_path.write_text("collection", encoding="utf-8")
 
             request = TaskExecutionRequest(
                 task=task,
                 cwd=cwd,
                 work_path=work_path,
                 archive_inputs={"data": str(input_path)},
+                archive_collection_inputs={
+                    "tables": [str(collection_input_path)]
+                },
                 metadata_inputs={},
                 params={},
                 metadata_column_kwargs={},
@@ -87,29 +93,37 @@ class DockerLauncherTests(unittest.TestCase):
                     request=request,
                 )
 
-        command = run_mock.call_args.args[0]
-        python_root = container_python_root(work_path=work_path)
-        bind_targets = {
-            f"{root_path}:{containerize_path(root_path)}:rw"
-            for root_path in mount_roots([cwd, work_path, input_path, python_root])
-        }
+            task_spec = read_json_file(task_spec_path(task_id=task.id, work_path=work_path))
 
-        self.assertEqual(command[0], "docker")
-        self.assertEqual(command[1], "run")
-        self.assertEqual(command[2], "--rm")
-        self.assertIn("-w", command)
-        self.assertIn(containerize_path(cwd), command)
-        self.assertIn(
-            f"PYTHONPATH={containerize_path(python_root)}",
-            command,
-        )
-        self.assertIn("PYTHONNOUSERSITE=1", command)
-        self.assertIn("python", command)
-        self.assertIn("-m", command)
-        self.assertIn("adagio.cli.task_exec", command)
-        self.assertIn("--task", command)
-        self.assertIn(expected_spec, command)
-        self.assertIn("ghcr.io/cymis/qiime2-plugin-demux:2026.1", command)
-        self.assertTrue(bind_targets.issubset(set(command)))
-        self.assertEqual(result.outputs, {"visualization": str(output_path)})
-        self.assertFalse(result.reused)
+            command = run_mock.call_args.args[0]
+            python_root = container_python_root(work_path=work_path)
+            bind_targets = {
+                f"{root_path}:{containerize_path(root_path)}:rw"
+                for root_path in mount_roots(
+                    [cwd, work_path, input_path, collection_input_path, python_root]
+                )
+            }
+
+            self.assertEqual(command[0], "docker")
+            self.assertEqual(command[1], "run")
+            self.assertEqual(command[2], "--rm")
+            self.assertIn("-w", command)
+            self.assertIn(containerize_path(cwd), command)
+            self.assertIn(
+                f"PYTHONPATH={containerize_path(python_root)}",
+                command,
+            )
+            self.assertIn("PYTHONNOUSERSITE=1", command)
+            self.assertIn("python", command)
+            self.assertIn("-m", command)
+            self.assertIn("adagio.cli.task_exec", command)
+            self.assertIn("--task", command)
+            self.assertIn(expected_spec, command)
+            self.assertIn("ghcr.io/cymis/qiime2-plugin-demux:2026.1", command)
+            self.assertTrue(bind_targets.issubset(set(command)))
+            self.assertEqual(
+                task_spec["archive_collection_inputs"],
+                {"tables": [containerize_path(collection_input_path)]},
+            )
+            self.assertEqual(result.outputs, {"visualization": str(output_path)})
+            self.assertFalse(result.reused)

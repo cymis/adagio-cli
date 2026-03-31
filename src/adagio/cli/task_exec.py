@@ -37,6 +37,7 @@ def _run_task(spec: dict[str, Any]) -> None:
     plugin_name: str = spec["plugin"]
     action_name: str = spec["action"]
     archive_inputs: dict[str, str] = spec.get("archive_inputs", {})
+    archive_collection_inputs: dict[str, list[str]] = spec.get("archive_collection_inputs", {})
     metadata_inputs: dict[str, str] = spec.get("metadata_inputs", {})
     params: dict[str, Any] = spec.get("params", {})
     metadata_column_kwargs: dict[str, dict[str, str]] = spec.get("metadata_column_kwargs", {})
@@ -73,6 +74,12 @@ def _run_task(spec: dict[str, Any]) -> None:
         for name, path in archive_inputs.items():
             loaded = Artifact.load(path)
             kwargs[name] = _cache_loaded_input(cache=cache, value=loaded)
+
+        for name, paths in archive_collection_inputs.items():
+            kwargs[name] = [
+                _cache_loaded_input(cache=cache, value=Artifact.load(path))
+                for path in paths
+            ]
 
         loaded_metadata: dict[str, Metadata] = {}
         for name, path in metadata_inputs.items():

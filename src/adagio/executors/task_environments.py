@@ -87,13 +87,17 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             )
 
         archive_inputs: dict[str, str] = {}
+        archive_collection_inputs: dict[str, list[str]] = {}
         metadata_inputs: dict[str, str] = {}
         for name, src in task.inputs.items():
-            value = state.scope[src.id]
             if src.kind == "archive":
-                archive_inputs[name] = value
+                archive_inputs[name] = state.scope[src.id]
+            elif src.kind == "archive-collection":
+                archive_collection_inputs[name] = [
+                    state.scope[item.id] for item in src.items
+                ]
             elif src.kind == "metadata":
-                metadata_inputs[name] = value
+                metadata_inputs[name] = state.scope[src.id]
             else:
                 raise TypeError(f"Unsupported input kind: {src.kind!r}")
 
@@ -128,6 +132,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             cwd=state.cwd,
             work_path=state.work_path,
             archive_inputs=archive_inputs,
+            archive_collection_inputs=archive_collection_inputs,
             metadata_inputs=metadata_inputs,
             params=resolved_params,
             metadata_column_kwargs=metadata_column_kwargs,
