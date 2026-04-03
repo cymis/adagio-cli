@@ -127,7 +127,8 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
 
         if console is not None:
             label = f"{Path(runtime_executable).name} {image_path}"
-            console.print(f"[dim]Task environment:[/dim] {label}")
+            if not getattr(console, "_adagio_inline_monitor_active", False):
+                console.print(f"[dim]Task environment:[/dim] {label}")
 
         try:
             result = subprocess.run(

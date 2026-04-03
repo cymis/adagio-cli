@@ -131,7 +131,8 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             label = f"docker {environment.reference}"
             if platform:
                 label = f"docker --platform {platform} {environment.reference}"
-            console.print(f"[dim]Task environment:[/dim] {label}")
+            if not getattr(console, "_adagio_inline_monitor_active", False):
+                console.print(f"[dim]Task environment:[/dim] {label}")
 
         try:
             result = subprocess.run(
