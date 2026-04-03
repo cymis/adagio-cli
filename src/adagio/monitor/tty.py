@@ -1,5 +1,4 @@
 import re
-import threading
 import time
 from dataclasses import dataclass
 
@@ -13,7 +12,6 @@ LABEL_WIDTH = 28
 BAR_WIDTH = 28
 COUNTER_WIDTH = 5
 ELAPSED_WIDTH = 4
-ELAPSED_REFRESH_POLL_SECONDS = 0.2
 
 
 @dataclass
@@ -26,7 +24,6 @@ class _TaskState:
     error: str | None = None
     started_at: float | None = None
     finished_at: float | None = None
-    last_rendered_elapsed_seconds: int | None = None
 
 
 class RichMonitor(Monitor):
@@ -49,113 +46,93 @@ class RichMonitor(Monitor):
             "failed": 0,
             "skipped": 0,
         }
-        self._lock = threading.RLock()
-        self._stop_refresh = threading.Event()
-        self._refresh_thread: threading.Thread | None = None
         self._pipeline_started = False
         self._total_tasks = 0
 
     def start_pipeline(self, *, total_tasks: int = 0) -> None:
         """Start rendering pipeline progress."""
-        with self._lock:
-            if self._pipeline_started:
-                return
-            self._pipeline_started = True
-            self._total_tasks = total_tasks
-            self._stop_refresh.clear()
-            self._console.print("[bold]Task Progress[/bold]")
-            self._progress.start()
-            self._refresh_thread = threading.Thread(
-                target=self._refresh_loop,
-                name="adagio-rich-monitor",
-                daemon=True,
-            )
-            self._refresh_thread.start()
+        if self._pipeline_started:
+            return
+        self._pipeline_started = True
+        self._total_tasks = total_tasks
+        self._console.print("[bold]Task Progress[/bold]")
+        self._progress.start()
 
     def queue_task(
         self, *, task_id: str, label: str, total_subtasks: int = 1
     ) -> None:
         """Queue a task row in the progress view."""
-        with self._lock:
-            total = max(total_subtasks, 1)
-            state = _TaskState(
-                progress_task_id=-1,
-                label=label,
-                total_subtasks=total,
-            )
-            row = self._render_row(state)
-            progress_task_id = self._progress.add_task(
-                description="",
-                total=total,
-                completed=0,
-                row=row,
-            )
-            state.progress_task_id = progress_task_id
-            self._task_lookup[task_id] = state
+        total = max(total_subtasks, 1)
+        state = _TaskState(
+            progress_task_id=-1,
+            label=label,
+            total_subtasks=total,
+        )
+        row = self._render_row(state)
+        progress_task_id = self._progress.add_task(
+            description="",
+            total=total,
+            completed=0,
+            row=row,
+        )
+        state.progress_task_id = progress_task_id
+        self._task_lookup[task_id] = state
 
     def start_task(self, *, task_id: str) -> None:
         """Mark a task as running."""
-        with self._lock:
-            task = self._task_lookup.get(task_id)
-            if task is None:
-                return
-            task.status = "running"
-            task.started_at = time.monotonic()
-            self._refresh_row(task, refresh=False)
-            self._progress.refresh()
+        task = self._task_lookup.get(task_id)
+        if task is None:
+            return
+        task.status = "running"
+        task.started_at = time.monotonic()
+        self._refresh_row(task, refresh=False)
+        self._progress.refresh()
 
     def advance_task(
         self, *, task_id: str, advance: int = 1, message: str | None = None
     ) -> None:
         """Advance a task's subtask progress."""
         del message
-        with self._lock:
-            task = self._task_lookup.get(task_id)
-            if task is None:
-                return
-            task.completed_subtasks = min(
-                task.total_subtasks, task.completed_subtasks + max(advance, 0)
-            )
-            self._refresh_row(task)
+        task = self._task_lookup.get(task_id)
+        if task is None:
+            return
+        task.completed_subtasks = min(
+            task.total_subtasks, task.completed_subtasks + max(advance, 0)
+        )
+        self._refresh_row(task)
 
     def finish_task(
         self, *, task_id: str, status: str = "completed", error: str | None = None
     ) -> None:
         """Mark a task as finished."""
-        with self._lock:
-            task = self._task_lookup.get(task_id)
-            if task is None:
-                return
+        task = self._task_lookup.get(task_id)
+        if task is None:
+            return
 
-            task.status = status
-            task.error = error
-            task.finished_at = time.monotonic()
-            if status in {"completed", "cached", "skipped"}:
-                task.completed_subtasks = task.total_subtasks
-            if status in self._status_counts:
-                self._status_counts[status] += 1
-            self._refresh_row(task)
+        task.status = status
+        task.error = error
+        task.finished_at = time.monotonic()
+        if status in {"completed", "cached", "skipped"}:
+            task.completed_subtasks = task.total_subtasks
+        if status in self._status_counts:
+            self._status_counts[status] += 1
+        self._refresh_row(task)
 
     def finish_pipeline(self) -> None:
         """Stop rendering and print a summary."""
         if not self._pipeline_started:
             return
-        self._stop_refresh.set()
-        if self._refresh_thread is not None:
-            self._refresh_thread.join(timeout=1.0)
-            self._refresh_thread = None
-        with self._lock:
-            self._progress.stop()
-            pending = self._total_tasks - sum(self._status_counts.values())
-            self._console.print(
-                "Summary: "
-                f"{self._status_counts['completed']} completed, "
-                f"{self._status_counts['cached']} cached, "
-                f"{self._status_counts['failed']} failed, "
-                f"{self._status_counts['skipped']} skipped, "
-                f"{max(pending, 0)} pending"
-            )
-            self._pipeline_started = False
+        self._progress.stop()
+        pending = self._total_tasks - sum(self._status_counts.values())
+        self._console.print(
+            "Summary: "
+            f"{self._status_counts['completed']} completed, "
+            f"{self._status_counts['cached']} cached, "
+            f"{self._status_counts['failed']} failed, "
+            f"{self._status_counts['skipped']} skipped, "
+            f"{max(pending, 0)} pending"
+        )
+        self._pipeline_started = False
 
     def _refresh_row(self, task: _TaskState, *, refresh: bool = True) -> None:
         """Refresh a rendered task row."""
@@ -164,27 +141,7 @@ class RichMonitor(Monitor):
             completed=task.completed_subtasks,
             row=self._render_row(task),
         )
-        task.last_rendered_elapsed_seconds = _elapsed_seconds(task)
         if refresh:
-            self._progress.refresh()
-
-    def _refresh_loop(self) -> None:
-        """Refresh running task rows so elapsed time stays current."""
-        while not self._stop_refresh.wait(ELAPSED_REFRESH_POLL_SECONDS):
-            with self._lock:
-                self._refresh_running_rows()
-
-    def _refresh_running_rows(self) -> None:
-        """Refresh only rows whose displayed elapsed time has changed."""
-        needs_refresh = False
-        for task in self._task_lookup.values():
-            if task.status != "running":
-                continue
-            if _elapsed_seconds(task) == task.last_rendered_elapsed_seconds:
-                continue
-            self._refresh_row(task, refresh=False)
-            needs_refresh = True
-        if needs_refresh:
             self._progress.refresh()
 
     def _render_row(self, task: _TaskState) -> str:
@@ -239,6 +196,8 @@ def _bar_text(completed: int, total: int, color: str, width: int = 28) -> str:
 
 def _elapsed(task: _TaskState) -> str:
     """Format elapsed task time as M:SS."""
+    if task.started_at is not None and task.finished_at is None:
+        return "..."
     seconds = _elapsed_seconds(task)
     minutes, sec = divmod(seconds, 60)
     return f"{minutes}:{sec:02d}"
