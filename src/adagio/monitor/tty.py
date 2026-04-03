@@ -13,6 +13,7 @@ LABEL_WIDTH = 28
 BAR_WIDTH = 28
 COUNTER_WIDTH = 5
 ELAPSED_WIDTH = 4
+ELAPSED_REFRESH_POLL_SECONDS = 0.2
 
 
 @dataclass
@@ -25,6 +26,7 @@ class _TaskState:
     error: str | None = None
     started_at: float | None = None
     finished_at: float | None = None
+    last_rendered_elapsed_seconds: int | None = None
 
 
 class RichMonitor(Monitor):
@@ -36,6 +38,7 @@ class RichMonitor(Monitor):
         self._progress = Progress(
             TextColumn("{task.fields[row]}"),
             console=self._console,
+            auto_refresh=False,
             expand=True,
             transient=False,
         )
@@ -60,8 +63,8 @@ class RichMonitor(Monitor):
             self._pipeline_started = True
             self._total_tasks = total_tasks
             self._stop_refresh.clear()
-            self._progress.start()
             self._console.print("[bold]Task Progress[/bold]")
+            self._progress.start()
             self._refresh_thread = threading.Thread(
                 target=self._refresh_loop,
                 name="adagio-rich-monitor",
@@ -161,23 +164,28 @@ class RichMonitor(Monitor):
             completed=task.completed_subtasks,
             row=self._render_row(task),
         )
+        task.last_rendered_elapsed_seconds = _elapsed_seconds(task)
         if refresh:
             self._progress.refresh()
 
     def _refresh_loop(self) -> None:
         """Refresh running task rows so elapsed time stays current."""
-        while not self._stop_refresh.wait(0.5):
+        while not self._stop_refresh.wait(ELAPSED_REFRESH_POLL_SECONDS):
             with self._lock:
-                running = [
-                    task
-                    for task in self._task_lookup.values()
-                    if task.status == "running"
-                ]
-                if not running:
-                    continue
-                for task in running:
-                    self._refresh_row(task, refresh=False)
-                self._progress.refresh()
+                self._refresh_running_rows()
+
+    def _refresh_running_rows(self) -> None:
+        """Refresh only rows whose displayed elapsed time has changed."""
+        needs_refresh = False
+        for task in self._task_lookup.values():
+            if task.status != "running":
+                continue
+            if _elapsed_seconds(task) == task.last_rendered_elapsed_seconds:
+                continue
+            self._refresh_row(task, refresh=False)
+            needs_refresh = True
+        if needs_refresh:
+            self._progress.refresh()
 
     def _render_row(self, task: _TaskState) -> str:
         """Build a compact row for a task."""
@@ -231,12 +239,16 @@ def _bar_text(completed: int, total: int, color: str, width: int = 28) -> str:
 
 def _elapsed(task: _TaskState) -> str:
     """Format elapsed task time as M:SS."""
-    start = task.started_at
-    if start is None:
-        return "0:00"
-    if task.finished_at is not None:
-        seconds = max(0, int(task.finished_at - start))
-    else:
-        seconds = max(0, int(time.monotonic() - start))
+    seconds = _elapsed_seconds(task)
     minutes, sec = divmod(seconds, 60)
     return f"{minutes}:{sec:02d}"
+
+
+def _elapsed_seconds(task: _TaskState) -> int:
+    """Return elapsed task time in whole seconds."""
+    start = task.started_at
+    if start is None:
+        return 0
+    if task.finished_at is not None:
+        return max(0, int(task.finished_at - start))
+    return max(0, int(time.monotonic() - start))
