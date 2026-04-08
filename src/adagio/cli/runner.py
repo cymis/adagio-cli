@@ -40,6 +40,8 @@ def run_pipeline_from_kwargs(
     kwargs: dict[str, Any],
     input_bindings: list[tuple[str, str]],
     param_bindings: list[tuple[str, str]],
+    output_bindings: list[tuple[str, str]],
+    output_dir_ident: str,
     required_inputs: list[str],
     required_params: list[str],
     *,
@@ -104,6 +106,19 @@ def run_pipeline_from_kwargs(
         value = kwargs.get(ident)
         if value is not None:
             arguments.parameters[original] = value
+
+    cli_output_dir = kwargs.get(output_dir_ident)
+    cli_output_overrides = {
+        original: str(value)
+        for ident, original in output_bindings
+        if (value := kwargs.get(ident)) is not None
+    }
+    arguments.outputs = _apply_output_overrides(
+        outputs=arguments.outputs,
+        output_names=output_names,
+        output_dir=str(cli_output_dir) if cli_output_dir is not None else None,
+        output_overrides=cli_output_overrides,
+    )
 
     missing_inputs = [
         name for name in required_inputs if _is_missing(arguments.inputs.get(name))
@@ -191,6 +206,44 @@ def _resolve_output_destinations(
         value = resolved.get(output_name)
         if _is_missing_output(value):
             resolved[output_name] = str((default_output_dir / output_name).resolve())
+    return resolved
+
+
+def _apply_output_overrides(
+    *,
+    outputs: str | dict[str, str],
+    output_names: list[str],
+    output_dir: str | None,
+    output_overrides: dict[str, str],
+) -> str | dict[str, str]:
+    if output_dir is not None:
+        if not output_overrides:
+            return output_dir
+
+        resolved = {
+            output_name: os.path.join(output_dir, output_name)
+            for output_name in output_names
+        }
+        resolved.update(output_overrides)
+        return resolved
+
+    if not output_overrides:
+        return outputs
+
+    if isinstance(outputs, dict):
+        resolved = dict(outputs)
+    elif isinstance(outputs, str):
+        if _is_missing_output(outputs):
+            resolved = {}
+        else:
+            resolved = {
+                output_name: os.path.join(outputs, output_name)
+                for output_name in output_names
+            }
+    else:
+        raise TypeError("Unsupported outputs configuration.")
+
+    resolved.update(output_overrides)
     return resolved
 
 

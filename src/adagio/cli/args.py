@@ -11,6 +11,7 @@ except ImportError:  # pragma: no cover - Python < 3.11
 class ParamType(StrEnum):
     INPUT = "input"
     PARAM = "param"
+    OUTPUT = "output"
 
 
 class ShowParamsMode(StrEnum):

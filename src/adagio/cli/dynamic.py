@@ -1,12 +1,15 @@
 import inspect
+import math
 import re
+import types
 from pathlib import Path
-from typing import Any, Annotated, Callable
+from typing import Any, Annotated, Callable, Union, get_args, get_origin
 
 from cyclopts import Group
 from cyclopts import Parameter as CliParameter
 
 from ..app.parsers.pipeline import Input as InputSpec
+from ..app.parsers.pipeline import Output as OutputSpec
 from ..app.parsers.pipeline import Parameter as ParamSpec
 from ..executors.cache_support import (
     CACHE_DIR_HELP,
@@ -16,52 +19,208 @@ from .args import ParamType, ShowParamsMode, dynamic_opt, to_identifier
 
 
 class _PipelineGroupFormatter:
-    """Render pipeline options in one panel with nested subsections."""
+    """Render pipeline options in one aligned table."""
+
+    def __init__(self, entry_metadata: dict[str, dict[str, Any]]):
+        self.entry_metadata = entry_metadata
 
     def __call__(self, console: Any, options: Any, panel: Any) -> None:
         from rich.console import Group as RichGroup
         from rich.console import NewLine
-        from rich.text import Text
 
-        from cyclopts.help.specs import PanelSpec, TableSpec, get_default_parameter_columns
+        from cyclopts.help.specs import PanelSpec, TableSpec
 
-        input_entries, parameter_entries = _split_pipeline_entries(panel.entries)
         renderables: list[Any] = []
 
         if panel.description:
             renderables.append(panel.description)
-
-        def add_section(title: str, entries: list[Any]) -> None:
-            if not entries:
-                return
-            if renderables:
-                renderables.append(NewLine())
-            renderables.append(Text(title, style="bold"))
-            columns = get_default_parameter_columns(console, options, entries)
-            renderables.append(TableSpec().build(columns, entries))
-
-        add_section("Inputs", input_entries)
-        add_section("Parameters", parameter_entries)
-
-        if not renderables:
+        if not panel.entries:
             return
 
+        if renderables:
+            renderables.append(NewLine())
+        columns = _get_pipeline_parameter_columns(
+            console, panel.entries, self.entry_metadata
+        )
+        renderables.append(TableSpec().build(columns, panel.entries))
         console.print(PanelSpec().build(RichGroup(*renderables), title=panel.title))
 
 
-def _split_pipeline_entries(entries: list[Any]) -> tuple[list[Any], list[Any]]:
-    input_entries: list[Any] = []
-    parameter_entries: list[Any] = []
+def _entry_key(entry: Any) -> str:
+    options = entry.all_options if hasattr(entry, "all_options") else ()
+    return next((name for name in options if name.startswith("--")), "")
 
-    for entry in entries:
-        options = entry.all_options if hasattr(entry, "all_options") else ()
-        long_name = next((name for name in options if name.startswith("--")), "")
-        if long_name.startswith("--input-"):
-            input_entries.append(entry)
+
+def _unwrap_optional_type(type_hint: Any) -> Any:
+    origin = get_origin(type_hint)
+    if origin not in (types.UnionType, Union):
+        return type_hint
+
+    args = [arg for arg in get_args(type_hint) if arg is not type(None)]
+    return args[0] if len(args) == 1 else type_hint
+
+
+def _pipeline_type_label(type_hint: Any) -> str:
+    type_hint = _unwrap_optional_type(type_hint)
+    if type_hint is bool:
+        return "BOOLEAN"
+    if type_hint is int:
+        return "INTEGER"
+    if type_hint is float:
+        return "NUMBER"
+    if type_hint is Path:
+        return "PATH"
+    return "TEXT"
+
+
+def _display_type_label(*, spec_type: str | None, type_hint: Any, is_input: bool) -> str:
+    if is_input:
+        return "PATH"
+
+    if spec_type:
+        compact = _compact_type_text(spec_type)
+        if compact.startswith("["):
+            return compact
+
+    return _pipeline_type_label(type_hint)
+
+
+def _output_path_help(description: str | None) -> str:
+    cleaned = (description or "").strip()
+    if cleaned:
+        return f"{cleaned} Overrides --output-dir for this output."
+    return "Overrides --output-dir for this output."
+
+
+def _render_pipeline_type(
+    entry: Any, entry_metadata: dict[str, dict[str, Any]], width: int
+) -> Any:
+    from rich.text import Text
+
+    label = entry_metadata.get(_entry_key(entry), {}).get("type_label", "TEXT")
+    return Text(_wrap_type_label(label, width), style="bold yellow")
+
+
+def _compact_type_text(type_text: str) -> str:
+    cleaned = type_text.strip()
+    if "Choices(" not in cleaned:
+        return f"({cleaned})"
+
+    match = re.search(r"Choices\((.*)\)", cleaned)
+    if match is None:
+        return f"({cleaned})"
+
+    choices = [
+        choice.strip().strip("'\"")
+        for choice in match.group(1).split(",")
+        if choice.strip()
+    ]
+    if not choices:
+        return f"({cleaned})"
+    return "[" + "|".join(choices) + "]"
+
+
+def _wrap_type_label(label: str, width: int) -> str:
+    if len(label) <= width or not (label.startswith("[") and label.endswith("]")):
+        return label
+
+    choices = [choice for choice in label[1:-1].split("|") if choice]
+    if not choices:
+        return label
+
+    lines: list[str] = []
+    current = "["
+
+    for index, choice in enumerate(choices):
+        is_last = index == len(choices) - 1
+        separator = "" if current in ("[", " |") else "|"
+        suffix = "]" if is_last else ""
+        candidate = current + separator + choice + suffix
+
+        if len(candidate) <= width or current in ("[", " |"):
+            current = candidate
         else:
-            parameter_entries.append(entry)
+            lines.append(current)
+            current = " |" + choice + suffix
 
-    return input_entries, parameter_entries
+    if not current.endswith("]"):
+        current += "]"
+    lines.append(current)
+    return "\n".join(lines)
+
+
+def _render_pipeline_description(
+    entry: Any, entry_metadata: dict[str, dict[str, Any]]
+) -> Any:
+    from rich.text import Text
+
+    from cyclopts.help.inline_text import InlineText
+
+    metadata = entry_metadata.get(_entry_key(entry), {})
+    description = entry.description
+    if description is None:
+        description = InlineText(Text())
+    elif not isinstance(description, InlineText):
+        if hasattr(description, "__rich_console__"):
+            description = InlineText(description)
+        else:
+            description = InlineText(Text(str(description)))
+
+    default = metadata.get("default")
+    if default is not None:
+        description.append(Text(f"[default: {default}]", "dim"))
+
+    if metadata.get("required"):
+        description.append(Text("[required]", "dim red"))
+
+    return description
+
+
+def _get_pipeline_parameter_columns(
+    console: Any,
+    entries: list[Any],
+    entry_metadata: dict[str, dict[str, Any]],
+) -> tuple[Any, ...]:
+    from cyclopts.help.specs import (
+        ColumnSpec,
+        NameRenderer,
+    )
+
+    max_width = math.ceil(console.width * 0.35)
+    type_width = max(
+        8,
+        min(
+            max(
+                len(entry_metadata.get(_entry_key(entry), {}).get("type_label", "TEXT"))
+                for entry in entries
+            ),
+            max(22, min(34, math.ceil(console.width * 0.3))),
+        ),
+    )
+    name_column = ColumnSpec(
+        renderer=NameRenderer(max_width=max_width),
+        header="Option",
+        justify="left",
+        style="cyan",
+        max_width=max_width,
+    )
+    type_column = ColumnSpec(
+        renderer=lambda entry: _render_pipeline_type(entry, entry_metadata, type_width),
+        header="Type",
+        justify="left",
+        no_wrap=True,
+        width=type_width,
+        min_width=type_width,
+        max_width=type_width,
+    )
+    description_column = ColumnSpec(
+        renderer=lambda entry: _render_pipeline_description(entry, entry_metadata),
+        header="Description",
+        justify="left",
+        overflow="fold",
+    )
+
+    return (name_column, type_column, description_column)
 
 
 def _spec_py_type(type_name: str) -> type:
@@ -104,10 +263,23 @@ def _resolve_param_type(type_name: str, default: Any) -> type:
     return declared
 
 
+def _format_help_text(
+    *,
+    description: str | None = None,
+) -> str:
+    """Return plain description text for pipeline help rows."""
+    return (description or "").strip()
+
+
+def _is_required_param(spec: ParamSpec) -> bool:
+    return bool(spec.required and spec.default is None)
+
+
 def build_dynamic_run(
     *,
     input_specs: list[InputSpec],
     param_specs: list[ParamSpec],
+    output_specs: list[OutputSpec],
     argument_inputs: dict[str, Any] | None = None,
     argument_params: dict[str, Any] | None = None,
     run_handler: Callable[
@@ -118,18 +290,22 @@ def build_dynamic_run(
             dict[str, Any],
             list[tuple[str, str]],
             list[tuple[str, str]],
+            list[tuple[str, str]],
+            str,
             list[str],
             list[str],
         ],
         None,
     ],
 ):
-    """Build a dynamic run command from pipeline input and parameter specs."""
+    """Build a dynamic run command from pipeline input, parameter, and output specs."""
     input_bindings: list[tuple[str, str]] = []
     param_bindings: list[tuple[str, str]] = []
+    output_bindings: list[tuple[str, str]] = []
     required_inputs: list[str] = []
     required_params: list[str] = []
     seen_idents: set[str] = set()
+    entry_metadata: dict[str, dict[str, Any]] = {}
     seen_opts: set[str] = {
         "--pipeline",
         "-p",
@@ -139,6 +315,7 @@ def build_dynamic_run(
         "--cache-dir",
         "--reuse",
         "--no-reuse",
+        "--output-dir",
     }
     argument_inputs = argument_inputs or {}
     argument_params = argument_params or {}
@@ -146,7 +323,7 @@ def build_dynamic_run(
     pipeline_group = Group(
         "Pipeline",
         sort_key=1,
-        help_formatter=_PipelineGroupFormatter(),
+        help_formatter=_PipelineGroupFormatter(entry_metadata),
     )
 
     annotations: dict[str, Any] = {
@@ -201,12 +378,25 @@ def build_dynamic_run(
             help=REUSE_HELP,
         ),
     ]
+    annotations["output_dir"] = Annotated[
+        Path | None,
+        CliParameter(
+            name=("--output-dir",),
+            group=command_group,
+            help="Directory for all pipeline outputs.",
+        ),
+    ]
 
     parameters: list[inspect.Parameter] = [
         inspect.Parameter(
             name="pipeline",
             kind=inspect.Parameter.KEYWORD_ONLY,
             annotation=annotations["pipeline"],
+        ),
+        inspect.Parameter(
+            name="cache_dir",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            annotation=annotations["cache_dir"],
         ),
         inspect.Parameter(
             name="arguments_file",
@@ -227,15 +417,16 @@ def build_dynamic_run(
             annotation=annotations["config_file"],
         ),
         inspect.Parameter(
-            name="cache_dir",
-            kind=inspect.Parameter.KEYWORD_ONLY,
-            annotation=annotations["cache_dir"],
-        ),
-        inspect.Parameter(
             name="reuse",
             kind=inspect.Parameter.KEYWORD_ONLY,
             default=True,
             annotation=annotations["reuse"],
+        ),
+        inspect.Parameter(
+            name="output_dir",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation=annotations["output_dir"],
         ),
     ]
 
@@ -272,7 +463,12 @@ def build_dynamic_run(
             )
         )
 
-    for spec in input_specs:
+    required_input_specs = [spec for spec in input_specs if spec.required]
+    optional_input_specs = [spec for spec in input_specs if not spec.required]
+    required_param_specs = [spec for spec in param_specs if _is_required_param(spec)]
+    optional_param_specs = [spec for spec in param_specs if not _is_required_param(spec)]
+
+    def add_input_spec(spec: InputSpec) -> None:
         original = spec.name
         ident = to_identifier(original, "input")
         if ident in seen_idents:
@@ -288,21 +484,26 @@ def build_dynamic_run(
 
         type_text = spec.type
         opt = dynamic_opt(original, ParamType.INPUT)
+        entry_metadata[opt] = {
+            "type_label": _display_type_label(
+                spec_type=type_text, type_hint=str, is_input=True
+            ),
+            "default": None,
+            "required": display_required,
+        }
         add_dynamic_option(
             ident=ident,
             opt=opt,
             required=False,
             py_type=str,
-            help_text=(
-                f"Pipeline input: {original}"
-                + (f" ({type_text})" if type_text else "")
-                + (" [required]" if display_required else "")
+            help_text=_format_help_text(
+                description=spec.description,
             ),
             default=None,
             group=pipeline_group,
         )
 
-    for spec in param_specs:
+    def add_param_spec(spec: ParamSpec) -> None:
         original = spec.name
         ident = to_identifier(original, "param")
         if ident in seen_idents:
@@ -313,8 +514,7 @@ def build_dynamic_run(
         param_bindings.append((ident, original))
 
         default = spec.default
-        required = spec.required
-        is_required = bool(required and default is None)
+        is_required = _is_required_param(spec)
         argument_value = argument_params.get(original)
         has_argument_default = not _is_missing(argument_value)
         display_default = (
@@ -326,18 +526,58 @@ def build_dynamic_run(
         opt = dynamic_opt(original, ParamType.PARAM)
         if is_required:
             required_params.append(original)
-        default_text = f" [default: {display_default}]" if display_default is not None else ""
+        entry_metadata[opt] = {
+            "type_label": _display_type_label(
+                spec_type=spec.type, type_hint=param_type, is_input=False
+            ),
+            "default": display_default,
+            "required": display_required,
+        }
         add_dynamic_option(
             ident=ident,
             opt=opt,
             required=False,
             py_type=param_type,
-            help_text=(
-                f"Pipeline parameter: {original}"
-                + (" [required]" if display_required else "")
-                + default_text
+            help_text=_format_help_text(
+                description=spec.description,
             ),
             default=param_default,
+            group=pipeline_group,
+        )
+
+    for spec in required_input_specs:
+        add_input_spec(spec)
+    for spec in required_param_specs:
+        add_param_spec(spec)
+    for spec in optional_input_specs:
+        add_input_spec(spec)
+    for spec in optional_param_specs:
+        add_param_spec(spec)
+
+    for spec in output_specs:
+        original = spec.name
+        ident = to_identifier(original, "output")
+        if ident in seen_idents:
+            raise ValueError(
+                f"Duplicate pipeline output name after normalization: {original!r}."
+            )
+        seen_idents.add(ident)
+        output_bindings.append((ident, original))
+        opt = dynamic_opt(original, ParamType.OUTPUT)
+        entry_metadata[opt] = {
+            "type_label": "PATH",
+            "default": None,
+            "required": False,
+        }
+        add_dynamic_option(
+            ident=ident,
+            opt=opt,
+            required=False,
+            py_type=str,
+            help_text=_format_help_text(
+                description=_output_path_help(spec.description),
+            ),
+            default=None,
             group=pipeline_group,
         )
 
@@ -346,9 +586,11 @@ def build_dynamic_run(
         arguments_file: Path | None = None,
         show_params: ShowParamsMode = ShowParamsMode.REQUIRED,
         config_file: Path | None = None,
+        output_dir: Path | None = None,
         **kwargs: Any,
     ) -> None:
         _ = show_params
+        kwargs["output_dir"] = output_dir
         run_handler(
             pipeline,
             arguments_file,
@@ -356,6 +598,8 @@ def build_dynamic_run(
             kwargs,
             input_bindings,
             param_bindings,
+            output_bindings,
+            "output_dir",
             required_inputs,
             required_params,
         )
@@ -364,7 +608,7 @@ def build_dynamic_run(
     run.__signature__ = inspect.Signature(parameters)
     run.__doc__ = (
         "Run an Adagio pipeline.\n\n"
-        "Dynamic inputs and parameters are loaded from the pipeline file and exposed as CLI options.\n"
+        "Dynamic inputs, parameters, and outputs are loaded from the pipeline file and exposed as CLI options.\n"
         "Use: adagio run --pipeline PATH --help"
     )
     return run

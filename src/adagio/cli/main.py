@@ -9,8 +9,9 @@ from cyclopts.panel import CycloptsPanel
 from rich.console import Console
 
 from ..app.parsers.pipeline import Input as InputSpec
+from ..app.parsers.pipeline import Output as OutputSpec
 from ..app.parsers.pipeline import Parameter as ParamSpec
-from ..app.parsers.pipeline import parse_inputs, parse_parameters
+from ..app.parsers.pipeline import parse_inputs, parse_outputs, parse_parameters
 from ..executors.cache_support import CACHE_DIR_HELP, REUSE_HELP
 from .args import ShowParamsMode, extract_flag_value, promote_positional_pipeline
 from .config import load_run_config
@@ -59,6 +60,7 @@ def main(argv: list[str] | None = None) -> None:
     app = App(
         name="adagio",
         help="Adagio command line tool for processing pipelines created with the Adagio GUI.",
+        help_format="rich",
     )
     app.command(build_qapi, name="build-qapi")
 
@@ -142,6 +144,7 @@ def main(argv: list[str] | None = None) -> None:
     data = json.loads(pipeline_path.read_text(encoding="utf-8"))
     input_specs = parse_inputs(data)
     param_specs = parse_parameters(data)
+    output_specs = parse_outputs(data)
     arguments_path_str = extract_flag_value(argv, "--arguments")
     config_path_str = extract_flag_value(argv, "--config")
     arguments_data = (
@@ -149,9 +152,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     if config_path_str:
         load_run_config(Path(config_path_str))
-    visible_inputs, visible_params = _filter_visible_specs(
+    visible_inputs, visible_params, visible_outputs = _filter_visible_specs(
         input_specs=input_specs,
         param_specs=param_specs,
+        output_specs=output_specs,
         show_mode=show_mode,
         arguments_data=arguments_data,
     )
@@ -159,6 +163,7 @@ def main(argv: list[str] | None = None) -> None:
     dynamic_run = build_dynamic_run(
         input_specs=visible_inputs,
         param_specs=visible_params,
+        output_specs=visible_outputs,
         argument_inputs=arguments_data.get("inputs", {}) if arguments_data else None,
         argument_params=arguments_data.get("parameters", {}) if arguments_data else None,
         run_handler=partial(run_pipeline_from_kwargs, console=console),
@@ -171,11 +176,12 @@ def _filter_visible_specs(
     *,
     input_specs: list[InputSpec],
     param_specs: list[ParamSpec],
+    output_specs: list[OutputSpec],
     show_mode: ShowParamsMode,
     arguments_data: dict[str, Any] | None,
-) -> tuple[list[InputSpec], list[ParamSpec]]:
+) -> tuple[list[InputSpec], list[ParamSpec], list[OutputSpec]]:
     if show_mode is ShowParamsMode.ALL:
-        return input_specs, param_specs
+        return input_specs, param_specs, output_specs
 
     state_inputs = {spec.name: None for spec in input_specs}
     state_params = {spec.name: spec.default for spec in param_specs}
@@ -199,7 +205,7 @@ def _filter_visible_specs(
                 and _is_missing(state_params.get(spec.name))
             )
         ]
-        return filtered_inputs, filtered_params
+        return filtered_inputs, filtered_params, []
 
     filtered_inputs = [
         spec for spec in input_specs if _is_missing(state_inputs.get(spec.name))
@@ -207,7 +213,7 @@ def _filter_visible_specs(
     filtered_params = [
         spec for spec in param_specs if _is_missing(state_params.get(spec.name))
     ]
-    return filtered_inputs, filtered_params
+    return filtered_inputs, filtered_params, []
 
 
 def _load_arguments_data(path: Path, _console: Console | None = None) -> dict[str, Any]:
