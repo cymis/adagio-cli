@@ -99,6 +99,16 @@ def build_qapi(
             help="Optional path to write the generated request JSON.",
         ),
     ] = None,
+    submission_token: Annotated[
+        str | None,
+        Parameter(
+            name=("--submission-token",),
+            help=(
+                "Bearer token for protected QAPI submission routes. Defaults to "
+                "QAPI_SUBMISSION_TOKEN env var; prefer the env var to avoid shell history leaks."
+            ),
+        ),
+    ] = None,
     timeout: Annotated[
         int,
         Parameter(
@@ -151,6 +161,7 @@ def build_qapi(
     url, status, response_body = submit_qapi_payload(
         request_body,
         action_url=action_url,
+        submission_token=submission_token,
         timeout=timeout,
         dry_run=dry_run,
         force_overwrite=force_overwrite,
