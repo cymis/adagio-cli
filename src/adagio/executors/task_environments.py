@@ -87,13 +87,17 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             )
 
         archive_inputs: dict[str, str] = {}
+        archive_collection_inputs: dict[str, list[str]] = {}
         metadata_inputs: dict[str, str] = {}
         for name, src in task.inputs.items():
-            value = state.scope[src.id]
             if src.kind == "archive":
-                archive_inputs[name] = value
+                archive_inputs[name] = state.scope[src.id]
+            elif src.kind == "archive-collection":
+                archive_collection_inputs[name] = [
+                    state.scope[item.id] for item in src.items
+                ]
             elif src.kind == "metadata":
-                metadata_inputs[name] = value
+                metadata_inputs[name] = state.scope[src.id]
             else:
                 raise TypeError(f"Unsupported input kind: {src.kind!r}")
 
@@ -111,7 +115,9 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                 elif column.kind == "promoted":
                     column_name = str(state.params[column.id])
                 else:
-                    raise TypeError(f"Unsupported metadata column kind: {column.kind!r}")
+                    raise TypeError(
+                        f"Unsupported metadata column kind: {column.kind!r}"
+                    )
                 metadata_column_kwargs[name] = {"source": name, "column": column_name}
             else:
                 raise TypeError(f"Unsupported parameter kind: {param.kind!r}")
@@ -126,6 +132,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             cwd=state.cwd,
             work_path=state.work_path,
             archive_inputs=archive_inputs,
+            archive_collection_inputs=archive_collection_inputs,
             metadata_inputs=metadata_inputs,
             params=resolved_params,
             metadata_column_kwargs=metadata_column_kwargs,
@@ -164,13 +171,20 @@ def _save_outputs(
     arguments: AdagioArguments,
     state: SerialExecutionState,
     monitor: Monitor | None,
+    require_all: bool = True,
 ) -> None:
     if isinstance(arguments.outputs, str):
         os.makedirs(arguments.outputs, exist_ok=True)
 
     for output in sig.outputs:
+        if output.id in state.saved_output_ids:
+            continue
         if output.id not in state.scope:
-            raise KeyError(f"Missing output value for {output.name!r} ({output.id}).")
+            if require_all:
+                raise KeyError(
+                    f"Missing output value for {output.name!r} ({output.id})."
+                )
+            continue
 
         source_path = Path(state.scope[output.id])
         destination = resolve_output_destination(
@@ -183,6 +197,10 @@ def _save_outputs(
         parent = os.path.dirname(destination)
         if parent:
             os.makedirs(parent, exist_ok=True)
+
+        if monitor is not None and not state.save_output_started:
+            monitor.start_save_output()
+            state.save_output_started = True
 
         try:
             shutil.copy2(source_path, destination)
@@ -204,3 +222,4 @@ def _save_outputs(
                     destination=destination,
                     status="succeeded",
                 )
+            state.saved_output_ids.add(output.id)

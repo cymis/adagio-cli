@@ -36,6 +36,7 @@ class TaskEnvironmentSpec:
 
 @dataclass(frozen=True)
 class TaskEnvironmentOverride:
+    kind: str | None = None
     reference: str | None = None
     platform: str | None = None
 
@@ -46,6 +47,7 @@ class TaskExecutionRequest:
     cwd: Path
     work_path: Path
     archive_inputs: Mapping[str, str]
+    archive_collection_inputs: Mapping[str, list[str]]
     metadata_inputs: Mapping[str, str]
     params: Mapping[str, Any]
     metadata_column_kwargs: Mapping[str, Mapping[str, str]]

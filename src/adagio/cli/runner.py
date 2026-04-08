@@ -29,6 +29,7 @@ def _error_exit(console: Console, message: str) -> None:
     console.print(panel)
     sys.exit(1)
 
+
 DEFAULT_OUTPUT_DIRNAME = "adagio-outputs"
 
 
@@ -39,6 +40,8 @@ def run_pipeline_from_kwargs(
     kwargs: dict[str, Any],
     input_bindings: list[tuple[str, str]],
     param_bindings: list[tuple[str, str]],
+    output_bindings: list[tuple[str, str]],
+    output_dir_ident: str,
     required_inputs: list[str],
     required_params: list[str],
     *,
@@ -68,17 +71,26 @@ def run_pipeline_from_kwargs(
 
         unknown_inputs = sorted(set(arguments_data.inputs) - input_names)
         if unknown_inputs:
-            _error_exit(console, "Unknown inputs in arguments file: " + ", ".join(unknown_inputs))
+            _error_exit(
+                console,
+                "Unknown inputs in arguments file: " + ", ".join(unknown_inputs),
+            )
 
         unknown_params = sorted(set(arguments_data.parameters) - param_names)
         if unknown_params:
-            _error_exit(console, "Unknown parameters in arguments file: " + ", ".join(unknown_params))
+            _error_exit(
+                console,
+                "Unknown parameters in arguments file: " + ", ".join(unknown_params),
+            )
 
         unknown_outputs: list[str] = []
         if isinstance(arguments_data.outputs, dict):
             unknown_outputs = sorted(set(arguments_data.outputs) - output_name_set)
         if unknown_outputs:
-            _error_exit(console, "Unknown outputs in arguments file: " + ", ".join(unknown_outputs))
+            _error_exit(
+                console,
+                "Unknown outputs in arguments file: " + ", ".join(unknown_outputs),
+            )
 
         arguments.inputs.update(arguments_data.inputs)
         arguments.parameters.update(arguments_data.parameters)
@@ -95,6 +107,19 @@ def run_pipeline_from_kwargs(
         if value is not None:
             arguments.parameters[original] = value
 
+    cli_output_dir = kwargs.get(output_dir_ident)
+    cli_output_overrides = {
+        original: str(value)
+        for ident, original in output_bindings
+        if (value := kwargs.get(ident)) is not None
+    }
+    arguments.outputs = _apply_output_overrides(
+        outputs=arguments.outputs,
+        output_names=output_names,
+        output_dir=str(cli_output_dir) if cli_output_dir is not None else None,
+        output_overrides=cli_output_overrides,
+    )
+
     missing_inputs = [
         name for name in required_inputs if _is_missing(arguments.inputs.get(name))
     ]
@@ -102,10 +127,9 @@ def run_pipeline_from_kwargs(
         name for name in required_params if _is_missing(arguments.parameters.get(name))
     ]
     if missing_inputs or missing_params:
-        missing_opts = (
-            [f"--input-{n.replace('_', '-')}" for n in missing_inputs]
-            + [f"--param-{n.replace('_', '-')}" for n in missing_params]
-        )
+        missing_opts = [f"--input-{n.replace('_', '-')}" for n in missing_inputs] + [
+            f"--param-{n.replace('_', '-')}" for n in missing_params
+        ]
         formatted = ", ".join(f"[cyan]{opt}[/cyan]" for opt in missing_opts)
         _error_exit(console, f"Missing required arguments: {formatted}")
 
@@ -185,6 +209,44 @@ def _resolve_output_destinations(
     return resolved
 
 
+def _apply_output_overrides(
+    *,
+    outputs: str | dict[str, str],
+    output_names: list[str],
+    output_dir: str | None,
+    output_overrides: dict[str, str],
+) -> str | dict[str, str]:
+    if output_dir is not None:
+        if not output_overrides:
+            return output_dir
+
+        resolved = {
+            output_name: os.path.join(output_dir, output_name)
+            for output_name in output_names
+        }
+        resolved.update(output_overrides)
+        return resolved
+
+    if not output_overrides:
+        return outputs
+
+    if isinstance(outputs, dict):
+        resolved = dict(outputs)
+    elif isinstance(outputs, str):
+        if _is_missing_output(outputs):
+            resolved = {}
+        else:
+            resolved = {
+                output_name: os.path.join(outputs, output_name)
+                for output_name in output_names
+            }
+    else:
+        raise TypeError("Unsupported outputs configuration.")
+
+    resolved.update(output_overrides)
+    return resolved
+
+
 def _is_truthy(value: str | None) -> bool:
     if value is None:
         return False
@@ -196,10 +258,11 @@ def _config_default_override(run_config: Any) -> TaskEnvironmentOverride | None:
         return None
 
     defaults = run_config.defaults
-    if defaults.image is None and defaults.platform is None:
+    if defaults.kind is None and defaults.image is None and defaults.platform is None:
         return None
 
     return TaskEnvironmentOverride(
+        kind=defaults.kind,
         reference=defaults.image,
         platform=defaults.platform,
     )
@@ -210,10 +273,13 @@ def _config_named_overrides(
 ) -> dict[str, TaskEnvironmentOverride] | None:
     resolved = {
         name: TaskEnvironmentOverride(
+            kind=override.kind,
             reference=override.image,
             platform=override.platform,
         )
         for name, override in raw_overrides.items()
-        if override.image is not None or override.platform is not None
+        if override.kind is not None
+        or override.image is not None
+        or override.platform is not None
     }
     return resolved or None

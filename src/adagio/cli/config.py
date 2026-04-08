@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -9,11 +10,13 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 class ImageOverride(BaseModel):
+    kind: Literal["docker", "apptainer"] | None = None
     image: str | None = None
     platform: str | None = None
 
 
 class DefaultOverride(BaseModel):
+    kind: Literal["docker", "apptainer"] | None = None
     image: str | None = None
     platform: str | None = None
 

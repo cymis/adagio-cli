@@ -56,6 +56,7 @@ class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
 
     def resolve(self, *, task: PluginActionTask) -> TaskEnvironmentSpec:
         base_environment = self._base.resolve(task=task)
+        kind = base_environment.kind
         reference = base_environment.reference
         options = dict(base_environment.options or {})
         configured = False
@@ -67,6 +68,9 @@ class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
         ):
             if override is None:
                 continue
+            if override.kind is not None:
+                kind = override.kind
+                configured = True
             if override.reference is not None:
                 reference = override.reference
                 configured = True
@@ -75,7 +79,7 @@ class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
                 configured = True
 
         return TaskEnvironmentSpec(
-            kind=base_environment.kind,
+            kind=kind,
             reference=reference,
             description=(
                 f"configured environment for {task.name or task.id}"
@@ -85,7 +89,9 @@ class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
             options=options or None,
         )
 
-    def _find_task_override(self, *, task: PluginActionTask) -> TaskEnvironmentOverride | None:
+    def _find_task_override(
+        self, *, task: PluginActionTask
+    ) -> TaskEnvironmentOverride | None:
         candidates = [task.id]
         if task.name:
             candidates.insert(0, task.name)
@@ -97,7 +103,9 @@ class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
                 return override
         return None
 
-    def _find_plugin_override(self, *, task: PluginActionTask) -> TaskEnvironmentOverride | None:
+    def _find_plugin_override(
+        self, *, task: PluginActionTask
+    ) -> TaskEnvironmentOverride | None:
         plugin_candidates = [task.plugin, task.plugin.lower()]
         for candidate in plugin_candidates:
             override = self._plugin_overrides.get(candidate)

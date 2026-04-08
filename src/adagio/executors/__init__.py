@@ -11,6 +11,7 @@ def select_default_executor(
         ConfigurableTaskEnvironmentResolver,
         DefaultTaskEnvironmentResolver,
     )
+    from .apptainer import ApptainerTaskEnvironmentLauncher
     from .docker import DockerTaskEnvironmentLauncher
     from .task_environments import TaskEnvironmentExecutor
 
@@ -22,6 +23,7 @@ def select_default_executor(
             task_overrides=task_overrides,
         ),
         launchers={
+            "apptainer": ApptainerTaskEnvironmentLauncher(),
             "docker": DockerTaskEnvironmentLauncher(),
         },
     )

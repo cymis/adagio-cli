@@ -12,6 +12,7 @@ class Parameter(BaseModel):
     required: bool
     default: Optional[Any] = None
     type: str
+    description: Optional[str] = None
 
 
 class Input(BaseModel):
@@ -19,6 +20,14 @@ class Input(BaseModel):
     name: str
     required: bool
     type: str
+    description: Optional[str] = None
+
+
+class Output(BaseModel):
+    id: UUID
+    name: str
+    type: str
+    description: Optional[str] = None
 
 
 def _extract_signature(data: Any) -> dict[str, Any]:
@@ -65,3 +74,16 @@ def parse_inputs(data: Any) -> List[Input]:
         )
 
     return [Input(**input_item) for input_item in raw_inputs]
+
+
+def parse_outputs(data: Any) -> List[Output]:
+    """Parse pipeline outputs from supported pipeline JSON layouts."""
+    signature = _extract_signature(data)
+
+    raw_outputs = signature.get("outputs")
+    if not isinstance(raw_outputs, list):
+        raise ValueError(
+            "Invalid pipeline: missing 'signature.outputs' list in pipeline JSON."
+        )
+
+    return [Output(**output_item) for output_item in raw_outputs]

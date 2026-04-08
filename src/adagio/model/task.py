@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 class _BaseTask(BaseModel):
     id: str
     kind: str
-    inputs: dict[str, 'InputVal']
+    inputs: dict[str, 'TaskInputVal']
     parameters: dict[str, 'LiteralVal | MetadataVal | PromotedVal']
     outputs: dict[str, 'OutputVal']
 
@@ -29,6 +29,8 @@ class PluginActionTask(_BaseTask):
         for name, src in self.inputs.items():
             if src.kind == 'archive':
                 kwargs[name] = scope[src.id]
+            elif src.kind == 'archive-collection':
+                kwargs[name] = [scope[item.id] for item in src.items]
             elif src.kind == 'metadata':
                 # store for second pass in params
                 metadata[name] = scope[src.id]
@@ -81,6 +83,17 @@ class InputVal(BaseModel):
     id: str
 
 
+class ArchiveCollectionItemVal(BaseModel):
+    key: str
+    id: str
+
+
+class ArchiveCollectionInputVal(BaseModel):
+    kind: t.Literal['archive-collection']
+    style: t.Literal['list']
+    items: list[ArchiveCollectionItemVal]
+
+
 class OutputVal(BaseModel):
     kind: t.Literal['archive']
     id: str
@@ -108,5 +121,15 @@ class MetadataVal(BaseModel):
 Primitive = int | float | str | bool | t.Literal[None]
 Collection = list[Primitive] | dict[str, Primitive]
 AllowableValue = Primitive | Collection
+TaskInputVal = t.Annotated[
+    t.Union[InputVal, ArchiveCollectionInputVal],
+    Field(discriminator='kind')
+]
 AdagioTask = t.Annotated[t.Union[PluginActionTask, RootInputTask],
                          Field(discriminator='kind')]
+
+
+def input_source_ids(value: TaskInputVal) -> list[str]:
+    if value.kind == 'archive-collection':
+        return [item.id for item in value.items]
+    return [value.id]

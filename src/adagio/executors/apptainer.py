@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -14,16 +15,15 @@ from .container_support import (
     container_python_root,
     containerize_host_value,
     containerize_path,
-    docker_tty_flags,
     host_path_from_container,
     is_uri,
     print_filtered_container_stderr,
-    python_warning_env_flags,
-    with_mounts,
+    python_warning_env_assignments,
+    with_apptainer_binds,
 )
 from .task_contract import (
-    parse_result_manifest,
     build_task_spec,
+    parse_result_manifest,
     read_json_file,
     result_manifest_path,
     task_spec_path,
@@ -31,8 +31,8 @@ from .task_contract import (
 )
 
 
-class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
-    kind = "docker"
+class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
+    kind = "apptainer"
 
     def launch(
         self,
@@ -41,6 +41,9 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         request: TaskExecutionRequest,
         console: Console | None = None,
     ) -> TaskExecutionResult:
+        image_path = _resolve_sif_image(environment.reference)
+        runtime_executable = _resolve_runtime_executable()
+
         task = request.task
         archive_inputs = {
             name: containerize_host_value(value)
@@ -59,7 +62,9 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             for name, path in request.outputs.items()
         }
 
-        manifest_path = result_manifest_path(task_id=task.id, work_path=request.work_path)
+        manifest_path = result_manifest_path(
+            task_id=task.id, work_path=request.work_path
+        )
         spec_path = task_spec_path(task_id=task.id, work_path=request.work_path)
         task_spec = build_task_spec(
             plugin=task.plugin,
@@ -81,35 +86,14 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         write_json_file(spec_path, task_spec)
 
         python_root = container_python_root(work_path=request.work_path)
-        platform = None
-        if environment.options is not None:
-            raw_platform = environment.options.get("platform")
-            if isinstance(raw_platform, str) and raw_platform:
-                platform = raw_platform
-
         command = [
-            "docker",
-            "run",
-            "--rm",
-            *docker_tty_flags(),
-            "-e",
-            f"PYTHONPATH={containerize_path(python_root)}",
-            "-e",
-            "PYTHONNOUSERSITE=1",
-            *python_warning_env_flags(),
-            "-w",
+            runtime_executable,
+            "exec",
+            "--cleanenv",
+            "--no-home",
+            "--pwd",
             containerize_path(request.cwd),
         ]
-        if platform:
-            command.extend(["--platform", platform])
-        command.extend([
-            environment.reference,
-            "python",
-            "-m",
-            "adagio.cli.task_exec",
-            "--task",
-            containerize_path(spec_path),
-        ])
 
         host_paths = [request.cwd, request.work_path, python_root]
         for value in (
@@ -125,12 +109,24 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         if request.cache_path is not None:
             host_paths.append(mount_path_for_cache(Path(request.cache_path)))
 
-        command = with_mounts(command=command, host_paths=host_paths)
+        command = with_apptainer_binds(command=command, host_paths=host_paths)
+        command.extend(
+            [
+                str(image_path),
+                "env",
+                f"PYTHONPATH={containerize_path(python_root)}",
+                "PYTHONNOUSERSITE=1",
+                *python_warning_env_assignments(),
+                "python",
+                "-m",
+                "adagio.cli.task_exec",
+                "--task",
+                containerize_path(spec_path),
+            ]
+        )
 
         if console is not None:
-            label = f"docker {environment.reference}"
-            if platform:
-                label = f"docker --platform {platform} {environment.reference}"
+            label = f"{Path(runtime_executable).name} {image_path}"
             if not getattr(console, "_adagio_inline_monitor_active", False):
                 console.print(f"[dim]Task environment:[/dim] {label}")
 
@@ -144,24 +140,28 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             )
         except FileNotFoundError as exc:
             raise SystemExit(
-                "Docker is required for task environment execution but was not found in PATH."
+                "Apptainer/Singularity is required for task environment execution "
+                "but was not found in PATH. Ensure the job environment includes the "
+                "Apptainer binary location."
             ) from exc
 
         if console is not None:
-            print_filtered_container_stderr(console=console, stderr_text=result.stderr or "")
+            print_filtered_container_stderr(
+                console=console, stderr_text=result.stderr or ""
+            )
 
         if result.returncode != 0:
             stdout_text = (result.stdout or "").strip()
             stderr_text = (result.stderr or "").strip()
             if stderr_text:
-                detail = f" Docker reported: {stderr_text}"
+                detail = f" Runtime reported: {stderr_text}"
             elif stdout_text:
                 detail = f" Container stdout: {stdout_text}"
             else:
                 detail = ""
             raise RuntimeError(
                 f"Task {task.id!r} ({task.plugin}.{task.action}) failed "
-                f"while launching environment {environment.reference!r} "
+                f"while launching environment {str(image_path)!r} "
                 f"with exit code {result.returncode}.{detail}"
             )
 
@@ -172,13 +172,43 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
 
         output_manifest = read_json_file(manifest_path)
         reported_outputs, reused = parse_result_manifest(output_manifest)
-        outputs = {}
+        resolved_outputs = {}
         for output_name in request.outputs:
             actual_path = reported_outputs.get(output_name)
             if not isinstance(actual_path, str):
                 raise RuntimeError(
                     f"Task {task.id!r} did not report output {output_name!r}."
                 )
-            outputs[output_name] = str(host_path_from_container(actual_path))
+            resolved_outputs[output_name] = str(host_path_from_container(actual_path))
 
-        return TaskExecutionResult(outputs=outputs, reused=reused)
+        return TaskExecutionResult(outputs=resolved_outputs, reused=reused)
+
+
+def _resolve_runtime_executable() -> str:
+    for candidate in ("apptainer", "singularity"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    raise SystemExit(
+        "Apptainer/Singularity is required for task environment execution "
+        "but was not found in PATH. Ensure the job environment includes the "
+        "Apptainer binary location."
+    )
+
+
+def _resolve_sif_image(reference: str) -> Path:
+    if is_uri(reference):
+        raise RuntimeError(
+            "Apptainer task environments currently support only local .sif image paths."
+        )
+
+    image_path = Path(reference).expanduser().resolve()
+    if image_path.suffix.lower() != ".sif":
+        raise RuntimeError(
+            f"Apptainer task environments require a local .sif image path, got {reference!r}."
+        )
+    if not image_path.exists():
+        raise RuntimeError(f"Apptainer image not found: {image_path}")
+    if not image_path.is_file():
+        raise RuntimeError(f"Apptainer image is not a file: {image_path}")
+    return image_path

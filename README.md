@@ -6,7 +6,8 @@ Command-line runner for Adagio pipeline files
 
 - Python 3.10+
 - `uv` (recommended for development)
-- Docker (currently required for pipeline execution)
+- Docker for the default task runtime
+- Apptainer or Singularity when using `kind = "apptainer"` with local `.sif` images
 
 ## Installation
 
@@ -46,10 +47,11 @@ adagio run --pipeline path/to/pipeline.json --cache-dir /path/to/cache
 ```
 
 `adagio run` executes each plugin task in its own task environment.
-Today the default task environment is a Docker image in GHCR derived from the plugin
+The default task environment is a Docker image in GHCR derived from the plugin
 name in the pipeline spec, for example `dada2` -> `ghcr.io/cymis/qiime2-plugin-dada2:2026.1`.
-The cache directory is required and is reused across reruns by default so unchanged
-successful tasks can be replayed.
+Runtime config can override that per default/plugin/task and switch selected work to
+Apptainer/Singularity with a local `.sif` image path. The cache directory is required
+and is reused across reruns by default so unchanged successful tasks can be replayed.
 
 Equivalent positional form:
 
@@ -88,6 +90,14 @@ Clear an existing cache directory:
 
 ```bash
 adagio cache clear --cache-dir /path/to/cache
+```
+
+### Inspect a pipeline
+
+Print a dependency-ordered summary of the plugin actions in a pipeline:
+
+```bash
+adagio pipeline show path/to/pipeline.json
 ```
 
 ### Arguments file format
@@ -138,7 +148,9 @@ demux = { image = "ghcr.io/cymis/qiime2-plugin-demux:2026.1" }
 "dada2.denoise_single" = { image = "registry.internal/custom-dada2:1.0", platform = "linux/amd64" }
 ```
 
-`image` and `platform` are both optional on defaults, plugin entries, and task entries.
+`kind`, `image`, and `platform` are all optional on defaults, plugin entries, and task entries.
+`kind` may be `docker` or `apptainer`. `image` remains the environment reference:
+for Docker it is the container image, and for Apptainer it must be a local `.sif` path.
 
 Precedence is `task override > plugin override > defaults > default resolver`.
 
@@ -148,24 +160,40 @@ plugin name. If `platform` is omitted all the way through, Adagio uses normal
 Docker platform resolution with no implicit fallback. Anything not listed in the
 config uses the default plugin image resolver.
 
+Concrete Apptainer example:
+
+```toml
+version = 1
+
+[defaults]
+kind = "docker"
+
+[plugins]
+bowtie2 = { kind = "apptainer", image = "/shared/qiime-images/q2-bowtie2-test.sif" }
+```
+
+For `kind = "apptainer"`, Adagio prefers the `apptainer` executable and falls back to
+`singularity`. The current implementation supports only local `.sif` paths and runs
+tasks serially; no scheduler submission or remote image pull behavior is included.
+
 ### QAPI generation/submission
 
 Generate and submit plugin metadata from the active QIIME environment:
 
 ```bash
-adagio build-qapi --action-url http://localhost:81/api/v1
+adagio qapi build --action-url http://localhost:81/api/v1
 ```
 
 Write payload to disk without submitting:
 
 ```bash
-adagio build-qapi --output qapi.json --dry-run
+adagio qapi build --output qapi.json --dry-run
 ```
 
 Submit selected plugins only:
 
 ```bash
-adagio build-qapi --plugin dada2 --plugin feature-table
+adagio qapi build --plugin dada2 --plugin feature-table
 ```
 
 ## Development
