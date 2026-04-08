@@ -9,7 +9,13 @@ from rich.text import Text
 from .cli.dynamic import _compact_type_text
 from .executors.common import plan_execution_order
 from .model.pipeline import AdagioPipeline
-from .model.task import LiteralVal, MetadataVal, PluginActionTask, PromotedVal, RootInputTask
+from .model.task import (
+    LiteralVal,
+    MetadataVal,
+    PluginActionTask,
+    PromotedVal,
+    RootInputTask,
+)
 
 
 @dataclass(frozen=True)
@@ -127,6 +133,19 @@ def _append_input_lines(
         return
 
     for input_name, source in task.inputs.items():
+        if source.kind == "archive-collection":
+            labels = [
+                available_ids.get(item.id, _unknown_reference(item.id)).label
+                for item in source.items
+            ]
+            _append_entry_line(
+                rendered,
+                name=input_name,
+                type_label="list",
+                value_text=f"[{', '.join(labels)}]",
+                description=None,
+            )
+            continue
         reference = available_ids.get(source.id, _unknown_reference(source.id))
         _append_entry_line(
             rendered,

@@ -1,5 +1,7 @@
 import typing as t
 
+from adagio.model.task import input_source_ids
+
 
 def plan_execution_order(*, tasks: list[t.Any], scope: dict[str, t.Any]) -> list[t.Any]:
     """Return a dependency-respecting serial execution plan."""
@@ -10,7 +12,12 @@ def plan_execution_order(*, tasks: list[t.Any], scope: dict[str, t.Any]) -> list
     while remaining:
         progressed = False
         for task in list(remaining):
-            missing = [src.id for src in task.inputs.values() if src.id not in available_ids]
+            missing = [
+                source_id
+                for src in task.inputs.values()
+                for source_id in input_source_ids(src)
+                if source_id not in available_ids
+            ]
             if missing:
                 continue
 
@@ -23,7 +30,12 @@ def plan_execution_order(*, tasks: list[t.Any], scope: dict[str, t.Any]) -> list
         if not progressed:
             details = []
             for task in remaining:
-                missing = ", ".join(src.id for src in task.inputs.values() if src.id not in available_ids)
+                missing = ", ".join(
+                    source_id
+                    for src in task.inputs.values()
+                    for source_id in input_source_ids(src)
+                    if source_id not in available_ids
+                )
                 details.append(f"{task.id}: missing [{missing}]")
             raise RuntimeError("Unable to resolve task dependencies. " + "; ".join(details))
 
