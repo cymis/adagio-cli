@@ -63,6 +63,12 @@ Use an arguments file:
 adagio run --pipeline path/to/pipeline.json --cache-dir /path/to/cache --arguments path/to/arguments.json
 ```
 
+Use a runtime config file with defaults, plugin-level overrides, and optional task overrides:
+
+```bash
+adagio run --pipeline path/to/pipeline.json --cache-dir /path/to/cache --config path/to/runtime.toml
+```
+
 Control which dynamic flags are shown in help:
 
 ```bash
@@ -113,6 +119,34 @@ adagio cache clear --cache-dir /path/to/cache
 ```
 
 If outputs are omitted, defaults are generated under `./adagio-outputs`.
+
+### Runtime config format
+
+`--config` accepts TOML. Defaults apply first, then plugin keys, then task keys:
+
+```toml
+version = 1
+
+[defaults]
+platform = "linux/amd64"
+
+[plugins]
+dada2 = { image = "ghcr.io/cymis/qiime2-plugin-dada2:2026.1" }
+demux = { image = "ghcr.io/cymis/qiime2-plugin-demux:2026.1" }
+
+[tasks]
+"dada2.denoise_single" = { image = "registry.internal/custom-dada2:1.0", platform = "linux/amd64" }
+```
+
+`image` and `platform` are both optional on defaults, plugin entries, and task entries.
+
+Precedence is `task override > plugin override > defaults > default resolver`.
+
+Task lookup supports graph node `id`, optional task `name` when present in the
+pipeline, and `plugin.action` as a fallback. Plugin lookup uses the pipeline's
+plugin name. If `platform` is omitted all the way through, Adagio uses normal
+Docker platform resolution with no implicit fallback. Anything not listed in the
+config uses the default plugin image resolver.
 
 ### QAPI generation/submission
 
@@ -168,5 +202,5 @@ uv run adagio run --pipeline path/to/pipeline.json --cache-dir /path/to/cache
 The `runtime` subcommand is intended for runtime-adapter jobs:
 
 ```bash
-uv run adagio runtime --spec spec.json --config config.json --arguments arguments.json --cache-dir /path/to/cache
+uv run adagio runtime --spec spec.json --config runtime.toml --arguments arguments.json --cache-dir /path/to/cache
 ```

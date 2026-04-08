@@ -8,6 +8,7 @@ from typing import Any
 
 from rich.console import Console
 
+from ..executors.base import TaskEnvironmentOverride
 from ..executors.cache_support import (
     CACHE_DIR_HELP,
     REUSE_HELP,
@@ -18,6 +19,7 @@ from ..model.pipeline import AdagioPipeline
 from ..monitor.composite import CompositeMonitor
 from ..monitor.connected import ConnectedMonitor
 from ..monitor.log import LogMonitor
+from .config import load_run_config
 
 
 def run_runtime(argv: list[str], *, console: Console) -> None:
@@ -26,14 +28,14 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         prog="adagio runtime",
         description=(
             "Execute a pipeline from spec/config/arguments files. "
-            "The config file is currently validated for compatibility but does not alter runtime behavior."
+            "The config file may define default, per-plugin, and per-task image/platform overrides."
         ),
     )
     parser.add_argument("--spec", required=True, help="Path to pipeline spec JSON.")
     parser.add_argument(
         "--config",
         required=True,
-        help="Path to config JSON. The file is validated for compatibility but otherwise unused.",
+        help="Path to runtime config TOML.",
     )
     parser.add_argument("--arguments", required=False, help="Path to run arguments JSON.")
     parser.add_argument("--job-id", required=False, help="Runtime job ID.")
@@ -59,7 +61,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     opts = parser.parse_args(argv)
 
     spec_data = _load_json(Path(opts.spec))
-    _load_runtime_config(Path(opts.config))
+    run_config = load_run_config(Path(opts.config))
     runtime_arguments: Any = {}
     if opts.arguments:
         runtime_arguments = _load_json(Path(opts.arguments))
@@ -100,7 +102,11 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
 
     from ..executors import select_default_executor
 
-    executor = select_default_executor()
+    executor = select_default_executor(
+        default_override=_default_override(run_config),
+        plugin_overrides=_named_overrides(run_config.plugins if run_config is not None else {}),
+        task_overrides=_named_overrides(run_config.tasks if run_config is not None else {}),
+    )
 
     try:
         executor.execute(
@@ -131,13 +137,6 @@ def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _load_runtime_config(path: Path) -> dict[str, Any]:
-    config = _load_json(path)
-    if not isinstance(config, dict):
-        raise SystemExit("Invalid runtime config: expected a JSON object.")
-    return config
-
-
 def _parse_pipeline(data: Any) -> AdagioPipeline:
     pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
     return AdagioPipeline.model_validate(pipeline_data)
@@ -152,6 +151,32 @@ def _resolve_output_dir(raw_output_dir: str | None, job_id: str | None) -> str:
         output_dir = "/storage/runtime_outputs"
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
+
+
+def _default_override(run_config: Any) -> TaskEnvironmentOverride | None:
+    if run_config is None:
+        return None
+    defaults = run_config.defaults
+    if defaults.image is None and defaults.platform is None:
+        return None
+    return TaskEnvironmentOverride(
+        reference=defaults.image,
+        platform=defaults.platform,
+    )
+
+
+def _named_overrides(
+    raw_overrides: dict[str, Any],
+) -> dict[str, TaskEnvironmentOverride] | None:
+    resolved = {
+        name: TaskEnvironmentOverride(
+            reference=override.image,
+            platform=override.platform,
+        )
+        for name, override in raw_overrides.items()
+        if override.image is not None or override.platform is not None
+    }
+    return resolved or None
 
 
 def _build_arguments(

@@ -1,14 +1,41 @@
-from parsl import python_app, join_app
-
-from qiime2.sdk.proxy import ProxyResults, Proxy
-from qiime2.sdk import Pipeline, Results
-from qiime2.sdk.context import ParallelContext
-
 from adagio.execution.proxy import IndexedProxyResults, dfk_thread_future, lift_parsl
+
+_QIIME2_IMPORT_ERROR: ModuleNotFoundError | None = None
+
+try:
+    from qiime2.sdk import Pipeline, Results
+    from qiime2.sdk.context import ParallelContext
+    from qiime2.sdk.proxy import Proxy, ProxyResults
+except ModuleNotFoundError as exc:
+    _QIIME2_IMPORT_ERROR = exc
+
+    class Proxy:  # type: ignore[no-redef]
+        pass
+
+    class ProxyResults:  # type: ignore[no-redef]
+        pass
+
+    class Pipeline:  # type: ignore[no-redef]
+        pass
+
+    class Results:  # type: ignore[no-redef]
+        pass
+
+    class ParallelContext:  # type: ignore[no-redef]
+        def __init__(self, *_args, **_kwargs):
+            _require_qiime2()
+
+
+def _require_qiime2() -> None:
+    if _QIIME2_IMPORT_ERROR is not None:
+        raise ModuleNotFoundError(
+            "qiime2 is required for local execution context support."
+        ) from _QIIME2_IMPORT_ERROR
 
 
 class AdagioContext(ParallelContext):
     def __init__(self, action_obj=None, parent=None):
+        _require_qiime2()
         super().__init__(action_obj, parent)
 
 

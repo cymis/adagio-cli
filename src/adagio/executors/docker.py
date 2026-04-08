@@ -76,6 +76,12 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         write_json_file(spec_path, task_spec)
 
         src_root = local_source_root()
+        platform = None
+        if environment.options is not None:
+            raw_platform = environment.options.get("platform")
+            if isinstance(raw_platform, str) and raw_platform:
+                platform = raw_platform
+
         command = [
             "docker",
             "run",
@@ -86,13 +92,17 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             *python_warning_env_flags(),
             "-w",
             containerize_path(request.cwd),
+        ]
+        if platform:
+            command.extend(["--platform", platform])
+        command.extend([
             environment.reference,
             "python",
             "-m",
             "adagio.cli.task_exec",
             "--task",
             containerize_path(spec_path),
-        ]
+        ])
 
         host_paths = [request.cwd, request.work_path, src_root]
         for value in list(request.archive_inputs.values()) + list(request.metadata_inputs.values()):
@@ -107,7 +117,10 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         command = with_mounts(command=command, host_paths=host_paths)
 
         if console is not None:
-            console.print(f"[dim]Task environment:[/dim] docker {environment.reference}")
+            label = f"docker {environment.reference}"
+            if platform:
+                label = f"docker --platform {platform} {environment.reference}"
+            console.print(f"[dim]Task environment:[/dim] {label}")
 
         try:
             result = subprocess.run(

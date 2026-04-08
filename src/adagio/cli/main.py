@@ -13,6 +13,7 @@ from ..app.parsers.pipeline import Parameter as ParamSpec
 from ..app.parsers.pipeline import parse_inputs, parse_parameters
 from ..executors.cache_support import CACHE_DIR_HELP, REUSE_HELP
 from .args import ShowParamsMode, extract_flag_value, promote_positional_pipeline
+from .config import load_run_config
 from .dynamic import build_dynamic_run
 from .qapi import build_qapi
 from .runner import run_pipeline_from_kwargs
@@ -95,6 +96,14 @@ def main(argv: list[str] | None = None) -> None:
                     help="Path to a JSON arguments file.",
                 ),
             ] = None,
+            config: Annotated[
+                Path | None,
+                Parameter(
+                    name=("--config",),
+                    group=command_group,
+                    help="Path to a TOML runtime config file.",
+                ),
+            ] = None,
             show_params: Annotated[
                 ShowParamsMode,
                 Parameter(
@@ -122,7 +131,7 @@ def main(argv: list[str] | None = None) -> None:
             ] = True,
         ):
             """Run a pipeline (requires --pipeline; dynamic options come from that file)."""
-            _ = (show_params, cache_dir, reuse)
+            _ = (config, show_params, cache_dir, reuse)
             console.print(CycloptsPanel("Missing --pipeline. Try:\n  adagio run --pipeline pipeline.json --help"))
             sys.exit(1)
 
@@ -134,9 +143,12 @@ def main(argv: list[str] | None = None) -> None:
     input_specs = parse_inputs(data)
     param_specs = parse_parameters(data)
     arguments_path_str = extract_flag_value(argv, "--arguments")
+    config_path_str = extract_flag_value(argv, "--config")
     arguments_data = (
         _load_arguments_data(Path(arguments_path_str), console) if arguments_path_str else None
     )
+    if config_path_str:
+        load_run_config(Path(config_path_str))
     visible_inputs, visible_params = _filter_visible_specs(
         input_specs=input_specs,
         param_specs=param_specs,
