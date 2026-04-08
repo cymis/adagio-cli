@@ -9,6 +9,8 @@ from adagio.model.pipeline import AdagioPipeline
 from adagio.model.task import PluginActionTask
 from adagio.monitor.api import Monitor
 
+from .cache_support import ExecutionCacheConfig
+
 
 class PipelineExecutor(Protocol):
     mode_label: str
@@ -20,6 +22,7 @@ class PipelineExecutor(Protocol):
         arguments: AdagioArguments,
         console: Console | None = None,
         monitor: Monitor | None = None,
+        cache_config: ExecutionCacheConfig | None = None,
     ) -> None: ...
 
 
@@ -41,11 +44,14 @@ class TaskExecutionRequest:
     params: Mapping[str, Any]
     metadata_column_kwargs: Mapping[str, Mapping[str, str]]
     outputs: Mapping[str, str]
+    cache_path: str | None = None
+    recycle_pool: str | None = None
 
 
 @dataclass(frozen=True)
 class TaskExecutionResult:
     outputs: Mapping[str, str]
+    reused: bool = False
 
 
 class TaskEnvironmentResolver(Protocol):

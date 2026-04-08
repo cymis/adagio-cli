@@ -8,6 +8,11 @@ from typing import Any
 
 from rich.console import Console
 
+from ..executors.cache_support import (
+    CACHE_DIR_HELP,
+    REUSE_HELP,
+    resolve_cache_config,
+)
 from ..model.arguments import AdagioArguments
 from ..model.pipeline import AdagioPipeline
 from ..monitor.composite import CompositeMonitor
@@ -35,6 +40,17 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     parser.add_argument("--output-dir", required=False, help="Directory for output artifacts.")
     parser.add_argument("--runtime-url", required=False, help="Runtime adapter API base URL.")
     parser.add_argument(
+        "--cache-dir",
+        required=True,
+        help=CACHE_DIR_HELP,
+    )
+    parser.add_argument(
+        "--reuse",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=REUSE_HELP,
+    )
+    parser.add_argument(
         "--connected",
         action="store_true",
         help="Emit execution status updates to the runtime-adapter.",
@@ -58,6 +74,11 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         output_dir=output_dir,
     )
     _validate_required_arguments(pipeline, arguments)
+    cache_config = resolve_cache_config(
+        cwd=Path.cwd().resolve(),
+        cache_dir=opts.cache_dir,
+        reuse=opts.reuse,
+    )
 
     connected = bool(opts.connected and opts.job_id and (opts.runtime_url or os.getenv("RUNTIME_URL")))
     runtime_url = opts.runtime_url or os.getenv("RUNTIME_URL")
@@ -87,6 +108,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
             arguments=arguments,
             console=console,
             monitor=monitor,
+            cache_config=cache_config,
         )
     except Exception as exc:  # noqa: BLE001
         if connected and runtime_url and opts.job_id:

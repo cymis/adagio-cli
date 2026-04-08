@@ -1,9 +1,31 @@
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
+from rich import box
 from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+
+from ..executors.cache_support import (
+    describe_cache_config,
+    resolve_cache_config,
+)
+
+
+def _error_exit(console: Console, message: str) -> None:
+    panel = Panel(
+        Text.from_markup(message),
+        title="Error",
+        border_style="red",
+        box=box.ROUNDED,
+        expand=True,
+        title_align="left",
+    )
+    console.print(panel)
+    sys.exit(1)
 
 DEFAULT_OUTPUT_DIRNAME = "adagio-outputs"
 
@@ -23,6 +45,9 @@ def run_pipeline_from_kwargs(
     from ..model.arguments import AdagioArgumentsFile
     from ..model.pipeline import AdagioPipeline
 
+    cache_dir = kwargs.pop("cache_dir", None)
+    reuse = bool(kwargs.pop("reuse", True))
+
     data = json.loads(pipeline.read_text(encoding="utf-8"))
     pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
     parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
@@ -39,23 +64,17 @@ def run_pipeline_from_kwargs(
 
         unknown_inputs = sorted(set(arguments_data.inputs) - input_names)
         if unknown_inputs:
-            raise SystemExit(
-                "Unknown inputs in arguments file: " + ", ".join(unknown_inputs)
-            )
+            _error_exit(console, "Unknown inputs in arguments file: " + ", ".join(unknown_inputs))
 
         unknown_params = sorted(set(arguments_data.parameters) - param_names)
         if unknown_params:
-            raise SystemExit(
-                "Unknown parameters in arguments file: " + ", ".join(unknown_params)
-            )
+            _error_exit(console, "Unknown parameters in arguments file: " + ", ".join(unknown_params))
 
         unknown_outputs: list[str] = []
         if isinstance(arguments_data.outputs, dict):
             unknown_outputs = sorted(set(arguments_data.outputs) - output_name_set)
         if unknown_outputs:
-            raise SystemExit(
-                "Unknown outputs in arguments file: " + ", ".join(unknown_outputs)
-            )
+            _error_exit(console, "Unknown outputs in arguments file: " + ", ".join(unknown_outputs))
 
         arguments.inputs.update(arguments_data.inputs)
         arguments.parameters.update(arguments_data.parameters)
@@ -79,10 +98,12 @@ def run_pipeline_from_kwargs(
         name for name in required_params if _is_missing(arguments.parameters.get(name))
     ]
     if missing_inputs or missing_params:
-        missing = [f"input:{name}" for name in missing_inputs] + [
-            f"param:{name}" for name in missing_params
-        ]
-        raise SystemExit("Missing required arguments: " + ", ".join(missing))
+        missing_opts = (
+            [f"--input-{n.replace('_', '-')}" for n in missing_inputs]
+            + [f"--param-{n.replace('_', '-')}" for n in missing_params]
+        )
+        formatted = ", ".join(f"[cyan]{opt}[/cyan]" for opt in missing_opts)
+        _error_exit(console, f"Missing required arguments: {formatted}")
 
     arguments.outputs = _resolve_output_destinations(
         outputs=arguments.outputs,
@@ -93,6 +114,15 @@ def run_pipeline_from_kwargs(
     suppress_header = _is_truthy(os.getenv("ADAGIO_SUPPRESS_RUN_HEADER"))
     if not suppress_header:
         console.print(f"[bold]Pipeline:[/bold] {pipeline}")
+
+    cache_config = resolve_cache_config(
+        cwd=Path.cwd().resolve(),
+        cache_dir=cache_dir,
+        reuse=reuse,
+    )
+
+    if not suppress_header:
+        console.print(f"[bold]Cache:[/bold] {describe_cache_config(cache_config)}")
 
     from ..executors import select_default_executor
 
@@ -105,6 +135,7 @@ def run_pipeline_from_kwargs(
         pipeline=parsed_pipeline,
         arguments=arguments,
         console=console,
+        cache_config=cache_config,
     )
 
 

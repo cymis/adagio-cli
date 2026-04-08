@@ -42,30 +42,46 @@ adagio run --help
 Run with a pipeline file:
 
 ```bash
-adagio run --pipeline path/to/pipeline.json
+adagio run --pipeline path/to/pipeline.json --cache-dir /path/to/cache
 ```
 
 `adagio run` executes each plugin task in its own task environment.
 Today the default task environment is a Docker image in GHCR derived from the plugin
 name in the pipeline spec, for example `dada2` -> `ghcr.io/cymis/qiime2-plugin-dada2:2026.1`.
+The cache directory is required and is reused across reruns by default so unchanged
+successful tasks can be replayed.
 
 Equivalent positional form:
 
 ```bash
-adagio run path/to/pipeline.json
+adagio run path/to/pipeline.json --cache-dir /path/to/cache
 ```
 
 Use an arguments file:
 
 ```bash
-adagio run --pipeline path/to/pipeline.json --arguments path/to/arguments.json
+adagio run --pipeline path/to/pipeline.json --cache-dir /path/to/cache --arguments path/to/arguments.json
 ```
 
 Control which dynamic flags are shown in help:
 
 ```bash
-adagio run --pipeline path/to/pipeline.json --show-params required
+adagio run --pipeline path/to/pipeline.json --cache-dir /path/to/cache --show-params required
 # choices: all | missing | required
+```
+
+Disable reuse for a run while still writing outputs into the selected cache directory:
+
+```bash
+adagio run --pipeline path/to/pipeline.json --cache-dir /path/to/cache --no-reuse
+```
+
+The same boolean pair is available as `--reuse` / `--no-reuse`. `--reuse` is the default.
+
+Clear an existing cache directory:
+
+```bash
+adagio cache clear --cache-dir /path/to/cache
 ```
 
 ### Arguments file format
@@ -144,7 +160,7 @@ uv run ruff format .
 ### Running locally during development
 
 ```bash
-uv run adagio run --pipeline path/to/pipeline.json
+uv run adagio run --pipeline path/to/pipeline.json --cache-dir /path/to/cache
 ```
 
 ### Runtime entrypoint (container/integration use)
@@ -152,5 +168,5 @@ uv run adagio run --pipeline path/to/pipeline.json
 The `runtime` subcommand is intended for runtime-adapter jobs:
 
 ```bash
-uv run adagio runtime --spec spec.json --config config.json --arguments arguments.json
+uv run adagio runtime --spec spec.json --config config.json --arguments arguments.json --cache-dir /path/to/cache
 ```

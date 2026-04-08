@@ -8,6 +8,10 @@ from cyclopts import Parameter as CliParameter
 
 from ..app.parsers.pipeline import Input as InputSpec
 from ..app.parsers.pipeline import Parameter as ParamSpec
+from ..executors.cache_support import (
+    CACHE_DIR_HELP,
+    REUSE_HELP,
+)
 from .args import ParamType, ShowParamsMode, dynamic_opt, to_identifier
 
 
@@ -125,7 +129,15 @@ def build_dynamic_run(
     required_inputs: list[str] = []
     required_params: list[str] = []
     seen_idents: set[str] = set()
-    seen_opts: set[str] = {"--pipeline", "-p", "--arguments", "--show-params"}
+    seen_opts: set[str] = {
+        "--pipeline",
+        "-p",
+        "--arguments",
+        "--show-params",
+        "--cache-dir",
+        "--reuse",
+        "--no-reuse",
+    }
     argument_inputs = argument_inputs or {}
     argument_params = argument_params or {}
     command_group = Group("Command Options", sort_key=0)
@@ -162,6 +174,23 @@ def build_dynamic_run(
             help="Parameter display mode: all, missing, or required.",
         ),
     ]
+    annotations["cache_dir"] = Annotated[
+        Path,
+        CliParameter(
+            name=("--cache-dir",),
+            group=command_group,
+            help=CACHE_DIR_HELP,
+        ),
+    ]
+    annotations["reuse"] = Annotated[
+        bool,
+        CliParameter(
+            name=("--reuse",),
+            negative=("--no-reuse",),
+            group=command_group,
+            help=REUSE_HELP,
+        ),
+    ]
 
     parameters: list[inspect.Parameter] = [
         inspect.Parameter(
@@ -180,6 +209,17 @@ def build_dynamic_run(
             kind=inspect.Parameter.KEYWORD_ONLY,
             default=ShowParamsMode.REQUIRED,
             annotation=annotations["show_params"],
+        ),
+        inspect.Parameter(
+            name="cache_dir",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            annotation=annotations["cache_dir"],
+        ),
+        inspect.Parameter(
+            name="reuse",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default=True,
+            annotation=annotations["reuse"],
         ),
     ]
 

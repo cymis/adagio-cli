@@ -11,6 +11,7 @@ from adagio.monitor.api import Monitor
 from adagio.monitor.log import LogMonitor
 from adagio.monitor.tty import RichMonitor
 
+from .cache_support import ExecutionCacheConfig
 from .common import plan_execution_order, task_label
 from .path_utils import resolve_host_path
 
@@ -23,17 +24,19 @@ class SerialExecutionState:
     work_path: Path
     params: dict[str, t.Any]
     scope: dict[str, str]
+    cache_config: ExecutionCacheConfig | None
 
 
 def run_serial_pipeline(
     *,
     pipeline: AdagioPipeline,
     arguments: AdagioArguments,
-    resolve_task: t.Callable[[t.Any, SerialExecutionState, Console | None], None],
+    resolve_task: t.Callable[[t.Any, SerialExecutionState, Console | None], bool],
     finish_outputs: t.Callable[[t.Any, AdagioArguments, SerialExecutionState, Monitor | None], None],
     console: Console | None = None,
     monitor: Monitor | None = None,
     total_subtasks: int = CONTAINER_SUBTASK_COUNT,
+    cache_config: ExecutionCacheConfig | None = None,
 ) -> None:
     sig = pipeline.signature
     tasks = list(pipeline.iter_tasks())
@@ -50,6 +53,7 @@ def run_serial_pipeline(
             work_path=Path(work_dir),
             params=sig.get_params(arguments),
             scope={},
+            cache_config=cache_config,
         )
         completed_task_ids: set[str] = set()
 
@@ -71,9 +75,12 @@ def run_serial_pipeline(
             for task in execution_plan:
                 active_monitor.start_task(task_id=task.id)
                 try:
-                    resolve_task(task, state, console)
+                    reused = resolve_task(task, state, console)
                     active_monitor.advance_task(task_id=task.id, advance=1)
-                    active_monitor.finish_task(task_id=task.id, status="completed")
+                    active_monitor.finish_task(
+                        task_id=task.id,
+                        status="cached" if reused else "completed",
+                    )
                     completed_task_ids.add(task.id)
                 except Exception as exc:  # noqa: BLE001
                     active_monitor.finish_task(task_id=task.id, status="failed", error=str(exc))

@@ -14,6 +14,7 @@ from .base import (
     TaskEnvironmentResolver,
     TaskExecutionRequest,
 )
+from .cache_support import ExecutionCacheConfig
 from .path_utils import resolve_output_destination
 from .serial_runner import SerialExecutionState, run_serial_pipeline
 from .task_contract import build_task_outputs
@@ -38,6 +39,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         arguments: AdagioArguments,
         console: Console | None = None,
         monitor: Monitor | None = None,
+        cache_config: ExecutionCacheConfig | None = None,
     ) -> None:
         run_serial_pipeline(
             pipeline=pipeline,
@@ -46,6 +48,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             finish_outputs=_save_outputs,
             console=console,
             monitor=monitor,
+            cache_config=cache_config,
         )
 
     def _resolve_task(
@@ -53,20 +56,19 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         task,
         state: SerialExecutionState,
         console: Console | None,
-    ) -> None:
+    ) -> bool:
         if isinstance(task, RootInputTask):
             for name, src in task.inputs.items():
                 dst = task.outputs[name]
                 state.scope[dst.id] = state.scope[src.id]
-            return
+            return False
 
         if isinstance(task, PluginActionTask):
-            self._execute_plugin_action(
+            return self._execute_plugin_action(
                 task=task,
                 state=state,
                 console=console,
             )
-            return
 
         raise TypeError(f"Unsupported task type: {type(task)}")
 
@@ -76,7 +78,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         task: PluginActionTask,
         state: SerialExecutionState,
         console: Console | None,
-    ) -> None:
+    ) -> bool:
         environment = self._environment_resolver.resolve(task=task)
         launcher = self._launchers.get(environment.kind)
         if launcher is None:
@@ -128,6 +130,16 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             params=resolved_params,
             metadata_column_kwargs=metadata_column_kwargs,
             outputs=outputs,
+            cache_path=(
+                str(state.cache_config.cache_dir)
+                if state.cache_config is not None
+                else None
+            ),
+            recycle_pool=(
+                state.cache_config.recycle_pool
+                if state.cache_config is not None
+                else None
+            ),
         )
         result = launcher.launch(
             environment=environment,
@@ -142,6 +154,8 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                     f"Task {task.id!r} did not produce output {output_name!r}."
                 )
             state.scope[dest.id] = actual_path
+
+        return result.reused
 
 
 def _save_outputs(

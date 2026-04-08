@@ -42,6 +42,7 @@ class RichMonitor(Monitor):
         self._task_lookup: dict[str, _TaskState] = {}
         self._status_counts: dict[str, int] = {
             "completed": 0,
+            "cached": 0,
             "failed": 0,
             "skipped": 0,
         }
@@ -126,7 +127,7 @@ class RichMonitor(Monitor):
             task.status = status
             task.error = error
             task.finished_at = time.monotonic()
-            if status in {"completed", "skipped"}:
+            if status in {"completed", "cached", "skipped"}:
                 task.completed_subtasks = task.total_subtasks
             if status in self._status_counts:
                 self._status_counts[status] += 1
@@ -146,6 +147,7 @@ class RichMonitor(Monitor):
             self._console.print(
                 "Summary: "
                 f"{self._status_counts['completed']} completed, "
+                f"{self._status_counts['cached']} cached, "
                 f"{self._status_counts['failed']} failed, "
                 f"{self._status_counts['skipped']} skipped, "
                 f"{max(pending, 0)} pending"
@@ -201,6 +203,7 @@ def _status_style(status: str) -> tuple[str, str]:
         "pending": ("PENDING", "yellow"),
         "running": ("RUNNING", "cyan"),
         "completed": ("DONE", "green"),
+        "cached": ("CACHED", "blue"),
         "failed": ("FAILED", "red"),
         "skipped": ("SKIPPED", "magenta"),
     }

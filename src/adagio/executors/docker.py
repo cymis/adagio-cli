@@ -9,6 +9,7 @@ from .base import (
     TaskExecutionRequest,
     TaskExecutionResult,
 )
+from .cache_support import mount_path_for_cache
 from .container_support import (
     containerize_host_value,
     containerize_path,
@@ -21,6 +22,7 @@ from .container_support import (
     with_mounts,
 )
 from .task_contract import (
+    parse_result_manifest,
     build_task_spec,
     read_json_file,
     result_manifest_path,
@@ -64,6 +66,12 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             metadata_column_kwargs=dict(request.metadata_column_kwargs),
             outputs=outputs,
             result_manifest=containerize_path(manifest_path),
+            cache_path=(
+                containerize_path(Path(request.cache_path))
+                if request.cache_path is not None
+                else None
+            ),
+            recycle_pool=request.recycle_pool,
         )
         write_json_file(spec_path, task_spec)
 
@@ -93,6 +101,8 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             path = Path(value)
             if path.is_absolute():
                 host_paths.append(path)
+        if request.cache_path is not None:
+            host_paths.append(mount_path_for_cache(Path(request.cache_path)))
 
         command = with_mounts(command=command, host_paths=host_paths)
 
@@ -136,13 +146,14 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             )
 
         output_manifest = read_json_file(manifest_path)
+        reported_outputs, reused = parse_result_manifest(output_manifest)
         outputs = {}
         for output_name in request.outputs:
-            actual_path = output_manifest.get(output_name)
+            actual_path = reported_outputs.get(output_name)
             if not isinstance(actual_path, str):
                 raise RuntimeError(
                     f"Task {task.id!r} did not report output {output_name!r}."
                 )
             outputs[output_name] = str(host_path_from_container(actual_path))
 
-        return TaskExecutionResult(outputs=outputs)
+        return TaskExecutionResult(outputs=outputs, reused=reused)

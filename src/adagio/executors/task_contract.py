@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -38,6 +39,8 @@ def build_task_spec(
     metadata_column_kwargs: dict[str, dict[str, str]],
     outputs: dict[str, str],
     result_manifest: str | None,
+    cache_path: str | None,
+    recycle_pool: str | None,
 ) -> dict[str, Any]:
     return {
         "plugin": plugin,
@@ -48,7 +51,31 @@ def build_task_spec(
         "metadata_column_kwargs": metadata_column_kwargs,
         "outputs": outputs,
         "result_manifest": result_manifest,
+        "cache_path": cache_path,
+        "recycle_pool": recycle_pool,
     }
+
+
+def build_result_manifest(
+    *,
+    outputs: Mapping[str, str],
+    reused: bool,
+) -> dict[str, Any]:
+    return {
+        "outputs": dict(outputs),
+        "reused": reused,
+    }
+
+
+def parse_result_manifest(payload: dict[str, Any]) -> tuple[dict[str, str], bool]:
+    if "outputs" in payload:
+        outputs = payload.get("outputs", {})
+        reused = bool(payload.get("reused", False))
+        if not isinstance(outputs, dict):
+            raise TypeError("Invalid task result manifest: 'outputs' must be an object.")
+        return dict(outputs), reused
+
+    return dict(payload), False
 
 
 def read_json_file(path: Path) -> dict[str, Any]:
