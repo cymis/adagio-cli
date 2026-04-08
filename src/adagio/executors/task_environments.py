@@ -111,7 +111,9 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                 elif column.kind == "promoted":
                     column_name = str(state.params[column.id])
                 else:
-                    raise TypeError(f"Unsupported metadata column kind: {column.kind!r}")
+                    raise TypeError(
+                        f"Unsupported metadata column kind: {column.kind!r}"
+                    )
                 metadata_column_kwargs[name] = {"source": name, "column": column_name}
             else:
                 raise TypeError(f"Unsupported parameter kind: {param.kind!r}")
@@ -164,13 +166,20 @@ def _save_outputs(
     arguments: AdagioArguments,
     state: SerialExecutionState,
     monitor: Monitor | None,
+    require_all: bool = True,
 ) -> None:
     if isinstance(arguments.outputs, str):
         os.makedirs(arguments.outputs, exist_ok=True)
 
     for output in sig.outputs:
+        if output.id in state.saved_output_ids:
+            continue
         if output.id not in state.scope:
-            raise KeyError(f"Missing output value for {output.name!r} ({output.id}).")
+            if require_all:
+                raise KeyError(
+                    f"Missing output value for {output.name!r} ({output.id})."
+                )
+            continue
 
         source_path = Path(state.scope[output.id])
         destination = resolve_output_destination(
@@ -183,6 +192,10 @@ def _save_outputs(
         parent = os.path.dirname(destination)
         if parent:
             os.makedirs(parent, exist_ok=True)
+
+        if monitor is not None and not state.save_output_started:
+            monitor.start_save_output()
+            state.save_output_started = True
 
         try:
             shutil.copy2(source_path, destination)
@@ -204,3 +217,4 @@ def _save_outputs(
                     destination=destination,
                     status="succeeded",
                 )
+            state.saved_output_ids.add(output.id)

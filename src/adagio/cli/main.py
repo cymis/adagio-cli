@@ -16,7 +16,8 @@ from ..executors.cache_support import CACHE_DIR_HELP, REUSE_HELP
 from .args import ShowParamsMode, extract_flag_value, promote_positional_pipeline
 from .config import load_run_config
 from .dynamic import build_dynamic_run
-from .qapi import build_qapi
+from .pipeline import run_pipeline_cli
+from .qapi import run_qapi
 from .runner import run_pipeline_from_kwargs
 
 
@@ -44,6 +45,14 @@ def main(argv: list[str] | None = None) -> None:
         run_runtime(argv[1:], console=console)
         return
 
+    if argv and argv[0] == "qapi":
+        run_qapi(argv[1:])
+        return
+
+    if argv and argv[0] == "pipeline":
+        run_pipeline_cli(argv[1:])
+        return
+
     argv, positional_pipeline = promote_positional_pipeline(argv)
     pipeline_str = extract_flag_value(argv, "--pipeline", "-p")
     show_mode_str = extract_flag_value(argv, "--show-params")
@@ -62,8 +71,6 @@ def main(argv: list[str] | None = None) -> None:
         help="Adagio command line tool for processing pipelines created with the Adagio GUI.",
         help_format="rich",
     )
-    app.command(build_qapi, name="build-qapi")
-
     @app.command
     def cache() -> None:
         """Manage the shared QIIME cache directory."""
@@ -74,6 +81,18 @@ def main(argv: list[str] | None = None) -> None:
     def runtime() -> None:
         """Execute a pipeline from spec/config/arguments files."""
         console.print(CycloptsPanel("Try: adagio runtime --help"))
+        sys.exit(1)
+
+    @app.command
+    def qapi() -> None:
+        """Generate and submit QAPI payloads."""
+        console.print(CycloptsPanel("Try: adagio qapi --help"))
+        sys.exit(1)
+
+    @app.command
+    def pipeline() -> None:
+        """Inspect pipeline definitions."""
+        console.print(CycloptsPanel("Try: adagio pipeline --help"))
         sys.exit(1)
 
     if not pipeline_str:

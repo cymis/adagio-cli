@@ -3,12 +3,21 @@ import os
 from pathlib import Path
 from typing import Annotated
 
-from cyclopts import Parameter
+from cyclopts import App, Parameter
 from rich.console import Console
 
 from ..qapi import DEFAULT_SCHEMA_VERSION, generate_qapi_payload, submit_qapi_payload
 
 console = Console()
+
+
+def run_qapi(argv: list[str]) -> None:
+    app = App(
+        name="adagio qapi",
+        help="Generate and submit QAPI payloads from the active QIIME environment.",
+    )
+    app.command(build_qapi, name="build")
+    app(argv)
 
 
 def _print_submission_summary(response_body: object) -> None:
