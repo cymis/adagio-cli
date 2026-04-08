@@ -184,6 +184,17 @@ Generate and submit plugin metadata from the active QIIME environment:
 adagio qapi build --action-url http://localhost:81/api/v1
 ```
 
+Submit to a protected deployment such as `adagiodata.com` with a scoped submission token:
+
+```bash
+export ACTION_URL=https://adagiodata.com/api/v1
+export QAPI_SUBMISSION_TOKEN=<token copied from https://adagiodata.com/app/profile>
+uv run adagio qapi build
+```
+
+You can also pass `--submission-token`, but the environment variable is safer because it does
+not end up in shell history.
+
 Write payload to disk without submitting:
 
 ```bash

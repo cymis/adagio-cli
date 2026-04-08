@@ -9,6 +9,7 @@ def submit_qapi_payload(
     payload: dict[str, Any],
     *,
     action_url: str | None = None,
+    submission_token: str | None = None,
     timeout: int = 60,
     dry_run: bool = False,
     force_overwrite: bool = False,
@@ -20,15 +21,19 @@ def submit_qapi_payload(
         )
 
     url = resolved_action_url.rstrip("/") + "/qapi/"
+    resolved_submission_token = submission_token or os.getenv("QAPI_SUBMISSION_TOKEN")
     request_body = {
         **payload,
         "dry_run": dry_run,
         "force_overwrite": force_overwrite,
     }
+    headers = {"Content-Type": "application/json"}
+    if resolved_submission_token:
+        headers["Authorization"] = f"Bearer {resolved_submission_token}"
     req = Request(
         url=url,
         data=json.dumps(request_body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
 
