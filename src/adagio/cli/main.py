@@ -1,5 +1,6 @@
 import json
 import sys
+from contextlib import ExitStack
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
@@ -17,6 +18,7 @@ from .args import ShowParamsMode, extract_flag_value, promote_positional_pipelin
 from .config import load_run_config
 from .dynamic import build_dynamic_run
 from .pipeline import run_pipeline_cli
+from .pipeline_sources import PipelineResolutionError, resolve_pipeline_reference
 from .qapi import run_qapi
 from .runner import run_pipeline_from_kwargs
 
@@ -61,7 +63,11 @@ def main(argv: list[str] | None = None) -> None:
             ShowParamsMode(show_mode_str) if show_mode_str else ShowParamsMode.REQUIRED
         )
     except ValueError:
-        console.print(CycloptsPanel("Invalid --show-params value. Use one of: all, missing, required."))
+        console.print(
+            CycloptsPanel(
+                "Invalid --show-params value. Use one of: all, missing, required."
+            )
+        )
         sys.exit(1)
     if pipeline_str is None:
         pipeline_str = positional_pipeline
@@ -71,6 +77,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Adagio command line tool for processing pipelines created with the Adagio GUI.",
         help_format="rich",
     )
+
     @app.command
     def cache() -> None:
         """Manage the shared QIIME cache directory."""
@@ -106,7 +113,7 @@ def main(argv: list[str] | None = None) -> None:
                 Parameter(
                     name=("--pipeline", "-p"),
                     group=command_group,
-                    help="Path to the pipeline JSON file.",
+                    help="Path to the pipeline file or a pipeline source reference.",
                 ),
             ],
             arguments: Annotated[
@@ -153,42 +160,57 @@ def main(argv: list[str] | None = None) -> None:
         ):
             """Run a pipeline (requires --pipeline; dynamic options come from that file)."""
             _ = (config, show_params, cache_dir, reuse)
-            console.print(CycloptsPanel("Missing --pipeline. Try:\n  adagio run --pipeline pipeline.json --help"))
+            console.print(
+                CycloptsPanel(
+                    "Missing --pipeline. Try:\n  adagio run --pipeline pipeline.adg --help"
+                )
+            )
             sys.exit(1)
 
         app(argv)
         return
 
-    pipeline_path = Path(pipeline_str)
-    data = json.loads(pipeline_path.read_text(encoding="utf-8"))
-    input_specs = parse_inputs(data)
-    param_specs = parse_parameters(data)
-    output_specs = parse_outputs(data)
-    arguments_path_str = extract_flag_value(argv, "--arguments")
-    config_path_str = extract_flag_value(argv, "--config")
-    arguments_data = (
-        _load_arguments_data(Path(arguments_path_str), console) if arguments_path_str else None
-    )
-    if config_path_str:
-        load_run_config(Path(config_path_str))
-    visible_inputs, visible_params, visible_outputs = _filter_visible_specs(
-        input_specs=input_specs,
-        param_specs=param_specs,
-        output_specs=output_specs,
-        show_mode=show_mode,
-        arguments_data=arguments_data,
-    )
+    with ExitStack() as exit_stack:
+        pipeline_path = _resolve_pipeline_path(
+            pipeline_str,
+            console=console,
+            exit_stack=exit_stack,
+        )
+        data = json.loads(pipeline_path.read_text(encoding="utf-8"))
+        input_specs = parse_inputs(data)
+        param_specs = parse_parameters(data)
+        output_specs = parse_outputs(data)
+        arguments_path_str = extract_flag_value(argv, "--arguments")
+        config_path_str = extract_flag_value(argv, "--config")
+        arguments_data = (
+            _load_arguments_data(Path(arguments_path_str), console)
+            if arguments_path_str
+            else None
+        )
+        if config_path_str:
+            load_run_config(Path(config_path_str))
+        visible_inputs, visible_params, visible_outputs = _filter_visible_specs(
+            input_specs=input_specs,
+            param_specs=param_specs,
+            output_specs=output_specs,
+            show_mode=show_mode,
+            arguments_data=arguments_data,
+        )
 
-    dynamic_run = build_dynamic_run(
-        input_specs=visible_inputs,
-        param_specs=visible_params,
-        output_specs=visible_outputs,
-        argument_inputs=arguments_data.get("inputs", {}) if arguments_data else None,
-        argument_params=arguments_data.get("parameters", {}) if arguments_data else None,
-        run_handler=partial(run_pipeline_from_kwargs, console=console),
-    )
-    app.command(dynamic_run, name="run")
-    app(argv)
+        dynamic_run = build_dynamic_run(
+            input_specs=visible_inputs,
+            param_specs=visible_params,
+            output_specs=visible_outputs,
+            argument_inputs=arguments_data.get("inputs", {})
+            if arguments_data
+            else None,
+            argument_params=arguments_data.get("parameters", {})
+            if arguments_data
+            else None,
+            run_handler=partial(run_pipeline_from_kwargs, console=console),
+        )
+        app.command(dynamic_run, name="run")
+        app(argv)
 
 
 def _filter_visible_specs(
@@ -248,13 +270,30 @@ def _load_arguments_data(path: Path, _console: Console | None = None) -> dict[st
     if not isinstance(data.get("inputs"), dict) or not isinstance(
         data.get("parameters"), dict
     ):
-        _con.print(CycloptsPanel("Invalid arguments file: 'inputs' and 'parameters' must be objects."))
+        _con.print(
+            CycloptsPanel(
+                "Invalid arguments file: 'inputs' and 'parameters' must be objects."
+            )
+        )
         sys.exit(1)
     return data
 
 
 def _is_missing(value: Any) -> bool:
     return value is None or value == "<fill me>"
+
+
+def _resolve_pipeline_path(
+    reference: str,
+    *,
+    console: Console,
+    exit_stack: ExitStack,
+) -> Path:
+    try:
+        return resolve_pipeline_reference(reference, exit_stack=exit_stack)
+    except PipelineResolutionError as error:
+        console.print(CycloptsPanel(str(error)))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

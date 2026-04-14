@@ -59,6 +59,17 @@ Equivalent positional form:
 adagio run path/to/pipeline.json --cache-dir /path/to/cache
 ```
 
+Run a pipeline from a configured source reference:
+
+```bash
+adagio run adagio-playbook/dada2 --cache-dir /path/to/cache
+```
+
+By default, `adagio-playbook/<slug>` resolves against the sibling
+`adagio-pipelines` checkout when one is available in the surrounding workspace.
+If no local catalog repo is found, Adagio falls back to the public
+`cymis/adagio-pipelines` GitHub repository.
+
 Use an arguments file:
 
 ```bash
