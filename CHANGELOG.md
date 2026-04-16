@@ -8,6 +8,8 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+## [0.1.0a1] - 2026-04-15
+
 ### Added
 
 - GitHub Actions CI for linting, tests, and build verification.
