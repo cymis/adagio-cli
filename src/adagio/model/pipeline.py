@@ -7,7 +7,7 @@ from pydantic import BaseModel, RootModel, model_validator, Field
 
 from .arguments import AdagioArguments
 from .task import AllowableValue, AdagioTask
-from .ast import TypeAST
+from .ast import TypeAST, TypeASTExpression, TypeASTIntersection, TypeASTUnion
 
 
 class AdagioPipeline(BaseModel):
@@ -69,7 +69,7 @@ class AdagioSignature(BaseModel):
 
         for input in self.inputs:
             source = arguments.inputs[input.name]
-            if input.ast.name.startswith('Metadata') and input.ast.builtin:
+            if _is_metadata_ast(input.ast):
                 print("SCHEDULED:", f'load_metadata({source!r})')
                 scope[input.id] = load_metadata(ctx=ctx, source=source)
                 # IIFE for the dreaded for-loop in the parent closure problem.
@@ -110,6 +110,7 @@ class _Def(BaseModel):
     name: str
     type: str
     ast: TypeAST
+    description: str | None = None
 
 
 class _InputDef(_Def):
@@ -118,8 +119,16 @@ class _InputDef(_Def):
 
 class _ParameterDef(_Def):
     required: bool
-    default: 'AllowableValue'
+    default: 'AllowableValue | None' = None
 
 
 class _OutputDef(_Def):
     pass
+
+
+def _is_metadata_ast(ast: TypeAST) -> bool:
+    if isinstance(ast, TypeASTExpression):
+        return bool(ast.builtin and ast.name.startswith("Metadata"))
+    if isinstance(ast, (TypeASTUnion, TypeASTIntersection)):
+        return any(_is_metadata_ast(member) for member in ast.members)
+    return False

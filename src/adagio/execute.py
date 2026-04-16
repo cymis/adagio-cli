@@ -3,7 +3,6 @@ import json
 
 import typing as t
 
-from adagio.execution.context import AdagioContext
 from adagio.model.arguments import AdagioArguments
 from adagio.model.pipeline import AdagioPipeline
 from adagio.monitor.log import LogMonitor
@@ -53,6 +52,7 @@ def _setup_context(advanced):
 
     # TODO: actually configure a non-temp cache
 
+    from adagio.execution.context import AdagioContext
     from qiime2.sdk import PluginManager
 
     PluginManager()

@@ -1,8 +1,52 @@
-from qiime2.sdk.proxy import (
-    Proxy, ProxyResult, ProxyVisualization, ProxyArtifact, ProxyResults,
-    ProxyResultCollection)
-from qiime2.core.type.util import is_visualization_type, is_collection_type
 from parsl import python_app, join_app
+
+_QIIME2_IMPORT_ERROR: ModuleNotFoundError | None = None
+
+try:
+    from qiime2.core.type.util import is_collection_type, is_visualization_type
+    from qiime2.sdk.proxy import (
+        Proxy,
+        ProxyArtifact,
+        ProxyResult,
+        ProxyResultCollection,
+        ProxyResults,
+        ProxyVisualization,
+    )
+except ModuleNotFoundError as exc:
+    _QIIME2_IMPORT_ERROR = exc
+
+    class Proxy:  # type: ignore[no-redef]
+        def __init__(self, future=None, selector=NotImplemented):
+            self._future_ = future
+            self._selector_ = selector
+
+    class ProxyResult(Proxy):  # type: ignore[no-redef]
+        pass
+
+    class ProxyVisualization(ProxyResult):  # type: ignore[no-redef]
+        pass
+
+    class ProxyArtifact(ProxyResult):  # type: ignore[no-redef]
+        pass
+
+    class ProxyResults(Proxy):  # type: ignore[no-redef]
+        _signature_ = {}
+
+    class ProxyResultCollection(ProxyResult):  # type: ignore[no-redef]
+        pass
+
+    def is_visualization_type(*_args, **_kwargs):  # type: ignore[no-redef]
+        _require_qiime2()
+
+    def is_collection_type(*_args, **_kwargs):  # type: ignore[no-redef]
+        _require_qiime2()
+
+
+def _require_qiime2() -> None:
+    if _QIIME2_IMPORT_ERROR is not None:
+        raise ModuleNotFoundError(
+            "qiime2 is required for local execution/proxy support."
+        ) from _QIIME2_IMPORT_ERROR
 
 
 
@@ -174,7 +218,7 @@ def kwargs_from_parsl(args, inputs, selectors, raw):
         elif key is None:
             try:
                 new.append(selector(future))
-            except:
+            except Exception:
                 raise Exception(selector(range(10)))
         else:
             kwargs[key] = selector(future)
