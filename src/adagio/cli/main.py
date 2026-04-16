@@ -8,6 +8,7 @@ from cyclopts import App, Group, Parameter
 from cyclopts.panel import CycloptsPanel
 from rich.console import Console
 
+from .. import __version__
 from ..app.parsers.pipeline import Input as InputSpec
 from ..app.parsers.pipeline import Output as OutputSpec
 from ..app.parsers.pipeline import Parameter as ParamSpec
@@ -70,6 +71,7 @@ def main(argv: list[str] | None = None) -> None:
         name="adagio",
         help="Adagio command line tool for processing pipelines created with the Adagio GUI.",
         help_format="rich",
+        version=__version__,
     )
     @app.command
     def cache() -> None:

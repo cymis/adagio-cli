@@ -11,6 +11,21 @@ Command-line runner for Adagio pipeline files
 
 ## Installation
 
+Install from PyPI:
+
+```bash
+pip install adagio-cli
+```
+
+Install a prerelease from TestPyPI while validating a release candidate:
+
+```bash
+pip install \
+  --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple \
+  adagio-cli
+```
+
 Install from the current checkout:
 
 ```bash
@@ -184,11 +199,11 @@ Generate and submit plugin metadata from the active QIIME environment:
 adagio qapi build --action-url http://localhost:81/api/v1
 ```
 
-Submit to a protected deployment such as `adagiodata.com` with a scoped submission token:
+Submit to a protected deployment such as `adagio.run` with a scoped submission token:
 
 ```bash
-export ACTION_URL=https://adagiodata.com/api/v1
-export QAPI_SUBMISSION_TOKEN=<token copied from https://adagiodata.com/app/profile>
+export ACTION_URL=https://adagio.run/api/v1
+export QAPI_SUBMISSION_TOKEN=<token copied from https://adagio.run/app/profile>
 uv run adagio qapi build
 ```
 
@@ -227,7 +242,21 @@ uv run adagio --help
 
 ```bash
 uv run ruff check .
+uv run ruff format --check .
 uv run ruff format .
+```
+
+### Tests
+
+```bash
+uv run pytest
+```
+
+### Build distributions
+
+```bash
+uv run python -m build
+uv run python -m twine check dist/*
 ```
 
 ### Running locally during development
@@ -243,3 +272,7 @@ The `runtime` subcommand is intended for runtime-adapter jobs:
 ```bash
 uv run adagio runtime --spec spec.json --config runtime.toml --arguments arguments.json --cache-dir /path/to/cache
 ```
+
+### Releasing
+
+See [RELEASING.md](RELEASING.md) for the one-time PyPI/GitHub setup, version/tag workflow, and TestPyPI/PyPI publishing steps.
