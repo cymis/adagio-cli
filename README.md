@@ -2,22 +2,14 @@
 
 `adagio-cli` is the Python command-line interface for Adagio pipeline execution.
 
-This README is intentionally brief. For user-facing documentation and product
-guides, use:
+For user-facing documentation and product guides, please reference the docs:
 
 - [Adagio Docs](https://docs.adagiodata.com)
+
+The adagio frontend is used to build pipelines that can be run with this package on the command line
+It can be found here:
+
 - [Adagio](https://adagio.run)
-
-## Scope
-
-This package is mainly for developers working on:
-
-- local CLI development and testing
-- Adagio service integrations that invoke the CLI
-- QAPI submission from a QIIME environment
-
-For command reference, pipeline authoring guides, and product workflows, prefer
-the docs site instead of duplicating that material here.
 
 ## Development
 
@@ -27,8 +19,3 @@ Set up the project and run the test suite with:
 uv sync --group dev
 uv run pytest
 ```
-
-## Monorepo
-
-`adagio-cli` lives inside the Adagio monorepo. For local stack setup and the
-surrounding services, see the repository root README.
