@@ -3,28 +3,15 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, cast
 
 DEFAULT_SCHEMA_VERSION = "0.1.0"
-PRIVATE_QIIME_ACTION_PREFIX = "-"
+PRIVATE_QIIME_ACTION_PREFIXES = ("_", "-")
 
 
-def _starts_with_private_action_prefix(value: object) -> bool:
-    return isinstance(value, str) and value.startswith(PRIVATE_QIIME_ACTION_PREFIX)
-
-
-def _is_private_qiime_action(action_key: object, action: Any) -> bool:
-    return _starts_with_private_action_prefix(
-        action_key
-    ) or _starts_with_private_action_prefix(getattr(action, "id", None))
-
-
-def _action_identifier(action_key: object, action: Any) -> str:
+def _private_qiime_action_id(action_key: object, action: Any) -> str | None:
     action_id = getattr(action, "id", None)
-    if _starts_with_private_action_prefix(action_id):
-        return action_id
-    if _starts_with_private_action_prefix(action_key):
-        return str(action_key)
-    if isinstance(action_id, str) and action_id:
-        return action_id
-    return str(action_key)
+    for value in (action_id, action_key):
+        if isinstance(value, str) and value.startswith(PRIVATE_QIIME_ACTION_PREFIXES):
+            return value
+    return None
 
 
 def _iter_public_qiime_actions(
@@ -34,12 +21,15 @@ def _iter_public_qiime_actions(
     on_skipped_private_action: Callable[[str], None] | None = None,
 ) -> Iterator[tuple[object, Any]]:
     for key, action in actions.items():
-        if _is_private_qiime_action(key, action):
+        private_action_id = _private_qiime_action_id(key, action)
+        if private_action_id is not None:
             if on_skipped_private_action is not None:
-                action_identifier = _action_identifier(key, action)
-                if plugin_name is not None:
-                    action_identifier = f"{plugin_name}.{action_identifier}"
-                on_skipped_private_action(action_identifier)
+                skipped_action_id = (
+                    f"{plugin_name}.{private_action_id}"
+                    if plugin_name is not None
+                    else private_action_id
+                )
+                on_skipped_private_action(skipped_action_id)
             continue
         yield key, action
 

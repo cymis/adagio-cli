@@ -16,8 +16,10 @@ class QapiBuildTests(unittest.TestCase):
 
         actions = {
             "public_action": public_action,
+            "_private_by_key": SimpleNamespace(id="private_by_key"),
             "-private_by_key": SimpleNamespace(id="private_by_key"),
-            "private_by_id": SimpleNamespace(id="-private_by_id"),
+            "private_by_id": SimpleNamespace(id="_private_by_id"),
+            "private_by_hyphen_id": SimpleNamespace(id="-private_by_hyphen_id"),
         }
 
         public_actions = list(
@@ -31,7 +33,12 @@ class QapiBuildTests(unittest.TestCase):
         self.assertEqual(public_actions, [("public_action", public_action)])
         self.assertEqual(
             skipped_actions,
-            ["example.-private_by_key", "example.-private_by_id"],
+            [
+                "example._private_by_key",
+                "example.-private_by_key",
+                "example._private_by_id",
+                "example.-private_by_hyphen_id",
+            ],
         )
 
     def test_build_qapi_submits_payload_after_private_actions_are_skipped(self) -> None:
@@ -40,7 +47,7 @@ class QapiBuildTests(unittest.TestCase):
         qapi_cli.console = Console(file=output, force_terminal=False, color_system=None)
 
         def fake_generate_qapi_payload(*, on_skipped_private_action, **kwargs):
-            on_skipped_private_action("example.-private_action")
+            on_skipped_private_action("example._private_action")
             return {
                 "qiime_version": "2024.10.0",
                 "schema_version": "0.1.0",
@@ -80,7 +87,7 @@ class QapiBuildTests(unittest.TestCase):
             {"public_action": {"id": "public_action"}},
         )
         self.assertIn("Skipped 1 private QIIME action", output.getvalue())
-        self.assertIn("example.-private_action", output.getvalue())
+        self.assertIn("example._private_action", output.getvalue())
 
 
 if __name__ == "__main__":
