@@ -8,6 +8,19 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+## [0.1.0a2] - 2026-04-23
+
+### Added
+
+- qAPI generation skips private QIIME actions and reports skipped actions in CLI output.
+- Tests covering private QIIME action filtering in qAPI payload generation.
+
+### Changed
+
+- Reduced README content to a shorter quick-start oriented guide.
+
+## [0.1.0a1] - 2026-04-15
+
 ### Added
 
 - GitHub Actions CI for linting, tests, and build verification.
