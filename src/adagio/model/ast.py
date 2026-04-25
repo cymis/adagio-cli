@@ -39,7 +39,7 @@ class TypeASTPredicateChoices(TypeASTPredicateBase):
 
 class TypeASTPredicateRange(TypeASTPredicateBase):
     name: t.Literal['Range']
-    range: tuple[int, int] | tuple[float, float]
+    range: tuple[int | float | None, int | float | None]
     inclusive: tuple[bool, bool]
 
 
@@ -52,4 +52,3 @@ TypeAST = t.Annotated[
     t.Union[TypeASTUnion, TypeASTIntersection, TypeASTExpression],
     Field(discriminator='type')
 ]
-

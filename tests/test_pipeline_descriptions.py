@@ -6,6 +6,7 @@ from adagio.cli.dynamic import (
     _compact_type_text,
     _display_type_label,
     _pipeline_type_label,
+    _render_type_text,
     _wrap_type_label,
     build_dynamic_run,
 )
@@ -155,6 +156,25 @@ class PipelineDescriptionTests(unittest.TestCase):
         self.assertTrue(wrapped.endswith("]"))
         self.assertIn("\n |", wrapped)
 
+    def test_long_semantic_union_labels_wrap_on_pipes(self) -> None:
+        wrapped = _wrap_type_label(
+            "PATH\n"
+            "SampleData[Kraken2Report % Properties('reads', 'contigs', 'mags')]¹ | "
+            "FeatureData[Kraken2Report % Properties('mags')]²",
+            44,
+        )
+
+        self.assertTrue(wrapped.startswith("PATH\n"))
+        self.assertIn("\n | FeatureData[Kraken2Report", wrapped)
+        self.assertTrue(all(len(line) <= 44 for line in wrapped.splitlines()))
+
+    def test_semantic_type_lines_render_green_after_path(self) -> None:
+        rendered = _render_type_text("PATH\nFeatureTable[Frequency]", 44)
+
+        self.assertEqual(rendered.plain, "PATH\nFeatureTable[Frequency]")
+        self.assertEqual(rendered.spans[0].style, "bold yellow")
+        self.assertEqual(rendered.spans[1].style, "bold #84ad50")
+
     def test_pipeline_type_labels_use_general_cli_types(self) -> None:
         self.assertEqual(_pipeline_type_label(int), "INTEGER")
         self.assertEqual(_pipeline_type_label(float), "NUMBER")
@@ -166,7 +186,7 @@ class PipelineDescriptionTests(unittest.TestCase):
             _display_type_label(
                 spec_type="FeatureTable[Frequency]", type_hint=str, is_input=True
             ),
-            "PATH",
+            "PATH\nFeatureTable[Frequency]",
         )
         self.assertEqual(
             _display_type_label(

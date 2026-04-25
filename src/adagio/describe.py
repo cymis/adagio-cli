@@ -6,7 +6,7 @@ from rich.console import Group, NewLine
 from rich.panel import Panel
 from rich.text import Text
 
-from .cli.dynamic import _compact_type_text
+from .cli.dynamic import _compact_type_text, _wrap_type_label
 from .executors.common import plan_execution_order
 from .model.pipeline import AdagioPipeline
 from .model.task import (
@@ -23,6 +23,10 @@ class _DisplayRef:
     label: str
     type_label: str | None = None
     description: str | None = None
+
+
+_ENTRY_INDENT = "       "
+_PIPELINE_SHOW_TYPE_WIDTH = 72
 
 
 def render_pipeline_text(pipeline: AdagioPipeline) -> Text | Group:
@@ -232,13 +236,25 @@ def _append_entry_line(
         rendered.append(":", style="cyan")
     if type_label:
         rendered.append(" ")
-        rendered.append(type_label, style="bold yellow")
+        wrapped_type = _wrap_type_label(type_label, _PIPELINE_SHOW_TYPE_WIDTH)
+        type_lines = wrapped_type.splitlines()
+        rendered.append(type_lines[0], style="bold yellow")
+        if len(type_lines) > 1:
+            for line in type_lines[1:]:
+                rendered.append("\n")
+                rendered.append(_ENTRY_INDENT)
+                rendered.append(line, style="bold yellow")
+            if value_text:
+                rendered.append("\n")
+                rendered.append(_ENTRY_INDENT)
+                rendered.append(value_text)
+                value_text = None
     if value_text:
         rendered.append(" ")
         rendered.append(value_text)
     rendered.append("\n")
     if description:
-        rendered.append("       ")
+        rendered.append(_ENTRY_INDENT)
         rendered.append(description, style="dim")
         rendered.append("\n")
 

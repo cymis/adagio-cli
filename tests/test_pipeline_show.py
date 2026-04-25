@@ -20,6 +20,19 @@ AST = {
     "fields": [],
 }
 
+OPEN_ENDED_RANGE_AST = {
+    "type": "expression",
+    "builtin": True,
+    "name": "Int",
+    "predicate": {
+        "type": "predicate",
+        "name": "Range",
+        "range": [1, None],
+        "inclusive": [True, False],
+    },
+    "fields": [],
+}
+
 
 def _sample_pipeline_dict() -> dict:
     return {
@@ -224,6 +237,40 @@ class PipelineShowTests(unittest.TestCase):
         self.assertIn("Inputs:", result.stdout)
         self.assertIn('barcodes: (MetadataColumn[Categorical]) pipeline input "barcodes"', result.stdout)
         self.assertIn('table (FeatureTable[Frequency])', result.stdout)
+
+    def test_pipeline_show_accepts_open_ended_range_predicates(self) -> None:
+        pipeline_data = _sample_pipeline_dict()
+        pipeline_data["signature"]["parameters"].append(
+            {
+                "id": "param-sampling-depth",
+                "name": "sampling_depth",
+                "type": "Int % Range(1, None)",
+                "ast": OPEN_ENDED_RANGE_AST,
+                "required": True,
+                "description": "Sampling depth.",
+            }
+        )
+
+        pipeline = AdagioPipeline.model_validate(pipeline_data)
+        rendered = _render_plain(render_pipeline_text(pipeline))
+
+        self.assertIn("dada2.denoise_single", rendered)
+
+    def test_pipeline_show_wraps_long_semantic_types(self) -> None:
+        pipeline_data = _sample_pipeline_dict()
+        pipeline_data["signature"]["inputs"][0]["type"] = (
+            "SampleData[Kraken2Report % Properties('reads', 'contigs', 'mags')]¹ | "
+            "FeatureData[Kraken2Report % Properties('mags')]²"
+        )
+        pipeline = AdagioPipeline.model_validate(pipeline_data)
+
+        rendered = _render_plain(render_pipeline_text(pipeline))
+
+        self.assertIn(
+            "seqs: (SampleData[Kraken2Report % Properties", rendered
+        )
+        self.assertIn("| FeatureData[Kraken2Report", rendered)
+        self.assertIn('pipeline input "seqs"', rendered)
 
     def test_render_pipeline_text_displays_collection_inputs(self) -> None:
         pipeline = AdagioPipeline.model_validate(_collection_pipeline_dict())
