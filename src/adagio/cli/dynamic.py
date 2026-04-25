@@ -1,7 +1,6 @@
 import inspect
 import math
 import re
-import textwrap
 import types
 from pathlib import Path
 from typing import Any, Annotated, Callable, Union, get_args, get_origin
@@ -15,6 +14,12 @@ from ..app.parsers.pipeline import Parameter as ParamSpec
 from ..executors.cache_support import (
     CACHE_DIR_HELP,
     REUSE_HELP,
+)
+from ..type_format import (
+    compact_type_text,
+    path_type_label,
+    render_type_text,
+    type_label_display_width,
 )
 from .args import ParamType, ShowParamsMode, dynamic_opt, to_identifier
 
@@ -47,10 +52,6 @@ class _PipelineGroupFormatter:
         console.print(PanelSpec().build(RichGroup(*renderables), title=panel.title))
 
 
-_TYPE_STYLE = "bold yellow"
-_SEMANTIC_TYPE_STYLE = "bold #84ad50"
-
-
 def _entry_key(entry: Any) -> str:
     options = entry.all_options if hasattr(entry, "all_options") else ()
     return next((name for name in options if name.startswith("--")), "")
@@ -80,21 +81,14 @@ def _pipeline_type_label(type_hint: Any) -> str:
 
 def _display_type_label(*, spec_type: str | None, type_hint: Any, is_input: bool) -> str:
     if is_input:
-        return _path_type_label(spec_type)
+        return path_type_label(spec_type)
 
     if spec_type:
-        compact = _compact_type_text(spec_type)
+        compact = compact_type_text(spec_type)
         if compact.startswith("["):
             return compact
 
     return _pipeline_type_label(type_hint)
-
-
-def _path_type_label(spec_type: str | None) -> str:
-    cleaned = (spec_type or "").strip()
-    if not cleaned:
-        return "PATH"
-    return f"PATH\n{cleaned}"
 
 
 def _output_path_help(description: str | None) -> str:
@@ -108,142 +102,7 @@ def _render_pipeline_type(
     entry: Any, entry_metadata: dict[str, dict[str, Any]], width: int
 ) -> Any:
     label = entry_metadata.get(_entry_key(entry), {}).get("type_label", "TEXT")
-    return _render_type_text(label, width)
-
-
-def _render_type_text(label: str, width: int) -> Any:
-    from rich.text import Text
-
-    wrapped = _wrap_type_label(label, width)
-    if not label.startswith("PATH\n"):
-        return Text(wrapped, style=_TYPE_STYLE)
-
-    rendered = Text()
-    lines = wrapped.split("\n")
-    for index, line in enumerate(lines):
-        if index:
-            rendered.append("\n")
-        style = _TYPE_STYLE if index == 0 and line == "PATH" else _SEMANTIC_TYPE_STYLE
-        rendered.append(line, style=style)
-    return rendered
-
-
-def _compact_type_text(type_text: str) -> str:
-    cleaned = type_text.strip()
-    if "Choices(" not in cleaned:
-        return f"({cleaned})"
-
-    match = re.search(r"Choices\((.*)\)", cleaned)
-    if match is None:
-        return f"({cleaned})"
-
-    choices = [
-        choice.strip().strip("'\"")
-        for choice in match.group(1).split(",")
-        if choice.strip()
-    ]
-    if not choices:
-        return f"({cleaned})"
-    return "[" + "|".join(choices) + "]"
-
-
-def _wrap_type_label(label: str, width: int) -> str:
-    return "\n".join(
-        line
-        for raw_line in label.splitlines()
-        for line in _wrap_type_label_line(raw_line, width)
-    )
-
-
-def _wrap_type_label_line(label: str, width: int) -> list[str]:
-    if len(label) <= width:
-        return [label]
-    if label.startswith("[") and label.endswith("]"):
-        return _wrap_choice_label(label, width)
-    if " | " in label:
-        return _wrap_union_type_label(label, width)
-    return _wrap_long_type_label(label, width)
-
-
-def _wrap_choice_label(label: str, width: int) -> list[str]:
-    if len(label) <= width or not (label.startswith("[") and label.endswith("]")):
-        return [label]
-
-    choices = [choice for choice in label[1:-1].split("|") if choice]
-    if not choices:
-        return [label]
-
-    lines: list[str] = []
-    current = "["
-
-    for index, choice in enumerate(choices):
-        is_last = index == len(choices) - 1
-        separator = "" if current in ("[", " |") else "|"
-        suffix = "]" if is_last else ""
-        candidate = current + separator + choice + suffix
-
-        if len(candidate) <= width or current in ("[", " |"):
-            current = candidate
-        else:
-            lines.append(current)
-            current = " |" + choice + suffix
-
-    if not current.endswith("]"):
-        current += "]"
-    lines.append(current)
-    return lines
-
-
-def _wrap_union_type_label(label: str, width: int) -> list[str]:
-    members = [member for member in label.split(" | ") if member]
-    if not members:
-        return [label]
-
-    lines: list[str] = []
-    current = ""
-    for index, member in enumerate(members):
-        part = member if index == 0 else f" | {member}"
-        if not current:
-            if len(part) <= width:
-                current = part
-            else:
-                lines.extend(_wrap_long_type_label(part, width))
-        elif len(current) + len(part) <= width:
-            current += part
-        else:
-            lines.append(current)
-            if len(part) <= width:
-                current = part
-            else:
-                lines.extend(_wrap_long_type_label(part, width))
-                current = ""
-
-    if current:
-        lines.append(current)
-    return lines
-
-
-def _wrap_long_type_label(label: str, width: int) -> list[str]:
-    lines = textwrap.wrap(
-        label,
-        width=width,
-        subsequent_indent="  ",
-        break_long_words=False,
-        break_on_hyphens=False,
-    )
-    if lines and all(len(line) <= width for line in lines):
-        return lines
-    return textwrap.wrap(
-        label,
-        width=width,
-        subsequent_indent="  ",
-        break_long_words=True,
-        break_on_hyphens=False,
-    ) or [label]
-
-
-def _type_label_display_width(label: str) -> int:
-    return max((len(line) for line in label.splitlines()), default=0)
+    return render_type_text(label, width)
 
 
 def _render_pipeline_description(
@@ -288,7 +147,7 @@ def _get_pipeline_parameter_columns(
         8,
         min(
             max(
-                _type_label_display_width(
+                type_label_display_width(
                     entry_metadata.get(_entry_key(entry), {}).get("type_label", "TEXT")
                 )
                 for entry in entries
@@ -664,7 +523,7 @@ def build_dynamic_run(
         output_bindings.append((ident, original))
         opt = dynamic_opt(original, ParamType.OUTPUT)
         entry_metadata[opt] = {
-            "type_label": _path_type_label(spec.type),
+            "type_label": path_type_label(spec.type),
             "default": None,
             "required": False,
         }

@@ -6,7 +6,6 @@ from rich.console import Group, NewLine
 from rich.panel import Panel
 from rich.text import Text
 
-from .cli.dynamic import _compact_type_text, _wrap_type_label
 from .executors.common import plan_execution_order
 from .model.pipeline import AdagioPipeline
 from .model.task import (
@@ -16,6 +15,7 @@ from .model.task import (
     PromotedVal,
     RootInputTask,
 )
+from .type_format import TYPE_STYLE, compact_type_text, wrap_type_label
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,7 @@ class _DisplayRef:
 
 
 _ENTRY_INDENT = "       "
+# Fixed so pipeline-show output remains stable and easy to copy between terminals.
 _PIPELINE_SHOW_TYPE_WIDTH = 72
 
 
@@ -234,22 +235,23 @@ def _append_entry_line(
     rendered.append(name, style="cyan")
     if value_text is not None:
         rendered.append(":", style="cyan")
+    value_rendered = False
     if type_label:
         rendered.append(" ")
-        wrapped_type = _wrap_type_label(type_label, _PIPELINE_SHOW_TYPE_WIDTH)
+        wrapped_type = wrap_type_label(type_label, _PIPELINE_SHOW_TYPE_WIDTH)
         type_lines = wrapped_type.splitlines()
-        rendered.append(type_lines[0], style="bold yellow")
+        rendered.append(type_lines[0], style=TYPE_STYLE)
         if len(type_lines) > 1:
             for line in type_lines[1:]:
                 rendered.append("\n")
                 rendered.append(_ENTRY_INDENT)
-                rendered.append(line, style="bold yellow")
+                rendered.append(line, style=TYPE_STYLE)
             if value_text:
                 rendered.append("\n")
                 rendered.append(_ENTRY_INDENT)
                 rendered.append(value_text)
-                value_text = None
-    if value_text:
+                value_rendered = True
+    if value_text and not value_rendered:
         rendered.append(" ")
         rendered.append(value_text)
     rendered.append("\n")
@@ -362,7 +364,7 @@ def _format_spec_type(type_text: str | None) -> str | None:
     cleaned = (type_text or "").strip()
     if not cleaned:
         return None
-    return _compact_type_text(cleaned)
+    return compact_type_text(cleaned)
 
 
 def _clean_description(description: str | None) -> str | None:

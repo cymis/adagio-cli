@@ -3,14 +3,16 @@ import unittest
 
 from adagio.app.parsers.pipeline import Input, Parameter, parse_inputs, parse_parameters
 from adagio.cli.dynamic import (
-    _compact_type_text,
     _display_type_label,
     _pipeline_type_label,
-    _render_type_text,
-    _wrap_type_label,
     build_dynamic_run,
 )
 from adagio.model.pipeline import AdagioPipeline
+from adagio.type_format import (
+    compact_type_text,
+    render_type_text,
+    wrap_type_label,
+)
 
 
 class PipelineDescriptionTests(unittest.TestCase):
@@ -137,18 +139,18 @@ class PipelineDescriptionTests(unittest.TestCase):
         self.assertNotIn("Pipeline parameter:", param_help)
 
     def test_choices_are_rendered_compactly(self) -> None:
-        compact = _compact_type_text(
+        compact = compact_type_text(
             "Str % Choices('ace', 'berger_parker_d', 'brillouin_d')"
         )
         self.assertEqual(compact, "[ace|berger_parker_d|brillouin_d]")
 
-        compact_unquoted = _compact_type_text(
+        compact_unquoted = compact_type_text(
             "Str % Choices(ace, berger_parker_d, brillouin_d)"
         )
         self.assertEqual(compact_unquoted, "[ace|berger_parker_d|brillouin_d]")
 
     def test_long_choice_labels_wrap_on_pipes(self) -> None:
-        wrapped = _wrap_type_label(
+        wrapped = wrap_type_label(
             "[ace|berger_parker_d|brillouin_d|chao1|dominance]", 22
         )
         self.assertIn("\n", wrapped)
@@ -157,7 +159,7 @@ class PipelineDescriptionTests(unittest.TestCase):
         self.assertIn("\n |", wrapped)
 
     def test_long_semantic_union_labels_wrap_on_pipes(self) -> None:
-        wrapped = _wrap_type_label(
+        wrapped = wrap_type_label(
             "PATH\n"
             "SampleData[Kraken2Report % Properties('reads', 'contigs', 'mags')]¹ | "
             "FeatureData[Kraken2Report % Properties('mags')]²",
@@ -165,15 +167,36 @@ class PipelineDescriptionTests(unittest.TestCase):
         )
 
         self.assertTrue(wrapped.startswith("PATH\n"))
-        self.assertIn("\n | FeatureData[Kraken2Report", wrapped)
+        self.assertIn("\nFeatureData[Kraken2Report", wrapped)
         self.assertTrue(all(len(line) <= 44 for line in wrapped.splitlines()))
 
+    def test_union_wrap_does_not_lead_with_pipe_after_long_first_member(self) -> None:
+        wrapped = wrap_type_label(
+            "VeryLongSemanticTypeNameWithoutBreaks | ShortType",
+            12,
+        )
+
+        self.assertEqual(wrapped.splitlines()[-1], "ShortType")
+        self.assertNotIn("\n | ShortType", wrapped)
+
     def test_semantic_type_lines_render_green_after_path(self) -> None:
-        rendered = _render_type_text("PATH\nFeatureTable[Frequency]", 44)
+        rendered = render_type_text("PATH\nFeatureTable[Frequency]", 44)
 
         self.assertEqual(rendered.plain, "PATH\nFeatureTable[Frequency]")
         self.assertEqual(rendered.spans[0].style, "bold yellow")
         self.assertEqual(rendered.spans[1].style, "bold #84ad50")
+
+    def test_wrapped_semantic_type_lines_render_green_after_path(self) -> None:
+        rendered = render_type_text(
+            "PATH\nSampleData[Kraken2Report % Properties('reads', 'contigs')]",
+            30,
+        )
+
+        self.assertTrue(rendered.plain.startswith("PATH\n"))
+        self.assertGreater(len(rendered.spans), 2)
+        self.assertTrue(
+            all(span.style == "bold #84ad50" for span in rendered.spans[1:])
+        )
 
     def test_pipeline_type_labels_use_general_cli_types(self) -> None:
         self.assertEqual(_pipeline_type_label(int), "INTEGER")

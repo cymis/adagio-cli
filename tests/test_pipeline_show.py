@@ -256,6 +256,29 @@ class PipelineShowTests(unittest.TestCase):
 
         self.assertIn("dada2.denoise_single", rendered)
 
+    def test_pipeline_show_rejects_invalid_range_predicates(self) -> None:
+        pipeline_data = _sample_pipeline_dict()
+        invalid_range_ast = {
+            **OPEN_ENDED_RANGE_AST,
+            "predicate": {
+                **OPEN_ENDED_RANGE_AST["predicate"],
+                "range": [1, 2.5],
+            },
+        }
+        pipeline_data["signature"]["parameters"].append(
+            {
+                "id": "param-invalid-range",
+                "name": "invalid_range",
+                "type": "Int % Range(1, 2.5)",
+                "ast": invalid_range_ast,
+                "required": True,
+                "description": "Invalid range.",
+            }
+        )
+
+        with self.assertRaises(ValueError):
+            AdagioPipeline.model_validate(pipeline_data)
+
     def test_pipeline_show_wraps_long_semantic_types(self) -> None:
         pipeline_data = _sample_pipeline_dict()
         pipeline_data["signature"]["inputs"][0]["type"] = (
@@ -269,7 +292,7 @@ class PipelineShowTests(unittest.TestCase):
         self.assertIn(
             "seqs: (SampleData[Kraken2Report % Properties", rendered
         )
-        self.assertIn("| FeatureData[Kraken2Report", rendered)
+        self.assertIn("FeatureData[Kraken2Report", rendered)
         self.assertIn('pipeline input "seqs"', rendered)
 
     def test_render_pipeline_text_displays_collection_inputs(self) -> None:
