@@ -15,6 +15,12 @@ from ..executors.cache_support import (
     CACHE_DIR_HELP,
     REUSE_HELP,
 )
+from ..type_format import (
+    compact_type_text,
+    path_type_label,
+    render_type_text,
+    type_label_display_width,
+)
 from .args import ParamType, ShowParamsMode, dynamic_opt, to_identifier
 
 
@@ -75,10 +81,10 @@ def _pipeline_type_label(type_hint: Any) -> str:
 
 def _display_type_label(*, spec_type: str | None, type_hint: Any, is_input: bool) -> str:
     if is_input:
-        return "PATH"
+        return path_type_label(spec_type)
 
     if spec_type:
-        compact = _compact_type_text(spec_type)
+        compact = compact_type_text(spec_type)
         if compact.startswith("["):
             return compact
 
@@ -95,58 +101,8 @@ def _output_path_help(description: str | None) -> str:
 def _render_pipeline_type(
     entry: Any, entry_metadata: dict[str, dict[str, Any]], width: int
 ) -> Any:
-    from rich.text import Text
-
     label = entry_metadata.get(_entry_key(entry), {}).get("type_label", "TEXT")
-    return Text(_wrap_type_label(label, width), style="bold yellow")
-
-
-def _compact_type_text(type_text: str) -> str:
-    cleaned = type_text.strip()
-    if "Choices(" not in cleaned:
-        return f"({cleaned})"
-
-    match = re.search(r"Choices\((.*)\)", cleaned)
-    if match is None:
-        return f"({cleaned})"
-
-    choices = [
-        choice.strip().strip("'\"")
-        for choice in match.group(1).split(",")
-        if choice.strip()
-    ]
-    if not choices:
-        return f"({cleaned})"
-    return "[" + "|".join(choices) + "]"
-
-
-def _wrap_type_label(label: str, width: int) -> str:
-    if len(label) <= width or not (label.startswith("[") and label.endswith("]")):
-        return label
-
-    choices = [choice for choice in label[1:-1].split("|") if choice]
-    if not choices:
-        return label
-
-    lines: list[str] = []
-    current = "["
-
-    for index, choice in enumerate(choices):
-        is_last = index == len(choices) - 1
-        separator = "" if current in ("[", " |") else "|"
-        suffix = "]" if is_last else ""
-        candidate = current + separator + choice + suffix
-
-        if len(candidate) <= width or current in ("[", " |"):
-            current = candidate
-        else:
-            lines.append(current)
-            current = " |" + choice + suffix
-
-    if not current.endswith("]"):
-        current += "]"
-    lines.append(current)
-    return "\n".join(lines)
+    return render_type_text(label, width)
 
 
 def _render_pipeline_description(
@@ -191,10 +147,12 @@ def _get_pipeline_parameter_columns(
         8,
         min(
             max(
-                len(entry_metadata.get(_entry_key(entry), {}).get("type_label", "TEXT"))
+                type_label_display_width(
+                    entry_metadata.get(_entry_key(entry), {}).get("type_label", "TEXT")
+                )
                 for entry in entries
             ),
-            max(22, min(34, math.ceil(console.width * 0.3))),
+            max(28, min(70, math.ceil(console.width * 0.35))),
         ),
     )
     name_column = ColumnSpec(
@@ -565,7 +523,7 @@ def build_dynamic_run(
         output_bindings.append((ident, original))
         opt = dynamic_opt(original, ParamType.OUTPUT)
         entry_metadata[opt] = {
-            "type_label": "PATH",
+            "type_label": path_type_label(spec.type),
             "default": None,
             "required": False,
         }
