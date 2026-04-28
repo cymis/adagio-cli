@@ -79,9 +79,7 @@ def _pipeline_type_label(type_hint: Any) -> str:
     return "TEXT"
 
 
-def _display_type_label(
-    *, spec_type: str | None, type_hint: Any, is_input: bool
-) -> str:
+def _display_type_label(*, spec_type: str | None, type_hint: Any, is_input: bool) -> str:
     if is_input:
         return path_type_label(spec_type)
 
@@ -430,9 +428,7 @@ def build_dynamic_run(
     required_input_specs = [spec for spec in input_specs if spec.required]
     optional_input_specs = [spec for spec in input_specs if not spec.required]
     required_param_specs = [spec for spec in param_specs if _is_required_param(spec)]
-    optional_param_specs = [
-        spec for spec in param_specs if not _is_required_param(spec)
-    ]
+    optional_param_specs = [spec for spec in param_specs if not _is_required_param(spec)]
 
     def add_input_spec(spec: InputSpec) -> None:
         original = spec.name
@@ -484,9 +480,7 @@ def build_dynamic_run(
         argument_value = argument_params.get(original)
         has_argument_default = not _is_missing(argument_value)
         display_default = (
-            default
-            if default is not None
-            else (argument_value if has_argument_default else None)
+            default if default is not None else (argument_value if has_argument_default else None)
         )
         display_required = is_required and display_default is None
         param_default = None
@@ -583,10 +577,4 @@ def build_dynamic_run(
 
 
 def _is_missing(value: Any) -> bool:
-    return (
-        value is None
-        or value == ""
-        or value == "<fill me>"
-        or value == []
-        or value == {}
-    )
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}

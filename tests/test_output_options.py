@@ -48,12 +48,8 @@ class OutputOptionTests(unittest.TestCase):
         self.assertIn("output_dir", dynamic_run.__signature__.parameters)
         self.assertIn("output_table", dynamic_run.__signature__.parameters)
 
-        output_dir_annotation = dynamic_run.__signature__.parameters[
-            "output_dir"
-        ].annotation
-        output_annotation = dynamic_run.__signature__.parameters[
-            "output_table"
-        ].annotation
+        output_dir_annotation = dynamic_run.__signature__.parameters["output_dir"].annotation
+        output_annotation = dynamic_run.__signature__.parameters["output_table"].annotation
         output_dir_help = typing.get_args(output_dir_annotation)[1].help
         output_help = typing.get_args(output_annotation)[1].help
 
@@ -131,9 +127,7 @@ class OutputOptionTests(unittest.TestCase):
             run_handler=lambda *args, **kwargs: None,
         )
 
-        output_dir_annotation = dynamic_run.__signature__.parameters[
-            "output_dir"
-        ].annotation
+        output_dir_annotation = dynamic_run.__signature__.parameters["output_dir"].annotation
         output_dir_group = typing.get_args(output_dir_annotation)[1].group
 
         self.assertEqual(output_dir_group[0]._name, "Command Options")
@@ -198,10 +192,7 @@ class OutputOptionTests(unittest.TestCase):
 
     def test_output_dir_override_applies_to_all_outputs(self) -> None:
         resolved = _apply_output_overrides(
-            outputs={
-                "table": "/tmp/from-file/table.qza",
-                "stats": "/tmp/from-file/stats.qza",
-            },
+            outputs={"table": "/tmp/from-file/table.qza", "stats": "/tmp/from-file/stats.qza"},
             output_names=["table", "stats"],
             output_dir="/tmp/all-outputs",
             output_overrides={"stats": "/tmp/custom/stats.qza"},

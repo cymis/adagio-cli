@@ -361,13 +361,7 @@ def _outputs_need_default(outputs: str | dict[str, str]) -> bool:
 
 
 def _is_missing(value: Any) -> bool:
-    return (
-        value is None
-        or value == ""
-        or value == "<fill me>"
-        or value == []
-        or value == {}
-    )
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
 
 
 def _validate_required_arguments(
