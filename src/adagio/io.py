@@ -13,6 +13,23 @@ def load_input(*, ctx, source: str):
 
     return [input]
 
+
+@lift_parsl(lambda fut: fut)
+def load_input_collection(*, ctx, sources):
+    from qiime2.sdk import Artifact
+    from qiime2.sdk import PluginManager
+
+    PluginManager()
+
+    if isinstance(sources, dict):
+        sources = list(sources.values())
+    elif isinstance(sources, str):
+        sources = [sources]
+
+    with ctx.cache:
+        return [Artifact.load(source) for source in sources]
+
+
 @lift_parsl(ProxyMetadata)
 def load_metadata(*, ctx, source: str):
     from qiime2 import Artifact, Metadata

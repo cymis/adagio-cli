@@ -57,6 +57,27 @@ class OutputOptionTests(unittest.TestCase):
         self.assertIn("Denoised feature table.", output_help)
         self.assertIn("Overrides --output-dir", output_help)
 
+    def test_dynamic_run_uses_variadic_options_for_collection_inputs(self) -> None:
+        dynamic_run = build_dynamic_run(
+            input_specs=[
+                Input(
+                    id="00000000-0000-0000-0000-000000000001",
+                    name="matrices",
+                    required=True,
+                    type="List[DistanceMatrix]",
+                    description="Distance matrices.",
+                )
+            ],
+            param_specs=[],
+            output_specs=[],
+            run_handler=lambda *args, **kwargs: None,
+        )
+
+        annotation = dynamic_run.__signature__.parameters["input_matrices"].annotation
+        value_type = typing.get_args(annotation)[0]
+
+        self.assertIn(list[str], typing.get_args(value_type))
+
     def test_output_dir_is_a_command_option_and_required_pipeline_options_are_first(
         self,
     ) -> None:
