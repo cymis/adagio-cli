@@ -100,7 +100,14 @@ def run_pipeline_from_kwargs(
     for ident, original in input_bindings:
         value = kwargs.get(ident)
         if value is not None:
-            arguments.inputs[original] = str(value)
+            if isinstance(value, list):
+                arguments.inputs[original] = [str(item) for item in value]
+            elif isinstance(value, dict):
+                arguments.inputs[original] = {
+                    str(key): str(item) for key, item in value.items()
+                }
+            else:
+                arguments.inputs[original] = str(value)
 
     for ident, original in param_bindings:
         value = kwargs.get(ident)
@@ -177,7 +184,13 @@ def run_pipeline_from_kwargs(
 
 def _is_missing(value: Any) -> bool:
     """Treat placeholders and null values as missing."""
-    return value is None or value == "<fill me>"
+    return (
+        value is None
+        or value == ""
+        or value == "<fill me>"
+        or value == []
+        or value == {}
+    )
 
 
 def _is_missing_output(value: Any) -> bool:

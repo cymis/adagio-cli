@@ -12,8 +12,9 @@ from adagio.monitor.log import LogMonitor
 from adagio.monitor.tty import RichMonitor
 
 from .cache_support import ExecutionCacheConfig
+from .container_support import is_uri
 from .common import plan_execution_order, task_label
-from .path_utils import resolve_host_path
+from .path_utils import InputSource, resolve_host_input, resolve_host_path
 
 CONTAINER_SUBTASK_COUNT = 1
 
@@ -23,7 +24,7 @@ class SerialExecutionState:
     cwd: Path
     work_path: Path
     params: dict[str, t.Any]
-    scope: dict[str, str]
+    scope: dict[str, InputSource]
     cache_config: ExecutionCacheConfig | None
     saved_output_ids: set[str] = field(default_factory=set)
     save_output_started: bool = False
@@ -64,7 +65,9 @@ def run_serial_pipeline(
         active_monitor.start_load_input()
         for input_def in sig.inputs:
             source = arguments.inputs[input_def.name]
-            state.scope[input_def.id] = resolve_host_path(source=source, cwd=state.cwd)
+            state.scope[input_def.id] = resolve_pipeline_input(
+                source=source, type_name=input_def.type, cwd=state.cwd
+            )
         active_monitor.finish_load_input()
 
         execution_plan = plan_execution_order(tasks=tasks, scope=state.scope)
@@ -133,3 +136,63 @@ def resolve_monitor(*, console: Console | None, monitor: Monitor | None) -> Moni
     if console is not None:
         return RichMonitor(console=console)
     return LogMonitor()
+
+
+def resolve_pipeline_input(
+    *, source: InputSource, type_name: str, cwd: Path
+) -> InputSource:
+    resolved = resolve_host_input(source=source, cwd=cwd)
+    if not is_collection_type(type_name):
+        return resolved
+
+    if isinstance(resolved, str):
+        return expand_collection_input_source(resolved)
+    if isinstance(resolved, list):
+        if len(resolved) == 1:
+            return expand_collection_input_source(resolved[0])
+        return resolved
+    return list(resolved.values())
+
+
+def is_collection_type(type_name: str) -> bool:
+    return type_name.startswith("List[") or type_name.startswith("Collection[")
+
+
+def expand_collection_input_source(source: str) -> list[str]:
+    path = Path(source)
+    if (
+        not is_uri(source)
+        and path.suffix.lower() in {".tsv", ".txt"}
+        and path.is_file()
+    ):
+        return read_collection_manifest(path)
+    return [source]
+
+
+def read_collection_manifest(path: Path) -> list[str]:
+    rows = [
+        line.rstrip("\n").split("\t")
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if not rows:
+        return []
+
+    header = [cell.strip().lower() for cell in rows[0]]
+    path_index = header.index("path") if "path" in header else None
+    data_rows = rows[1:] if path_index is not None else rows
+
+    result: list[str] = []
+    for row in data_rows:
+        if path_index is not None:
+            if path_index >= len(row):
+                continue
+            raw_path = row[path_index].strip()
+        elif len(row) >= 2:
+            raw_path = row[1].strip()
+        else:
+            raw_path = row[0].strip()
+
+        if raw_path:
+            result.append(resolve_host_path(source=raw_path, cwd=path.parent))
+    return result

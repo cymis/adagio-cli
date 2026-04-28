@@ -48,14 +48,39 @@ class OutputOptionTests(unittest.TestCase):
         self.assertIn("output_dir", dynamic_run.__signature__.parameters)
         self.assertIn("output_table", dynamic_run.__signature__.parameters)
 
-        output_dir_annotation = dynamic_run.__signature__.parameters["output_dir"].annotation
-        output_annotation = dynamic_run.__signature__.parameters["output_table"].annotation
+        output_dir_annotation = dynamic_run.__signature__.parameters[
+            "output_dir"
+        ].annotation
+        output_annotation = dynamic_run.__signature__.parameters[
+            "output_table"
+        ].annotation
         output_dir_help = typing.get_args(output_dir_annotation)[1].help
         output_help = typing.get_args(output_annotation)[1].help
 
         self.assertEqual(output_dir_help, "Directory for all pipeline outputs.")
         self.assertIn("Denoised feature table.", output_help)
         self.assertIn("Overrides --output-dir", output_help)
+
+    def test_dynamic_run_uses_variadic_options_for_collection_inputs(self) -> None:
+        dynamic_run = build_dynamic_run(
+            input_specs=[
+                Input(
+                    id="00000000-0000-0000-0000-000000000001",
+                    name="matrices",
+                    required=True,
+                    type="List[DistanceMatrix]",
+                    description="Distance matrices.",
+                )
+            ],
+            param_specs=[],
+            output_specs=[],
+            run_handler=lambda *args, **kwargs: None,
+        )
+
+        annotation = dynamic_run.__signature__.parameters["input_matrices"].annotation
+        value_type = typing.get_args(annotation)[0]
+
+        self.assertIn(list[str], typing.get_args(value_type))
 
     def test_output_dir_is_a_command_option_and_required_pipeline_options_are_first(
         self,
@@ -106,7 +131,9 @@ class OutputOptionTests(unittest.TestCase):
             run_handler=lambda *args, **kwargs: None,
         )
 
-        output_dir_annotation = dynamic_run.__signature__.parameters["output_dir"].annotation
+        output_dir_annotation = dynamic_run.__signature__.parameters[
+            "output_dir"
+        ].annotation
         output_dir_group = typing.get_args(output_dir_annotation)[1].group
 
         self.assertEqual(output_dir_group[0]._name, "Command Options")
@@ -171,7 +198,10 @@ class OutputOptionTests(unittest.TestCase):
 
     def test_output_dir_override_applies_to_all_outputs(self) -> None:
         resolved = _apply_output_overrides(
-            outputs={"table": "/tmp/from-file/table.qza", "stats": "/tmp/from-file/stats.qza"},
+            outputs={
+                "table": "/tmp/from-file/table.qza",
+                "stats": "/tmp/from-file/stats.qza",
+            },
             output_names=["table", "stats"],
             output_dir="/tmp/all-outputs",
             output_overrides={"stats": "/tmp/custom/stats.qza"},

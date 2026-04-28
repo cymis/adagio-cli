@@ -4,6 +4,8 @@ from typing import Iterable
 
 from .container_support import is_uri
 
+InputSource = str | list[str] | dict[str, str]
+
 
 def resolve_host_path(*, source: str, cwd: Path) -> str:
     if is_uri(source):
@@ -12,6 +14,17 @@ def resolve_host_path(*, source: str, cwd: Path) -> str:
     if path.is_absolute():
         return str(path.resolve())
     return str((cwd / path).resolve())
+
+
+def resolve_host_input(*, source: InputSource, cwd: Path) -> InputSource:
+    if isinstance(source, list):
+        return [resolve_host_path(source=item, cwd=cwd) for item in source]
+    if isinstance(source, dict):
+        return {
+            key: resolve_host_path(source=value, cwd=cwd)
+            for key, value in source.items()
+        }
+    return resolve_host_path(source=source, cwd=cwd)
 
 
 def resolve_output_destination(

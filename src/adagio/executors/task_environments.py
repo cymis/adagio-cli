@@ -91,13 +91,24 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         metadata_inputs: dict[str, str] = {}
         for name, src in task.inputs.items():
             if src.kind == "archive":
-                archive_inputs[name] = state.scope[src.id]
+                value = state.scope[src.id]
+                if isinstance(value, list):
+                    archive_collection_inputs[name] = value
+                elif isinstance(value, dict):
+                    archive_collection_inputs[name] = list(value.values())
+                else:
+                    archive_inputs[name] = value
             elif src.kind == "archive-collection":
-                archive_collection_inputs[name] = [
-                    state.scope[item.id] for item in src.items
-                ]
+                archive_collection_inputs[name] = _flatten_collection_items(
+                    [state.scope[item.id] for item in src.items]
+                )
             elif src.kind == "metadata":
-                metadata_inputs[name] = state.scope[src.id]
+                value = state.scope[src.id]
+                if not isinstance(value, str):
+                    raise TypeError(
+                        f"Metadata input {name!r} must resolve to a single path."
+                    )
+                metadata_inputs[name] = value
             else:
                 raise TypeError(f"Unsupported input kind: {src.kind!r}")
 
@@ -163,6 +174,20 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             state.scope[dest.id] = actual_path
 
         return result.reused
+
+
+def _flatten_collection_items(
+    values: list[str | list[str] | dict[str, str]],
+) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if isinstance(value, list):
+            result.extend(value)
+        elif isinstance(value, dict):
+            result.extend(value.values())
+        else:
+            result.append(value)
+    return result
 
 
 def _save_outputs(

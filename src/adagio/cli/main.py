@@ -256,7 +256,7 @@ def _load_arguments_data(path: Path, _console: Console | None = None) -> dict[st
 
 
 def _is_missing(value: Any) -> bool:
-    return value is None or value == "<fill me>"
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
 
 
 if __name__ == "__main__":

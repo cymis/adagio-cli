@@ -1,8 +1,7 @@
 import typing as t
 import os
-import json
 
-from pydantic import BaseModel, RootModel, model_validator, Field
+from pydantic import BaseModel, RootModel, model_validator
 
 
 from .arguments import AdagioArguments
@@ -11,52 +10,50 @@ from .ast import TypeAST, TypeASTExpression, TypeASTIntersection, TypeASTUnion
 
 
 class AdagioPipeline(BaseModel):
-    type: t.Literal['pipeline']
+    type: t.Literal["pipeline"]
     # meta: 'AdagioPipelineMetadata'
-    signature: 'AdagioSignature'
-    graph: list['AdagioTask']
+    signature: "AdagioSignature"
+    graph: list["AdagioTask"]
 
     def validate_graph(self):
         pass
 
-    def iter_tasks(self) -> t.Generator['AdagioTask', None, None]:
+    def iter_tasks(self) -> t.Generator["AdagioTask", None, None]:
         yield from self.graph
-
 
 
 class AdagioPipelineMetadata(RootModel):
     root: dict[str, t.Any]
 
-    @model_validator(mode='before')
+    @model_validator(mode="before")
     def check_version(cls, data):
-        if 'version' not in data:
+        if "version" not in data:
             raise AssertionError('Missing "version" field.')
 
 
 class AdagioSignature(BaseModel):
-    inputs: 'list[_InputDef]'
-    parameters: 'list[_ParameterDef]'
-    outputs: 'list[_OutputDef]'
+    inputs: "list[_InputDef]"
+    parameters: "list[_ParameterDef]"
+    outputs: "list[_OutputDef]"
 
     def to_default_arguments(self):
         inputs = {}
         for input in self.inputs:
-            inputs[input.name] = '<fill me>'
+            inputs[input.name] = "<fill me>"
         params = {}
         for param in self.parameters:
             if param.required:
-                params[param.name] = '<fill me>'
+                params[param.name] = "<fill me>"
             else:
                 params[param.name] = param.default
         outputs = {}
         for output in self.outputs:
-            outputs[output.name] = '<fill me>'
+            outputs[output.name] = "<fill me>"
 
         return AdagioArguments(inputs=inputs, parameters=params, outputs=outputs)
 
     def validate_arguments(self, args: AdagioArguments):
         return
-
 
     def get_params(self, args: AdagioArguments):
         lookup = {}
@@ -65,20 +62,36 @@ class AdagioSignature(BaseModel):
         return lookup
 
     def load_inputs(self, ctx, arguments, scope):
-        from adagio.io import load_input, load_metadata
+        from adagio.io import load_input, load_input_collection, load_metadata
 
         for input in self.inputs:
             source = arguments.inputs[input.name]
             if _is_metadata_ast(input.ast):
-                print("SCHEDULED:", f'load_metadata({source!r})')
+                print("SCHEDULED:", f"load_metadata({source!r})")
                 scope[input.id] = load_metadata(ctx=ctx, source=source)
                 # IIFE for the dreaded for-loop in the parent closure problem.
-                scope[input.id]._future_.add_done_callback((lambda str: (lambda x: print("DONE:", str)))(f'load_metadata({source!r})'))
+                scope[input.id]._future_.add_done_callback(
+                    (lambda str: lambda x: print("DONE:", str))(
+                        f"load_metadata({source!r})"
+                    )
+                )
+            elif _is_collection_type(input.type):
+                print("SCHEDULED:", f"load_input_collection({source!r})")
+                scope[input.id] = load_input_collection(ctx=ctx, sources=source)
+                scope[input.id]._future_.add_done_callback(
+                    (lambda str: lambda x: print("DONE:", str))(
+                        f"load_input_collection({source!r})"
+                    )
+                )
             else:
-                print("SCHEDULED:", f'load_input({source!r})')
+                print("SCHEDULED:", f"load_input({source!r})")
                 scope[input.id] = load_input(ctx=ctx, source=source)
                 # IIFE for the dreaded for-loop in the parent closure problem.
-                scope[input.id]._future_.add_done_callback((lambda str: (lambda x: print("DONE:", str)))(f'load_input({source!r})'))
+                scope[input.id]._future_.add_done_callback(
+                    (lambda str: lambda x: print("DONE:", str))(
+                        f"load_input({source!r})"
+                    )
+                )
 
     def save_outputs(self, ctx, arguments: AdagioArguments, scope):
         from adagio.io import save_output
@@ -90,11 +103,15 @@ class AdagioSignature(BaseModel):
             elif type(arguments.outputs) is dict:
                 dest = arguments.outputs[output.name]
             else:
-                raise NotImplementedError('impossible')
-            print("SCHEDULED:", f'{output.name}.save({dest!r})')
+                raise NotImplementedError("impossible")
+            print("SCHEDULED:", f"{output.name}.save({dest!r})")
             future = save_output(ctx=ctx, output=scope[output.id], destination=dest)
             # IIFE for the dreaded for-loop in the parent closure problem.
-            future.add_done_callback((lambda str: (lambda x: print("DONE:", str)))(f'{output.name}.save({dest!r})'))
+            future.add_done_callback(
+                (lambda str: lambda x: print("DONE:", str))(
+                    f"{output.name}.save({dest!r})"
+                )
+            )
             futures.append(future)
 
         for future in futures:
@@ -102,7 +119,6 @@ class AdagioSignature(BaseModel):
                 future.result()
             except Exception:
                 pass
-
 
 
 class _Def(BaseModel):
@@ -119,7 +135,7 @@ class _InputDef(_Def):
 
 class _ParameterDef(_Def):
     required: bool
-    default: 'AllowableValue | None' = None
+    default: "AllowableValue | None" = None
 
 
 class _OutputDef(_Def):
@@ -132,3 +148,7 @@ def _is_metadata_ast(ast: TypeAST) -> bool:
     if isinstance(ast, (TypeASTUnion, TypeASTIntersection)):
         return any(_is_metadata_ast(member) for member in ast.members)
     return False
+
+
+def _is_collection_type(type_name: str) -> bool:
+    return type_name.startswith("List[") or type_name.startswith("Collection[")
