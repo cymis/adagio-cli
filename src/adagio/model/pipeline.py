@@ -132,7 +132,7 @@ class _OutputDef(_Def):
 
 def _is_metadata_ast(ast: TypeAST) -> bool:
     if isinstance(ast, TypeASTExpression):
-        return bool(ast.builtin and ast.name.startswith('Metadata'))
+        return bool(ast.builtin and ast.name.startswith("Metadata"))
     if isinstance(ast, (TypeASTUnion, TypeASTIntersection)):
         return any(_is_metadata_ast(member) for member in ast.members)
     return False

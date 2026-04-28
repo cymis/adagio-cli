@@ -1,5 +1,4 @@
 import typing as t
-
 from pydantic import BaseModel, Field
 
 from .task import AllowableValue
