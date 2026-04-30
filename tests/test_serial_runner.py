@@ -3,7 +3,7 @@ import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from adagio.executors.serial_runner import run_serial_pipeline
+from adagio.executors.serial_runner import resolve_pipeline_input, run_serial_pipeline
 from adagio.executors.task_environments import _save_outputs
 from adagio.model.arguments import AdagioArguments
 from adagio.monitor.api import Monitor
@@ -82,6 +82,47 @@ class RecordingMonitor(Monitor):
 
 
 class SerialRunnerOutputTests(unittest.TestCase):
+    def test_collection_input_manifest_expands_to_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest = root / "matrices.tsv"
+            manifest.write_text(
+                "key\tpath\n1\tdm-a.qza\n2\tdata/dm-b.qza\n",
+                encoding="utf-8",
+            )
+
+            resolved = resolve_pipeline_input(
+                source=str(manifest),
+                type_name="List[DistanceMatrix]",
+                cwd=root,
+            )
+
+        self.assertEqual(
+            resolved,
+            [
+                str((root / "dm-a.qza").resolve()),
+                str((root / "data" / "dm-b.qza").resolve()),
+            ],
+        )
+
+    def test_collection_input_list_resolves_each_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            resolved = resolve_pipeline_input(
+                source=["dm-a.qza", "nested/dm-b.qza"],
+                type_name="List[DistanceMatrix]",
+                cwd=root,
+            )
+
+        self.assertEqual(
+            resolved,
+            [
+                str((root / "dm-a.qza").resolve()),
+                str((root / "nested" / "dm-b.qza").resolve()),
+            ],
+        )
+
     def test_preserves_completed_output_when_later_task_fails(self) -> None:
         output_def = FakeOutputDef(id="out-1", name="result")
         pipeline = FakePipeline(

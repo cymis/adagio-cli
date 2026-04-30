@@ -233,6 +233,10 @@ def _is_required_param(spec: ParamSpec) -> bool:
     return bool(spec.required and spec.default is None)
 
 
+def _is_collection_type(type_name: str) -> bool:
+    return type_name.startswith("List[") or type_name.startswith("Collection[")
+
+
 def build_dynamic_run(
     *,
     input_specs: list[InputSpec],
@@ -453,7 +457,7 @@ def build_dynamic_run(
             ident=ident,
             opt=opt,
             required=False,
-            py_type=str,
+            py_type=list[str] if _is_collection_type(spec.type) else str,
             help_text=_format_help_text(
                 description=spec.description,
             ),
@@ -573,4 +577,4 @@ def build_dynamic_run(
 
 
 def _is_missing(value: Any) -> bool:
-    return value is None or value == "<fill me>"
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}

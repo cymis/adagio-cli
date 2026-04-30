@@ -30,7 +30,9 @@ class PluginActionTask(_BaseTask):
             if src.kind == 'archive':
                 kwargs[name] = scope[src.id]
             elif src.kind == 'archive-collection':
-                kwargs[name] = [scope[item.id] for item in src.items]
+                kwargs[name] = _flatten_collection_values(
+                    [scope[item.id] for item in src.items]
+                )
             elif src.kind == 'metadata':
                 # store for second pass in params
                 metadata[name] = scope[src.id]
@@ -133,3 +135,15 @@ def input_source_ids(value: TaskInputVal) -> list[str]:
     if value.kind == 'archive-collection':
         return [item.id for item in value.items]
     return [value.id]
+
+
+def _flatten_collection_values(values: list[t.Any]) -> list[t.Any]:
+    result: list[t.Any] = []
+    for value in values:
+        if isinstance(value, list):
+            result.extend(value)
+        elif isinstance(value, dict):
+            result.extend(value.values())
+        else:
+            result.append(value)
+    return result
