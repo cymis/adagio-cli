@@ -8,6 +8,12 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+## 0.1.0a3 - 2026-05-01
+
+- Adds support for collections. Adagio pipelines with collections are now handled
+- Improves terminal formatting
+- Adds semantic types to pipeline descriptions in terminal
+
 ## [0.1.0a2] - 2026-04-23
 
 ### Added

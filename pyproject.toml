@@ -1,13 +1,20 @@
 [project]
 name = "adagio-cli"
-version = "0.1.0a2"
+version = "0.1.0a3"
 description = "Command-line runner for Adagio pipeline files."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Cymis" }]
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["adagio", "bioinformatics", "cli", "pipelines", "qiime2", "workflow"]
+keywords = [
+  "adagio",
+  "bioinformatics",
+  "cli",
+  "pipelines",
+  "qiime2",
+  "workflow",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -37,12 +44,7 @@ Issues = "https://github.com/cymis/adagio-cli/issues"
 Changelog = "https://github.com/cymis/adagio-cli/blob/dev/CHANGELOG.md"
 
 [dependency-groups]
-dev = [
-  "build>=1.2.2",
-  "pytest>=8.4.0",
-  "ruff>=0.13.0",
-  "twine>=6.2.0",
-]
+dev = ["build>=1.2.2", "pytest>=8.4.0", "ruff>=0.13.0", "twine>=6.2.0"]
 
 [project.scripts]
 adagio = "adagio.cli.main:main"
