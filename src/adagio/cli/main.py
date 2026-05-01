@@ -182,9 +182,12 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     dynamic_run = build_dynamic_run(
-        input_specs=visible_inputs,
-        param_specs=visible_params,
-        output_specs=visible_outputs,
+        input_specs=input_specs,
+        param_specs=param_specs,
+        output_specs=output_specs,
+        visible_input_names={spec.name for spec in visible_inputs},
+        visible_param_names={spec.name for spec in visible_params},
+        visible_output_names={spec.name for spec in visible_outputs},
         argument_inputs=arguments_data.get("inputs", {}) if arguments_data else None,
         argument_params=arguments_data.get("parameters", {}) if arguments_data else None,
         run_handler=partial(run_pipeline_from_kwargs, console=console),

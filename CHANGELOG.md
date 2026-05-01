@@ -8,6 +8,22 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+## 0.1.0a4 - 2026-05-01
+
+### Added
+
+- Adds generated qapi metadata transformer actions so compatible artifacts can
+  be converted to metadata inside exported Adagio pipelines.
+- Adds pipeline/runtime support for built-in metadata conversion steps and
+  archive collection bindings.
+
+### Fixed
+
+- Fixes optional pipeline inputs so omitted optional values are not treated as
+  required at runtime.
+- Fixes dynamic run options so `--show-params` only controls help display and
+  does not affect which CLI options can be passed.
+
 ## 0.1.0a3 - 2026-05-01
 
 - Adds support for collections. Adagio pipelines with collections are now handled

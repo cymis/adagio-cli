@@ -242,6 +242,9 @@ def build_dynamic_run(
     input_specs: list[InputSpec],
     param_specs: list[ParamSpec],
     output_specs: list[OutputSpec],
+    visible_input_names: set[str] | None = None,
+    visible_param_names: set[str] | None = None,
+    visible_output_names: set[str] | None = None,
     argument_inputs: dict[str, Any] | None = None,
     argument_params: dict[str, Any] | None = None,
     run_handler: Callable[
@@ -261,6 +264,13 @@ def build_dynamic_run(
     ],
 ):
     """Build a dynamic run command from pipeline input, parameter, and output specs."""
+    visible_input_names = (
+        set(visible_input_names) if visible_input_names is not None else None
+    )
+    visible_param_names = set(visible_param_names) if visible_param_names is not None else None
+    visible_output_names = (
+        set(visible_output_names) if visible_output_names is not None else None
+    )
     input_bindings: list[tuple[str, str]] = []
     param_bindings: list[tuple[str, str]] = []
     output_bindings: list[tuple[str, str]] = []
@@ -401,6 +411,7 @@ def build_dynamic_run(
         help_text: str,
         default: Any,
         group: Group | tuple[Group, ...],
+        show: bool = True,
     ) -> None:
         if opt in seen_opts:
             raise ValueError(f"Conflicting CLI option generated: {opt!r}.")
@@ -414,6 +425,7 @@ def build_dynamic_run(
                 group=group,
                 help=help_text,
                 required=required,
+                show=show,
             ),
         ]
         parameters.append(
@@ -446,6 +458,7 @@ def build_dynamic_run(
 
         type_text = spec.type
         opt = dynamic_opt(original, ParamType.INPUT)
+        show = visible_input_names is None or original in visible_input_names
         entry_metadata[opt] = {
             "type_label": _display_type_label(
                 spec_type=type_text, type_hint=str, is_input=True
@@ -463,6 +476,7 @@ def build_dynamic_run(
             ),
             default=None,
             group=pipeline_group,
+            show=show,
         )
 
     def add_param_spec(spec: ParamSpec) -> None:
@@ -486,6 +500,7 @@ def build_dynamic_run(
         param_default = None
         param_type: Any = _resolve_param_type(spec.type, default)
         opt = dynamic_opt(original, ParamType.PARAM)
+        show = visible_param_names is None or original in visible_param_names
         if is_required:
             required_params.append(original)
         entry_metadata[opt] = {
@@ -505,6 +520,7 @@ def build_dynamic_run(
             ),
             default=param_default,
             group=pipeline_group,
+            show=show,
         )
 
     for spec in required_input_specs:
@@ -526,6 +542,7 @@ def build_dynamic_run(
         seen_idents.add(ident)
         output_bindings.append((ident, original))
         opt = dynamic_opt(original, ParamType.OUTPUT)
+        show = visible_output_names is None or original in visible_output_names
         entry_metadata[opt] = {
             "type_label": path_type_label(spec.type),
             "default": None,
@@ -541,6 +558,7 @@ def build_dynamic_run(
             ),
             default=None,
             group=pipeline_group,
+            show=show,
         )
 
     def run(

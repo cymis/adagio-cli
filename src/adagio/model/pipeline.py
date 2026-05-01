@@ -1,8 +1,7 @@
 import typing as t
 import os
-import json
 
-from pydantic import BaseModel, RootModel, model_validator, Field
+from pydantic import BaseModel, RootModel, model_validator
 
 
 from .arguments import AdagioArguments
@@ -68,7 +67,9 @@ class AdagioSignature(BaseModel):
         from adagio.io import load_input, load_input_collection, load_metadata
 
         for input in self.inputs:
-            source = arguments.inputs[input.name]
+            source = arguments.inputs.get(input.name)
+            if _is_missing(source):
+                continue
             if _is_metadata_ast(input.ast):
                 print("SCHEDULED:", f'load_metadata({source!r})')
                 scope[input.id] = load_metadata(ctx=ctx, source=source)
@@ -140,3 +141,7 @@ def _is_metadata_ast(ast: TypeAST) -> bool:
 
 def _is_collection_type(type_name: str) -> bool:
     return type_name.startswith('List[') or type_name.startswith('Collection[')
+
+
+def _is_missing(value: t.Any) -> bool:
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}

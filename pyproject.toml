@@ -1,6 +1,6 @@
 [project]
 name = "adagio-cli"
-version = "0.1.0a3"
+version = "0.1.0a4"
 description = "Command-line runner for Adagio pipeline files."
 readme = "README.md"
 requires-python = ">=3.10"

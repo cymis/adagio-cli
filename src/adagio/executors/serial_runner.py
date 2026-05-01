@@ -26,6 +26,7 @@ class SerialExecutionState:
     params: dict[str, t.Any]
     scope: dict[str, InputSource]
     cache_config: ExecutionCacheConfig | None
+    missing_optional_ids: set[str] = field(default_factory=set)
     saved_output_ids: set[str] = field(default_factory=set)
     save_output_started: bool = False
 
@@ -64,13 +65,21 @@ def run_serial_pipeline(
 
         active_monitor.start_load_input()
         for input_def in sig.inputs:
-            source = arguments.inputs[input_def.name]
+            source = arguments.inputs.get(input_def.name)
+            if _is_missing(source):
+                if not input_def.required:
+                    state.missing_optional_ids.add(input_def.id)
+                continue
             state.scope[input_def.id] = resolve_pipeline_input(
                 source=source, type_name=input_def.type, cwd=state.cwd
             )
         active_monitor.finish_load_input()
 
-        execution_plan = plan_execution_order(tasks=tasks, scope=state.scope)
+        execution_plan = plan_execution_order(
+            tasks=tasks,
+            scope=state.scope,
+            optional_missing_ids=state.missing_optional_ids,
+        )
         for task in execution_plan:
             active_monitor.queue_task(
                 task_id=task.id,
@@ -136,6 +145,10 @@ def resolve_monitor(*, console: Console | None, monitor: Monitor | None) -> Moni
     if console is not None:
         return RichMonitor(console=console)
     return LogMonitor()
+
+
+def _is_missing(value: t.Any) -> bool:
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
 
 
 def resolve_pipeline_input(
