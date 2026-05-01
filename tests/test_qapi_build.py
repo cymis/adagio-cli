@@ -6,7 +6,14 @@ from unittest.mock import patch
 from rich.console import Console
 
 from adagio.cli import qapi as qapi_cli
-from adagio.qapi.build import _iter_public_qiime_actions
+from adagio.model.pipeline import AdagioPipeline
+from adagio.model.task import ConvertToMetadataTask
+from adagio.qapi.build import (
+    CONVERT_TO_METADATA_ACTION_ID,
+    CONVERT_TO_METADATA_ACTION_NAME,
+    _build_convert_to_metadata_action,
+    _iter_public_qiime_actions,
+)
 
 
 class QapiBuildTests(unittest.TestCase):
@@ -88,6 +95,101 @@ class QapiBuildTests(unittest.TestCase):
         )
         self.assertIn("Skipped 1 private QIIME action", output.getvalue())
         self.assertIn("example._private_action", output.getvalue())
+
+    def test_build_convert_to_metadata_action_uses_union_input(self) -> None:
+        feature_table_ast = {
+            "name": "FeatureTable",
+            "type": "expression",
+            "fields": [
+                {
+                    "name": "Frequency",
+                    "type": "expression",
+                    "fields": [],
+                    "builtin": False,
+                    "predicate": None,
+                }
+            ],
+            "builtin": False,
+            "predicate": None,
+        }
+        alpha_ast = {
+            "name": "SampleData",
+            "type": "expression",
+            "fields": [
+                {
+                    "name": "AlphaDiversity",
+                    "type": "expression",
+                    "fields": [],
+                    "builtin": False,
+                    "predicate": None,
+                }
+            ],
+            "builtin": False,
+            "predicate": None,
+        }
+
+        action = _build_convert_to_metadata_action(
+            [
+                ("SampleData[AlphaDiversity]", alpha_ast),
+                ("FeatureTable[Frequency]", feature_table_ast),
+            ]
+        )
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action["id"], CONVERT_TO_METADATA_ACTION_ID)
+        self.assertEqual(action["name"], CONVERT_TO_METADATA_ACTION_NAME)
+        self.assertEqual(action["inputs"][0]["name"], "data")
+        self.assertEqual(
+            action["inputs"][0]["type"],
+            "FeatureTable[Frequency] | SampleData[AlphaDiversity]",
+        )
+        self.assertEqual(action["inputs"][0]["ast"]["type"], "union")
+        self.assertEqual(action["outputs"][0]["type"], "Metadata")
+
+    def test_convert_to_metadata_task_aliases_input_to_output(self) -> None:
+        pipeline = AdagioPipeline.model_validate(
+            {
+                "type": "pipeline",
+                "signature": {
+                    "inputs": [
+                        {
+                            "id": "input-data",
+                            "name": "data",
+                            "type": "FeatureTable[Frequency]",
+                            "ast": {
+                                "name": "FeatureTable",
+                                "type": "expression",
+                                "fields": [],
+                                "builtin": False,
+                                "predicate": None,
+                            },
+                            "required": True,
+                            "description": None,
+                        }
+                    ],
+                    "parameters": [],
+                    "outputs": [],
+                },
+                "graph": [
+                    {
+                        "id": "convert-node",
+                        "kind": "built-in",
+                        "name": CONVERT_TO_METADATA_ACTION_NAME,
+                        "inputs": {"data": {"kind": "archive", "id": "input-data"}},
+                        "parameters": {},
+                        "outputs": {
+                            "metadata": {"kind": "archive", "id": "metadata-output"}
+                        },
+                    }
+                ],
+            }
+        )
+
+        task = pipeline.graph[0]
+        self.assertIsInstance(task, ConvertToMetadataTask)
+        scope = {"input-data": "/tmp/table.qza"}
+        task.exec(ctx=None, params={}, scope=scope)
+        self.assertEqual(scope["metadata-output"], "/tmp/table.qza")
 
 
 if __name__ == "__main__":

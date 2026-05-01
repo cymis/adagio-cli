@@ -4,6 +4,64 @@ from typing import Any, cast
 
 DEFAULT_SCHEMA_VERSION = "0.1.0"
 PRIVATE_QIIME_ACTION_PREFIXES = ("_", "-")
+ADAGIO_BUILTIN_PLUGIN = "adagio_builtin"
+CONVERT_TO_METADATA_ACTION_ID = "convert_to_metadata"
+CONVERT_TO_METADATA_ACTION_NAME = "convert-to-metadata"
+
+
+def _metadata_ast() -> dict[str, Any]:
+    return {
+        "name": "Metadata",
+        "type": "expression",
+        "fields": [],
+        "builtin": True,
+        "predicate": None,
+    }
+
+
+def _union_ast(members: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"type": "union", "members": members}
+
+
+def _build_convert_to_metadata_action(
+    source_types: Sequence[tuple[str, dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """Build the synthetic QAPI action for artifact-to-Metadata conversion."""
+    if not source_types:
+        return None
+
+    sorted_source_types = sorted(source_types, key=lambda item: item[0])
+    type_names = [type_name for type_name, _ in sorted_source_types]
+    source_ast = _union_ast([ast for _, ast in sorted_source_types])
+    metadata_ast = _metadata_ast()
+
+    return {
+        "id": CONVERT_TO_METADATA_ACTION_ID,
+        "name": CONVERT_TO_METADATA_ACTION_NAME,
+        "description": (
+            "Convert an artifact with a registered QIIME 2 metadata transformer "
+            "into metadata for downstream actions."
+        ),
+        "inputs": [
+            {
+                "name": "data",
+                "type": " | ".join(type_names),
+                "ast": source_ast,
+                "required": True,
+                "description": ("Artifact that can be viewed as QIIME 2 Metadata."),
+            }
+        ],
+        "parameters": [],
+        "outputs": [
+            {
+                "name": "metadata",
+                "type": "Metadata",
+                "ast": metadata_ast,
+                "description": "Metadata view of the input artifact.",
+            }
+        ],
+        "adagio_builtin": "metadata_transformer",
+    }
 
 
 def _private_qiime_action_id(action_key: object, action: Any) -> str | None:
@@ -121,6 +179,23 @@ def generate_qapi_payload(
             return ast
         return ast
 
+    def iter_metadata_transformer_source_types() -> Iterator[
+        tuple[str, dict[str, Any]]
+    ]:
+        to_type = transform.ModelType.from_view_type(qiime2.Metadata)
+        for _, artifact_class in sorted(plugin_manager.artifact_classes.items()):
+            try:
+                from_type = transform.ModelType.from_view_type(artifact_class.format)
+                if not from_type.has_transformation(to_type):
+                    continue
+                semantic_type = artifact_class.semantic_type
+                yield (
+                    repr(semantic_type),
+                    flatten_type_maps(semantic_type).to_ast(),
+                )
+            except Exception:
+                continue
+
     def optional_desc(value: Any) -> str | None:
         no_value = qiime2.core.type.signature.__NoValueMeta  # type: ignore[attr-defined]
         return value if type(value) is not no_value else None
@@ -195,6 +270,17 @@ def generate_qapi_payload(
             build_data_dict(plugin_name=plugin_name, data=plugin.pipelines)
         )
         qapi[plugin_name] = {"methods": methods_dict}
+
+    if requested_plugins is None:
+        convert_to_metadata = _build_convert_to_metadata_action(
+            list(iter_metadata_transformer_source_types())
+        )
+        if convert_to_metadata is not None:
+            qapi[ADAGIO_BUILTIN_PLUGIN] = {
+                "methods": {
+                    CONVERT_TO_METADATA_ACTION_ID: convert_to_metadata,
+                }
+            }
 
     return {
         "qiime_version": qiime2.__version__,

@@ -3,9 +3,15 @@ import typing as t
 from adagio.model.task import input_source_ids
 
 
-def plan_execution_order(*, tasks: list[t.Any], scope: dict[str, t.Any]) -> list[t.Any]:
+def plan_execution_order(
+    *,
+    tasks: list[t.Any],
+    scope: dict[str, t.Any],
+    optional_missing_ids: set[str] | None = None,
+) -> list[t.Any]:
     """Return a dependency-respecting serial execution plan."""
     available_ids = set(scope.keys())
+    optional_missing_ids = optional_missing_ids or set()
     remaining = list(tasks)
     planned: list[t.Any] = []
 
@@ -16,7 +22,7 @@ def plan_execution_order(*, tasks: list[t.Any], scope: dict[str, t.Any]) -> list
                 source_id
                 for src in task.inputs.values()
                 for source_id in input_source_ids(src)
-                if source_id not in available_ids
+                if source_id not in available_ids and source_id not in optional_missing_ids
             ]
             if missing:
                 continue
@@ -35,6 +41,7 @@ def plan_execution_order(*, tasks: list[t.Any], scope: dict[str, t.Any]) -> list
                     for src in task.inputs.values()
                     for source_id in input_source_ids(src)
                     if source_id not in available_ids
+                    and source_id not in optional_missing_ids
                 )
                 details.append(f"{task.id}: missing [{missing}]")
             raise RuntimeError("Unable to resolve task dependencies. " + "; ".join(details))
