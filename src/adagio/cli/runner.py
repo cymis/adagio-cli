@@ -125,9 +125,7 @@ def run_pipeline_from_kwargs(
             if isinstance(value, list):
                 arguments.inputs[original] = [str(item) for item in value]
             elif isinstance(value, dict):
-                arguments.inputs[original] = {
-                    str(key): str(item) for key, item in value.items()
-                }
+                arguments.inputs[original] = {str(key): str(item) for key, item in value.items()}
             else:
                 arguments.inputs[original] = str(value)
 
@@ -207,13 +205,7 @@ def run_pipeline_from_kwargs(
 
 def _is_missing(value: Any) -> bool:
     """Treat placeholders and null values as missing."""
-    return (
-        value is None
-        or value == ""
-        or value == "<fill me>"
-        or value == []
-        or value == {}
-    )
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
 
 
 def _resolve_download_cache_dir(raw_value: str | Path | None) -> Path | None:

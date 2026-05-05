@@ -69,11 +69,7 @@ def main(argv: list[str] | None = None) -> None:
             ShowParamsMode(show_mode_str) if show_mode_str else ShowParamsMode.REQUIRED
         )
     except ValueError:
-        console.print(
-            CycloptsPanel(
-                "Invalid --show-params value. Use one of: all, missing, required."
-            )
-        )
+        console.print(CycloptsPanel("Invalid --show-params value. Use one of: all, missing, required."))
         sys.exit(1)
     if pipeline_str is None:
         pipeline_str = positional_pipeline
@@ -84,7 +80,6 @@ def main(argv: list[str] | None = None) -> None:
         help_format="rich",
         version=__version__,
     )
-
     @app.command
     def cache() -> None:
         """Manage the shared QIIME cache directory."""
@@ -193,9 +188,7 @@ def main(argv: list[str] | None = None) -> None:
         arguments_path_str = extract_flag_value(argv, "--arguments")
         config_path_str = extract_flag_value(argv, "--config")
         arguments_data = (
-            _load_arguments_data(Path(arguments_path_str), console)
-            if arguments_path_str
-            else None
+            _load_arguments_data(Path(arguments_path_str), console) if arguments_path_str else None
         )
         if config_path_str:
             load_run_config(Path(config_path_str))
@@ -214,12 +207,8 @@ def main(argv: list[str] | None = None) -> None:
             visible_input_names={spec.name for spec in visible_inputs},
             visible_param_names={spec.name for spec in visible_params},
             visible_output_names={spec.name for spec in visible_outputs},
-            argument_inputs=arguments_data.get("inputs", {})
-            if arguments_data
-            else None,
-            argument_params=arguments_data.get("parameters", {})
-            if arguments_data
-            else None,
+            argument_inputs=arguments_data.get("inputs", {}) if arguments_data else None,
+            argument_params=arguments_data.get("parameters", {}) if arguments_data else None,
             run_handler=partial(
                 run_pipeline_from_kwargs,
                 console=console,
@@ -287,23 +276,13 @@ def _load_arguments_data(path: Path, _console: Console | None = None) -> dict[st
     if not isinstance(data.get("inputs"), dict) or not isinstance(
         data.get("parameters"), dict
     ):
-        _con.print(
-            CycloptsPanel(
-                "Invalid arguments file: 'inputs' and 'parameters' must be objects."
-            )
-        )
+        _con.print(CycloptsPanel("Invalid arguments file: 'inputs' and 'parameters' must be objects."))
         sys.exit(1)
     return data
 
 
 def _is_missing(value: Any) -> bool:
-    return (
-        value is None
-        or value == ""
-        or value == "<fill me>"
-        or value == []
-        or value == {}
-    )
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
 
 
 def _resolve_pipeline(

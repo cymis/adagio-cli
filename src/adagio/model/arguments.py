@@ -12,23 +12,21 @@ class AdagioArguments(BaseModel):
 
     def __repr__(self):
         """Format arguments for display."""
-        return "\n".join(
-            [
-                *self._format_repr_sect(self.inputs, "inputs"),
-                *self._format_repr_sect(self.parameters, "parameters"),
-                *self._format_repr_sect(self.outputs, "outputs"),
-            ]
-        )
+        return '\n'.join([
+            *self._format_repr_sect(self.inputs, 'inputs'),
+            *self._format_repr_sect(self.parameters, 'parameters'),
+            *self._format_repr_sect(self.outputs, 'outputs'),
+        ])
 
     def _format_repr_sect(self, section, name):
         """Format a single argument section."""
         lines = []
         if not section:
-            lines.append(f"{name}: {{}}")
+            lines.append(f'{name}: {{}}')
         else:
-            lines.append(f"{name}:")
+            lines.append(f'{name}:')
             for name, value in section.items():
-                lines.append(f"    {name}: {value!r}")
+                lines.append(f'    {name}: {value!r}')
 
         return lines
 

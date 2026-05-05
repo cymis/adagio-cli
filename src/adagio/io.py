@@ -1,3 +1,4 @@
+
 from adagio.execution.proxy import ProxyMetadata, lift_parsl, IndexedProxyArtifact
 
 
@@ -5,7 +6,6 @@ from adagio.execution.proxy import ProxyMetadata, lift_parsl, IndexedProxyArtifa
 def load_input(*, ctx, source: str):
     from qiime2.sdk import Artifact
     from qiime2.sdk import PluginManager
-
     PluginManager()
 
     with ctx.cache:
@@ -34,13 +34,13 @@ def load_input_collection(*, ctx, sources):
 def load_metadata(*, ctx, source: str):
     from qiime2 import Artifact, Metadata
     import zipfile
-
     if zipfile.is_zipfile(source):
         metadata = Artifact.load(source).view(Metadata)
     else:
         metadata = Metadata.load(source)
 
     return metadata
+
 
 
 @lift_parsl(lambda fut: fut)
