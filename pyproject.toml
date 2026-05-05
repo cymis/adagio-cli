@@ -1,14 +1,50 @@
 [project]
-name = "adagio"
-version = "0.0.0"
-description = "Adagio command line tool"
+name = "adagio-cli"
+version = "0.1.0a4"
+description = "Command-line runner for Adagio pipeline files."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["cyclopts>=4.5.3", "pydantic>=2.12.5", "rich>=14.1.0", "parsl>=2024.12.16", "tomli>=2.2.1; python_version < '3.11'"]
+authors = [{ name = "Cymis" }]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+  "adagio",
+  "bioinformatics",
+  "cli",
+  "pipelines",
+  "qiime2",
+  "workflow",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "cyclopts>=4.5.3",
+  "pydantic>=2.12.5",
+  "rich>=14.1.0",
+  "parsl>=2024.12.16",
+  "tomli>=2.2.1; python_version < '3.11'",
+]
 
+[project.urls]
+Homepage = "https://github.com/cymis/adagio-cli"
+Repository = "https://github.com/cymis/adagio-cli"
+Issues = "https://github.com/cymis/adagio-cli/issues"
+Changelog = "https://github.com/cymis/adagio-cli/blob/dev/CHANGELOG.md"
 
 [dependency-groups]
-dev = ["ruff>=0.13.0"]
+dev = ["build>=1.2.2", "pytest>=8.4.0", "ruff>=0.13.0", "twine>=6.2.0"]
 
 [project.scripts]
 adagio = "adagio.cli.main:main"
@@ -16,6 +52,9 @@ adagio = "adagio.cli.main:main"
 [build-system]
 requires = ["uv_build>=0.8.17,<0.9.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "adagio"
 
 [tool.ruff.format]
 quote-style = "double"
@@ -40,3 +79,7 @@ plugins = ['pydantic.mypy']
 
 module = ["qiime2.*"]
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]

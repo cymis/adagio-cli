@@ -9,6 +9,7 @@ from cyclopts import App, Group, Parameter
 from cyclopts.panel import CycloptsPanel
 from rich.console import Console
 
+from .. import __version__
 from ..app.parsers.pipeline import Input as InputSpec
 from ..app.parsers.pipeline import Output as OutputSpec
 from ..app.parsers.pipeline import Parameter as ParamSpec
@@ -81,6 +82,7 @@ def main(argv: list[str] | None = None) -> None:
         name="adagio",
         help="Adagio command line tool for processing pipelines created with the Adagio GUI.",
         help_format="rich",
+        version=__version__,
     )
 
     @app.command
@@ -206,9 +208,12 @@ def main(argv: list[str] | None = None) -> None:
         )
 
         dynamic_run = build_dynamic_run(
-            input_specs=visible_inputs,
-            param_specs=visible_params,
-            output_specs=visible_outputs,
+            input_specs=input_specs,
+            param_specs=param_specs,
+            output_specs=output_specs,
+            visible_input_names={spec.name for spec in visible_inputs},
+            visible_param_names={spec.name for spec in visible_params},
+            visible_output_names={spec.name for spec in visible_outputs},
             argument_inputs=arguments_data.get("inputs", {})
             if arguments_data
             else None,
@@ -292,7 +297,13 @@ def _load_arguments_data(path: Path, _console: Console | None = None) -> dict[st
 
 
 def _is_missing(value: Any) -> bool:
-    return value is None or value == "<fill me>"
+    return (
+        value is None
+        or value == ""
+        or value == "<fill me>"
+        or value == []
+        or value == {}
+    )
 
 
 def _resolve_pipeline(

@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -14,6 +15,7 @@ from adagio.cli.pipeline_sources import (
     DEFAULT_PIPELINE_SOURCE,
     GitHubCatalogLocation,
     LocalCatalogLocation,
+    MAX_REMOTE_PIPELINE_BYTES,
     PipelineResolutionError,
     PipelineSource,
     discover_workspace_catalog_roots,
@@ -57,8 +59,27 @@ class _FakeResponse:
     def __exit__(self, exc_type, exc, tb) -> bool:
         return False
 
-    def read(self) -> bytes:
-        return self._payload
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            return self._payload
+        return self._payload[:size]
+
+
+def _minimal_pipeline_payload() -> bytes:
+    return (
+        b'{"spec": {"type": "pipeline", "signature": '
+        b'{"inputs": [], "parameters": [], "outputs": []}, "graph": []}}'
+    )
+
+
+def _http_error(code: int) -> HTTPError:
+    return HTTPError(
+        url="https://example.invalid/pipeline.adg",
+        code=code,
+        msg="server error",
+        hdrs=None,
+        fp=None,
+    )
 
 
 class PipelineSourceTests(unittest.TestCase):
@@ -205,6 +226,82 @@ class PipelineSourceTests(unittest.TestCase):
         request = mock_urlopen.call_args.args[0]
         self.assertIn("/pipelines/official/denoise/pipeline.adg", request.full_url)
         self.assertEqual(payload["spec"]["type"], "pipeline")
+
+    def test_remote_fetch_continues_to_next_tier_after_non_404_error(self) -> None:
+        source = PipelineSource(
+            name=DEFAULT_PIPELINE_SOURCE,
+            locations=(GitHubCatalogLocation(owner="cymis", repo="adagio-pipelines"),),
+        )
+
+        with patch(
+            "adagio.cli.pipeline_sources.urlopen",
+            side_effect=[_http_error(500), _FakeResponse(_minimal_pipeline_payload())],
+        ) as mock_urlopen:
+            with ExitStack() as exit_stack:
+                resolved = resolve_pipeline_reference(
+                    f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
+                    exit_stack=exit_stack,
+                    sources=(source,),
+                )
+                payload = json.loads(resolved.read_text(encoding="utf-8"))
+
+        first_request = mock_urlopen.call_args_list[0].args[0]
+        second_request = mock_urlopen.call_args_list[1].args[0]
+        self.assertIn(
+            "/pipelines/official/denoise/pipeline.adg", first_request.full_url
+        )
+        self.assertIn(
+            "/pipelines/community/denoise/pipeline.adg",
+            second_request.full_url,
+        )
+        self.assertEqual(payload["spec"]["type"], "pipeline")
+
+    def test_remote_fetch_adds_github_token_header_when_configured(self) -> None:
+        source = PipelineSource(
+            name=DEFAULT_PIPELINE_SOURCE,
+            locations=(GitHubCatalogLocation(owner="cymis", repo="adagio-pipelines"),),
+        )
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "secret-token"}, clear=False):
+            with patch(
+                "adagio.cli.pipeline_sources.urlopen",
+                return_value=_FakeResponse(_minimal_pipeline_payload()),
+            ) as mock_urlopen:
+                with ExitStack() as exit_stack:
+                    resolve_pipeline_reference(
+                        f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
+                        exit_stack=exit_stack,
+                        sources=(source,),
+                    )
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://api.github.com/repos/cymis/adagio-pipelines/contents/"
+            "pipelines/official/denoise/pipeline.adg?ref=main",
+        )
+        self.assertEqual(request.get_header("Authorization"), "Bearer secret-token")
+        self.assertEqual(request.get_header("Accept"), "application/vnd.github.raw")
+
+    def test_remote_fetch_rejects_oversized_pipeline_files(self) -> None:
+        source = PipelineSource(
+            name=DEFAULT_PIPELINE_SOURCE,
+            locations=(GitHubCatalogLocation(owner="cymis", repo="adagio-pipelines"),),
+        )
+
+        with patch(
+            "adagio.cli.pipeline_sources.urlopen",
+            return_value=_FakeResponse(b"x" * (MAX_REMOTE_PIPELINE_BYTES + 2)),
+        ):
+            with ExitStack() as exit_stack:
+                with self.assertRaises(PipelineResolutionError) as error:
+                    resolve_pipeline_reference(
+                        f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
+                        exit_stack=exit_stack,
+                        sources=(source,),
+                    )
+
+        self.assertIn("file exceeds", str(error.exception))
 
     def test_source_reference_reports_remote_origin(self) -> None:
         source = PipelineSource(

@@ -1,9 +1,14 @@
+import json
+import tempfile
 import typing
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from adagio.app.parsers.pipeline import Input, Output, Parameter, parse_outputs
 from adagio.cli.args import ShowParamsMode
 from adagio.cli.dynamic import build_dynamic_run
+from adagio.cli.main import main
 from adagio.cli.main import _filter_visible_specs
 from adagio.cli.runner import _apply_output_overrides
 
@@ -56,6 +61,27 @@ class OutputOptionTests(unittest.TestCase):
         self.assertEqual(output_dir_help, "Directory for all pipeline outputs.")
         self.assertIn("Denoised feature table.", output_help)
         self.assertIn("Overrides --output-dir", output_help)
+
+    def test_dynamic_run_uses_variadic_options_for_collection_inputs(self) -> None:
+        dynamic_run = build_dynamic_run(
+            input_specs=[
+                Input(
+                    id="00000000-0000-0000-0000-000000000001",
+                    name="matrices",
+                    required=True,
+                    type="List[DistanceMatrix]",
+                    description="Distance matrices.",
+                )
+            ],
+            param_specs=[],
+            output_specs=[],
+            run_handler=lambda *args, **kwargs: None,
+        )
+
+        annotation = dynamic_run.__signature__.parameters["input_matrices"].annotation
+        value_type = typing.get_args(annotation)[0]
+
+        self.assertIn(list[str], typing.get_args(value_type))
 
     def test_output_dir_is_a_command_option_and_required_pipeline_options_are_first(
         self,
@@ -132,6 +158,105 @@ class OutputOptionTests(unittest.TestCase):
                 "output_table",
             ],
         )
+
+    def test_hidden_display_options_remain_registered_for_runtime(self) -> None:
+        dynamic_run = build_dynamic_run(
+            input_specs=[
+                Input(
+                    id="00000000-0000-0000-0000-000000000001",
+                    name="seqs",
+                    required=True,
+                    type="SampleData[Sequences]",
+                    description="Required sequences.",
+                ),
+                Input(
+                    id="00000000-0000-0000-0000-000000000002",
+                    name="tree",
+                    required=False,
+                    type="Phylogeny[Rooted]",
+                    description="Optional tree.",
+                ),
+            ],
+            param_specs=[],
+            output_specs=[
+                Output(
+                    id="00000000-0000-0000-0000-000000000003",
+                    name="table",
+                    type="FeatureTable[Frequency]",
+                    description="Output table.",
+                )
+            ],
+            visible_input_names={"seqs"},
+            visible_param_names=set(),
+            visible_output_names=set(),
+            run_handler=lambda *args, **kwargs: None,
+        )
+
+        params = dynamic_run.__signature__.parameters
+
+        self.assertIn("input_tree", params)
+        self.assertIn("output_table", params)
+        input_tree_param = typing.get_args(params["input_tree"].annotation)[1]
+        output_table_param = typing.get_args(params["output_table"].annotation)[1]
+        input_seqs_param = typing.get_args(params["input_seqs"].annotation)[1]
+        self.assertFalse(input_tree_param.show)
+        self.assertFalse(output_table_param.show)
+        self.assertTrue(input_seqs_param.show)
+
+    def test_main_accepts_hidden_optional_input_without_show_params_all(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pipeline_path = root / "pipeline.adg"
+            pipeline_path.write_text(
+                json.dumps(
+                    {
+                        "signature": {
+                            "inputs": [
+                                {
+                                    "id": "00000000-0000-0000-0000-000000000001",
+                                    "name": "seqs",
+                                    "required": True,
+                                    "type": "SampleData[Sequences]",
+                                    "description": "Required sequences.",
+                                },
+                                {
+                                    "id": "00000000-0000-0000-0000-000000000002",
+                                    "name": "tree",
+                                    "required": False,
+                                    "type": "Phylogeny[Rooted]",
+                                    "description": "Optional tree.",
+                                },
+                            ],
+                            "parameters": [],
+                            "outputs": [],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("adagio.cli.main.run_pipeline_from_kwargs") as run_mock:
+                with self.assertRaises(SystemExit) as exc:
+                    main(
+                        [
+                            "run",
+                            "--pipeline",
+                            str(pipeline_path),
+                            "--cache-dir",
+                            str(root / "cache"),
+                            "--input-seqs",
+                            "seqs.qza",
+                            "--input-tree",
+                            "tree.qza",
+                        ]
+                    )
+                self.assertEqual(exc.exception.code, 0)
+
+        run_mock.assert_called_once()
+        runtime_kwargs = run_mock.call_args.args[3]
+        input_bindings = run_mock.call_args.args[4]
+        self.assertEqual(runtime_kwargs["input_tree"], "tree.qza")
+        self.assertIn(("input_tree", "tree"), input_bindings)
 
     def test_outputs_are_only_visible_in_all_mode(self) -> None:
         output_specs = [

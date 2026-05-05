@@ -75,135 +75,145 @@ def run_pipeline_from_kwargs(
         except PipelineResolutionError as error:
             _error_exit(console, str(error))
 
-        pipeline_path = pipeline_resolution.path
-        data = json.loads(pipeline_path.read_text(encoding="utf-8"))
-        pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
-        parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
-        arguments = parsed_pipeline.signature.to_default_arguments()
-        run_config = load_run_config(config_file)
-        output_names = [output.name for output in parsed_pipeline.signature.outputs]
+        data = json.loads(pipeline_resolution.path.read_text(encoding="utf-8"))
 
-        input_names = {name for _, name in input_bindings}
-        param_names = {name for _, name in param_bindings}
-        output_name_set = set(output_names)
+    pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
+    parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
+    arguments = parsed_pipeline.signature.to_default_arguments()
+    run_config = load_run_config(config_file)
+    output_names = [output.name for output in parsed_pipeline.signature.outputs]
 
-        if arguments_file is not None:
-            file_data = json.loads(arguments_file.read_text(encoding="utf-8"))
-            arguments_data = AdagioArgumentsFile.model_validate(file_data)
+    input_names = {name for _, name in input_bindings}
+    param_names = {name for _, name in param_bindings}
+    output_name_set = set(output_names)
 
-            unknown_inputs = sorted(set(arguments_data.inputs) - input_names)
-            if unknown_inputs:
-                _error_exit(
-                    console,
-                    "Unknown inputs in arguments file: " + ", ".join(unknown_inputs),
-                )
+    if arguments_file is not None:
+        file_data = json.loads(arguments_file.read_text(encoding="utf-8"))
+        arguments_data = AdagioArgumentsFile.model_validate(file_data)
 
-            unknown_params = sorted(set(arguments_data.parameters) - param_names)
-            if unknown_params:
-                _error_exit(
-                    console,
-                    "Unknown parameters in arguments file: "
-                    + ", ".join(unknown_params),
-                )
+        unknown_inputs = sorted(set(arguments_data.inputs) - input_names)
+        if unknown_inputs:
+            _error_exit(
+                console,
+                "Unknown inputs in arguments file: " + ", ".join(unknown_inputs),
+            )
 
-            unknown_outputs: list[str] = []
-            if isinstance(arguments_data.outputs, dict):
-                unknown_outputs = sorted(set(arguments_data.outputs) - output_name_set)
-            if unknown_outputs:
-                _error_exit(
-                    console,
-                    "Unknown outputs in arguments file: " + ", ".join(unknown_outputs),
-                )
+        unknown_params = sorted(set(arguments_data.parameters) - param_names)
+        if unknown_params:
+            _error_exit(
+                console,
+                "Unknown parameters in arguments file: " + ", ".join(unknown_params),
+            )
 
-            arguments.inputs.update(arguments_data.inputs)
-            arguments.parameters.update(arguments_data.parameters)
-            if arguments_data.outputs is not None:
-                arguments.outputs = arguments_data.outputs
+        unknown_outputs: list[str] = []
+        if isinstance(arguments_data.outputs, dict):
+            unknown_outputs = sorted(set(arguments_data.outputs) - output_name_set)
+        if unknown_outputs:
+            _error_exit(
+                console,
+                "Unknown outputs in arguments file: " + ", ".join(unknown_outputs),
+            )
 
-        for ident, original in input_bindings:
-            value = kwargs.get(ident)
-            if value is not None:
+        arguments.inputs.update(arguments_data.inputs)
+        arguments.parameters.update(arguments_data.parameters)
+        if arguments_data.outputs is not None:
+            arguments.outputs = arguments_data.outputs
+
+    for ident, original in input_bindings:
+        value = kwargs.get(ident)
+        if value is not None:
+            if isinstance(value, list):
+                arguments.inputs[original] = [str(item) for item in value]
+            elif isinstance(value, dict):
+                arguments.inputs[original] = {
+                    str(key): str(item) for key, item in value.items()
+                }
+            else:
                 arguments.inputs[original] = str(value)
 
-        for ident, original in param_bindings:
-            value = kwargs.get(ident)
-            if value is not None:
-                arguments.parameters[original] = value
+    for ident, original in param_bindings:
+        value = kwargs.get(ident)
+        if value is not None:
+            arguments.parameters[original] = value
 
-        cli_output_dir = kwargs.get(output_dir_ident)
-        cli_output_overrides = {
-            original: str(value)
-            for ident, original in output_bindings
-            if (value := kwargs.get(ident)) is not None
-        }
-        arguments.outputs = _apply_output_overrides(
-            outputs=arguments.outputs,
-            output_names=output_names,
-            output_dir=str(cli_output_dir) if cli_output_dir is not None else None,
-            output_overrides=cli_output_overrides,
-        )
+    cli_output_dir = kwargs.get(output_dir_ident)
+    cli_output_overrides = {
+        original: str(value)
+        for ident, original in output_bindings
+        if (value := kwargs.get(ident)) is not None
+    }
+    arguments.outputs = _apply_output_overrides(
+        outputs=arguments.outputs,
+        output_names=output_names,
+        output_dir=str(cli_output_dir) if cli_output_dir is not None else None,
+        output_overrides=cli_output_overrides,
+    )
 
-        missing_inputs = [
-            name for name in required_inputs if _is_missing(arguments.inputs.get(name))
+    missing_inputs = [
+        name for name in required_inputs if _is_missing(arguments.inputs.get(name))
+    ]
+    missing_params = [
+        name for name in required_params if _is_missing(arguments.parameters.get(name))
+    ]
+    if missing_inputs or missing_params:
+        missing_opts = [f"--input-{n.replace('_', '-')}" for n in missing_inputs] + [
+            f"--param-{n.replace('_', '-')}" for n in missing_params
         ]
-        missing_params = [
-            name
-            for name in required_params
-            if _is_missing(arguments.parameters.get(name))
-        ]
-        if missing_inputs or missing_params:
-            missing_opts = [
-                f"--input-{n.replace('_', '-')}" for n in missing_inputs
-            ] + [f"--param-{n.replace('_', '-')}" for n in missing_params]
-            formatted = ", ".join(f"[cyan]{opt}[/cyan]" for opt in missing_opts)
-            _error_exit(console, f"Missing required arguments: {formatted}")
+        formatted = ", ".join(f"[cyan]{opt}[/cyan]" for opt in missing_opts)
+        _error_exit(console, f"Missing required arguments: {formatted}")
 
-        arguments.outputs = _resolve_output_destinations(
-            outputs=arguments.outputs,
-            output_names=output_names,
-            cwd=Path.cwd().resolve(),
-        )
+    arguments.outputs = _resolve_output_destinations(
+        outputs=arguments.outputs,
+        output_names=output_names,
+        cwd=Path.cwd().resolve(),
+    )
 
-        suppress_header = _is_truthy(os.getenv("ADAGIO_SUPPRESS_RUN_HEADER"))
-        if not suppress_header:
-            console.print(f"[bold]Pipeline:[/bold] {pipeline}")
-            console.print(f"[bold]Resolved from:[/bold] {pipeline_resolution.origin}")
+    suppress_header = _is_truthy(os.getenv("ADAGIO_SUPPRESS_RUN_HEADER"))
+    if not suppress_header:
+        console.print(f"[bold]Pipeline:[/bold] {pipeline}")
+        console.print(f"[bold]Resolved from:[/bold] {pipeline_resolution.origin}")
 
-        cache_config = resolve_cache_config(
-            cwd=Path.cwd().resolve(),
-            cache_dir=cache_dir,
-            reuse=reuse,
-        )
+    cache_config = resolve_cache_config(
+        cwd=Path.cwd().resolve(),
+        cache_dir=cache_dir,
+        reuse=reuse,
+    )
 
-        if not suppress_header:
-            console.print(f"[bold]Cache:[/bold] {describe_cache_config(cache_config)}")
+    if not suppress_header:
+        console.print(f"[bold]Cache:[/bold] {describe_cache_config(cache_config)}")
 
-        from ..executors import select_default_executor
+    from ..executors import select_default_executor
 
-        executor = select_default_executor(
-            default_override=_config_default_override(run_config),
-            plugin_overrides=_config_named_overrides(
-                run_config.plugins if run_config is not None else {}
-            ),
-            task_overrides=_config_named_overrides(
-                run_config.tasks if run_config is not None else {}
-            ),
-        )
+    executor = select_default_executor(
+        default_override=_config_default_override(run_config),
+        plugin_overrides=_config_named_overrides(
+            run_config.plugins if run_config is not None else {}
+        ),
+        task_overrides=_config_named_overrides(
+            run_config.tasks if run_config is not None else {}
+        ),
+    )
 
-        if not suppress_header:
-            console.print(f"[bold]Executing pipeline[/bold] ({executor.mode_label})")
+    if not suppress_header:
+        console.print(f"[bold]Executing pipeline[/bold] ({executor.mode_label})")
 
-        executor.execute(
-            pipeline=parsed_pipeline,
-            arguments=arguments,
-            console=console,
-            cache_config=cache_config,
-        )
+    executor.execute(
+        pipeline=parsed_pipeline,
+        arguments=arguments,
+        console=console,
+        cache_config=cache_config,
+    )
 
 
 def _is_missing(value: Any) -> bool:
     """Treat placeholders and null values as missing."""
-    return value is None or value == "<fill me>"
+    return (
+        value is None
+        or value == ""
+        or value == "<fill me>"
+        or value == []
+        or value == {}
+    )
 
 
 def _resolve_download_cache_dir(raw_value: str | Path | None) -> Path | None:

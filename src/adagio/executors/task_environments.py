@@ -5,7 +5,7 @@ from pathlib import Path
 from rich.console import Console
 
 from adagio.model.arguments import AdagioArguments
-from adagio.model.task import PluginActionTask, RootInputTask
+from adagio.model.task import ConvertToMetadataTask, PluginActionTask, RootInputTask
 from adagio.monitor.api import Monitor
 
 from .base import (
@@ -60,7 +60,19 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         if isinstance(task, RootInputTask):
             for name, src in task.inputs.items():
                 dst = task.outputs[name]
+                if src.id in state.missing_optional_ids:
+                    state.missing_optional_ids.add(dst.id)
+                    continue
                 state.scope[dst.id] = state.scope[src.id]
+            return False
+
+        if isinstance(task, ConvertToMetadataTask):
+            if task.inputs["data"].id in state.missing_optional_ids:
+                state.missing_optional_ids.add(task.outputs["metadata"].id)
+                return False
+            state.scope[task.outputs["metadata"].id] = state.scope[
+                task.inputs["data"].id
+            ]
             return False
 
         if isinstance(task, PluginActionTask):
@@ -91,13 +103,31 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         metadata_inputs: dict[str, str] = {}
         for name, src in task.inputs.items():
             if src.kind == "archive":
-                archive_inputs[name] = state.scope[src.id]
+                if src.id in state.missing_optional_ids:
+                    continue
+                value = state.scope[src.id]
+                if isinstance(value, list):
+                    archive_collection_inputs[name] = value
+                elif isinstance(value, dict):
+                    archive_collection_inputs[name] = list(value.values())
+                else:
+                    archive_inputs[name] = value
             elif src.kind == "archive-collection":
-                archive_collection_inputs[name] = [
-                    state.scope[item.id] for item in src.items
-                ]
+                values = _present_collection_item_values(
+                    items=src.items,
+                    state=state,
+                )
+                if values:
+                    archive_collection_inputs[name] = _flatten_collection_items(values)
             elif src.kind == "metadata":
-                metadata_inputs[name] = state.scope[src.id]
+                if src.id in state.missing_optional_ids:
+                    continue
+                value = state.scope[src.id]
+                if not isinstance(value, str):
+                    raise TypeError(
+                        f"Metadata input {name!r} must resolve to a single path."
+                    )
+                metadata_inputs[name] = value
             else:
                 raise TypeError(f"Unsupported input kind: {src.kind!r}")
 
@@ -163,6 +193,33 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             state.scope[dest.id] = actual_path
 
         return result.reused
+
+
+def _flatten_collection_items(
+    values: list[str | list[str] | dict[str, str]],
+) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if isinstance(value, list):
+            result.extend(value)
+        elif isinstance(value, dict):
+            result.extend(value.values())
+        else:
+            result.append(value)
+    return result
+
+
+def _present_collection_item_values(
+    *,
+    items,
+    state: SerialExecutionState,
+) -> list[str | list[str] | dict[str, str]]:
+    values: list[str | list[str] | dict[str, str]] = []
+    for item in items:
+        if item.id in state.missing_optional_ids:
+            continue
+        values.append(state.scope[item.id])
+    return values
 
 
 def _save_outputs(

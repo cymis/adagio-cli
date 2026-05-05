@@ -9,13 +9,12 @@ venv/
 
 # Distribution / packaging
 *.egg-info/
+build/
+dist/
 
 # Local test / coverage files
 .coverage
 .pytest_cache/
-
-# Project lock file
-uv.lock
 
 # OS junk
 .DS_Store
@@ -30,4 +29,5 @@ Thumbs.db
 
 .ipynb_checkpoints/
 .mypy_cache/
+.uv-cache/
 runinfo/

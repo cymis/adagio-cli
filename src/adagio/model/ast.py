@@ -1,5 +1,5 @@
 import typing as t
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class TypeASTUnion(BaseModel):
@@ -39,8 +39,21 @@ class TypeASTPredicateChoices(TypeASTPredicateBase):
 
 class TypeASTPredicateRange(TypeASTPredicateBase):
     name: t.Literal['Range']
-    range: tuple[int, int] | tuple[float, float]
+    range: tuple[int | None, int | None] | tuple[float | None, float | None]
     inclusive: tuple[bool, bool]
+
+    @field_validator('range', mode='before')
+    @classmethod
+    def validate_range_bounds(cls, value):
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            return value
+        lower, upper = value
+        if lower is None and upper is None:
+            raise ValueError('Range must include at least one bound.')
+        bounds = [bound for bound in (lower, upper) if bound is not None]
+        if len(bounds) == 2 and type(bounds[0]) is not type(bounds[1]):
+            raise ValueError('Range bounds must use the same numeric type.')
+        return value
 
 
 class TypeASTPredicateProperties(TypeASTPredicateBase):
@@ -52,4 +65,3 @@ TypeAST = t.Annotated[
     t.Union[TypeASTUnion, TypeASTIntersection, TypeASTExpression],
     Field(discriminator='type')
 ]
-

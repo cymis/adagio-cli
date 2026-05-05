@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import os
 import re
 from contextlib import ExitStack
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 from urllib.request import Request, urlopen
 
 
 CATALOG_TIERS = ("official", "community")
 DEFAULT_PIPELINE_SOURCE = "adagio"
+MAX_REMOTE_PIPELINE_BYTES = 5 * 1024 * 1024
 SOURCE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
@@ -212,7 +214,7 @@ def resolve_pipeline_reference_details(
                 continue
             except PipelineResolutionError as error:
                 access_errors.append(str(error))
-                break
+                continue
 
     message = [f"Pipeline reference '{raw}' was not found."]
     if attempted_candidates:
@@ -242,10 +244,10 @@ def _download_remote_pipeline(
     exit_stack: ExitStack,
     cache_path: Path | None = None,
 ) -> Path:
-    request = Request(url, headers={"User-Agent": "adagio-cli"})
+    request = _remote_request(url)
     try:
         with urlopen(request, timeout=10) as response:
-            payload = response.read()
+            payload = response.read(MAX_REMOTE_PIPELINE_BYTES + 1)
     except HTTPError as error:
         if error.code == 404:
             raise FileNotFoundError(url) from error
@@ -256,6 +258,12 @@ def _download_remote_pipeline(
         raise PipelineResolutionError(
             f"Failed to fetch pipeline from {url}: {error.reason}"
         ) from error
+
+    if len(payload) > MAX_REMOTE_PIPELINE_BYTES:
+        raise PipelineResolutionError(
+            f"Failed to fetch pipeline from {url}: file exceeds "
+            f"{MAX_REMOTE_PIPELINE_BYTES} bytes."
+        )
 
     if cache_path is None:
         tempdir = Path(
@@ -272,6 +280,35 @@ def _download_remote_pipeline(
 
 def _quote_slug(slug: str) -> str:
     return "/".join(quote(part) for part in Path(slug).parts)
+
+
+def _remote_request(url: str) -> Request:
+    headers = {"User-Agent": "adagio-cli"}
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        github_api_url = _github_contents_api_url(url)
+        if github_api_url is not None:
+            headers["Accept"] = "application/vnd.github.raw"
+            return Request(github_api_url, headers=headers)
+    return Request(url, headers=headers)
+
+
+def _github_contents_api_url(raw_url: str) -> str | None:
+    parsed = urlsplit(raw_url)
+    if parsed.scheme != "https" or parsed.netloc != "raw.githubusercontent.com":
+        return None
+
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    if len(parts) < 4:
+        return None
+
+    owner, repo, ref, *path_parts = parts
+    path = "/".join(quote(part, safe="") for part in path_parts)
+    return (
+        f"https://api.github.com/repos/{quote(owner, safe='')}/"
+        f"{quote(repo, safe='')}/contents/{path}?ref={quote(ref, safe='')}"
+    )
 
 
 def _cached_remote_pipeline_path(
