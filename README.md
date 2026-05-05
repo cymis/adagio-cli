@@ -59,16 +59,23 @@ Equivalent positional form:
 adagio run path/to/pipeline.json --cache-dir /path/to/cache
 ```
 
-Run a pipeline from a configured source reference:
+Run a pipeline from the Adagio pipeline catalog:
 
 ```bash
-adagio run adagio-playbook/dada2 --cache-dir /path/to/cache
+adagio run @adagio/microbial-diversity --cache-dir /path/to/cache
 ```
 
-By default, `adagio-playbook/<slug>` resolves against the sibling
+By default, `@adagio/<slug>` resolves against the sibling
 `adagio-pipelines` checkout when one is available in the surrounding workspace.
 If no local catalog repo is found, Adagio falls back to the public
-`cymis/adagio-pipelines` GitHub repository.
+`cymis/adagio-pipelines` GitHub repository. Within a catalog, `official` is
+checked before `community`.
+
+During `adagio run`, remote catalog pipelines are downloaded under the selected
+`--cache-dir` and reused by source name and slug on later runs. `adagio pipeline
+show` uses a temporary download when it needs to fetch from GitHub because it
+does not take a cache directory. Run output includes the resolved local path or
+remote URL so you can see where the pipeline came from.
 
 Use an arguments file:
 

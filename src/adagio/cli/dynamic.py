@@ -334,7 +334,7 @@ def build_dynamic_run(
             CliParameter(
                 name=("--pipeline", "-p"),
                 group=command_group,
-                help="Path to the pipeline file or a pipeline source reference.",
+                help="Path to the pipeline file or a catalog reference like @adagio/slug.",
             ),
         ]
     }
@@ -615,7 +615,7 @@ def build_dynamic_run(
     run.__doc__ = (
         "Run an Adagio pipeline.\n\n"
         "Dynamic inputs, parameters, and outputs are loaded from the pipeline file and exposed as CLI options.\n"
-        "Use: adagio run --pipeline PATH-OR-REFERENCE --help"
+        "Use: adagio run --pipeline PATH-OR-@SOURCE/SLUG --help"
     )
     return run
 

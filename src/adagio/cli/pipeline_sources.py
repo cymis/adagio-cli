@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import re
 from contextlib import ExitStack
-from dataclasses import dataclass
 from pathlib import Path
+from dataclasses import dataclass
 from tempfile import TemporaryDirectory
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
-CATALOG_TIERS = ("community", "official")
-DEFAULT_PIPELINE_SOURCE = "adagio-playbook"
+CATALOG_TIERS = ("official", "community")
+DEFAULT_PIPELINE_SOURCE = "adagio"
+SOURCE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 
 class PipelineResolutionError(RuntimeError):
@@ -49,6 +52,13 @@ class PipelineSource:
     locations: tuple[LocalCatalogLocation | GitHubCatalogLocation, ...]
 
 
+@dataclass(frozen=True)
+class PipelineResolution:
+    path: Path
+    origin: str
+    is_remote: bool = False
+
+
 def parse_pipeline_source_reference(reference: str) -> tuple[str, str] | None:
     raw = reference.strip()
     if not raw:
@@ -59,9 +69,17 @@ def parse_pipeline_source_reference(reference: str) -> tuple[str, str] | None:
         return None
     if Path(raw).suffix in {".adg", ".json"}:
         return None
+    if not raw.startswith("@"):
+        return None
 
-    source_name, separator, slug = raw.partition("/")
+    source_name, separator, slug = raw[1:].partition("/")
     if not separator or not source_name or not slug:
+        return None
+    if not SOURCE_NAME_RE.fullmatch(source_name):
+        return None
+    if source_name != DEFAULT_PIPELINE_SOURCE:
+        return None
+    if not SLUG_RE.fullmatch(slug):
         return None
     return source_name, slug
 
@@ -98,10 +116,11 @@ def default_pipeline_sources(
         for root in discover_workspace_catalog_roots(search_roots=search_roots)
     )
     github_fallback = GitHubCatalogLocation(owner="cymis", repo="adagio-pipelines")
+    built_in_locations = (*local_locations, github_fallback)
     return (
         PipelineSource(
             name=DEFAULT_PIPELINE_SOURCE,
-            locations=(*local_locations, github_fallback),
+            locations=built_in_locations,
         ),
     )
 
@@ -111,23 +130,44 @@ def resolve_pipeline_reference(
     *,
     exit_stack: ExitStack,
     sources: tuple[PipelineSource, ...] | None = None,
+    download_cache_dir: Path | None = None,
 ) -> Path:
+    return resolve_pipeline_reference_details(
+        reference,
+        exit_stack=exit_stack,
+        sources=sources,
+        download_cache_dir=download_cache_dir,
+    ).path
+
+
+def resolve_pipeline_reference_details(
+    reference: str | Path,
+    *,
+    exit_stack: ExitStack,
+    sources: tuple[PipelineSource, ...] | None = None,
+    download_cache_dir: Path | None = None,
+) -> PipelineResolution:
     raw = str(reference).strip()
     if not raw:
         raise PipelineResolutionError("Pipeline reference is empty.")
 
     candidate_path = Path(raw).expanduser()
     if candidate_path.exists():
-        return candidate_path.resolve()
+        resolved_path = candidate_path.resolve()
+        return PipelineResolution(path=resolved_path, origin=str(resolved_path))
 
     parsed_reference = parse_pipeline_source_reference(raw)
     if parsed_reference is None:
+        if raw.startswith("@"):
+            raise PipelineResolutionError(
+                f"Invalid pipeline reference '{raw}'. Expected @adagio/slug, "
+                "where slug uses lowercase letters, digits, and hyphens."
+            )
         raise PipelineResolutionError(f"Pipeline file does not exist: {raw}")
 
     source_name, slug = parsed_reference
-    source_registry = {
-        source.name: source for source in (sources or default_pipeline_sources())
-    }
+    registered_sources = default_pipeline_sources() if sources is None else sources
+    source_registry = {source.name: source for source in registered_sources}
     source = source_registry.get(source_name)
     if source is None:
         available = ", ".join(sorted(source_registry)) or "none"
@@ -143,13 +183,31 @@ def resolve_pipeline_reference(
             for path in location.candidate_paths(slug):
                 attempted_candidates.append(str(path))
                 if path.exists():
-                    return path
+                    return PipelineResolution(path=path, origin=str(path))
             continue
+
+        cached_path = _cached_remote_pipeline_path(
+            cache_dir=download_cache_dir,
+            source_name=source_name,
+            slug=slug,
+        )
+        if cached_path is not None:
+            attempted_candidates.append(str(cached_path))
+            if cached_path.exists():
+                return PipelineResolution(path=cached_path, origin=str(cached_path))
 
         for url in location.candidate_urls(slug):
             attempted_candidates.append(url)
             try:
-                return _download_remote_pipeline(url=url, exit_stack=exit_stack)
+                return PipelineResolution(
+                    path=_download_remote_pipeline(
+                        url=url,
+                        exit_stack=exit_stack,
+                        cache_path=cached_path,
+                    ),
+                    origin=url,
+                    is_remote=True,
+                )
             except FileNotFoundError:
                 continue
             except PipelineResolutionError as error:
@@ -178,7 +236,12 @@ def _catalog_candidates(parent: Path) -> tuple[Path, ...]:
     return tuple(candidates)
 
 
-def _download_remote_pipeline(*, url: str, exit_stack: ExitStack) -> Path:
+def _download_remote_pipeline(
+    *,
+    url: str,
+    exit_stack: ExitStack,
+    cache_path: Path | None = None,
+) -> Path:
     request = Request(url, headers={"User-Agent": "adagio-cli"})
     try:
         with urlopen(request, timeout=10) as response:
@@ -194,13 +257,29 @@ def _download_remote_pipeline(*, url: str, exit_stack: ExitStack) -> Path:
             f"Failed to fetch pipeline from {url}: {error.reason}"
         ) from error
 
-    tempdir = Path(
-        exit_stack.enter_context(TemporaryDirectory(prefix="adagio-pipeline-"))
-    )
-    pipeline_path = tempdir / "pipeline.adg"
+    if cache_path is None:
+        tempdir = Path(
+            exit_stack.enter_context(TemporaryDirectory(prefix="adagio-pipeline-"))
+        )
+        pipeline_path = tempdir / "pipeline.adg"
+    else:
+        pipeline_path = cache_path
+        pipeline_path.parent.mkdir(parents=True, exist_ok=True)
+
     pipeline_path.write_bytes(payload)
     return pipeline_path
 
 
 def _quote_slug(slug: str) -> str:
     return "/".join(quote(part) for part in Path(slug).parts)
+
+
+def _cached_remote_pipeline_path(
+    *,
+    source_name: str,
+    slug: str,
+    cache_dir: Path | None,
+) -> Path | None:
+    if cache_dir is None:
+        return None
+    return cache_dir / "adagio-pipelines" / source_name / slug / "pipeline.adg"

@@ -5,6 +5,7 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from rich.console import Console
 
@@ -18,6 +19,7 @@ from adagio.cli.pipeline_sources import (
     discover_workspace_catalog_roots,
     parse_pipeline_source_reference,
     resolve_pipeline_reference,
+    resolve_pipeline_reference_details,
 )
 
 
@@ -64,11 +66,18 @@ class PipelineSourceTests(unittest.TestCase):
         self,
     ) -> None:
         self.assertEqual(
-            parse_pipeline_source_reference("adagio-playbook/denoise"),
-            ("adagio-playbook", "denoise"),
+            parse_pipeline_source_reference("@adagio/microbial-diversity"),
+            ("adagio", "microbial-diversity"),
         )
+        self.assertIsNone(
+            parse_pipeline_source_reference("@my-personal-channel/denoise")
+        )
+        self.assertIsNone(parse_pipeline_source_reference("adagio/denoise"))
         self.assertIsNone(parse_pipeline_source_reference("./pipeline.adg"))
         self.assertIsNone(parse_pipeline_source_reference("pipeline.adg"))
+        self.assertIsNone(parse_pipeline_source_reference("@adagio/../denoise"))
+        self.assertIsNone(parse_pipeline_source_reference("@adagio/denoise/extra"))
+        self.assertIsNone(parse_pipeline_source_reference("@adagio/Denoise"))
 
     def test_discover_workspace_catalog_roots_finds_sibling_repo_from_worktree(
         self,
@@ -112,12 +121,66 @@ class PipelineSourceTests(unittest.TestCase):
 
             with ExitStack() as exit_stack:
                 resolved = resolve_pipeline_reference(
-                    f"{DEFAULT_PIPELINE_SOURCE}/denoise",
+                    f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
                     exit_stack=exit_stack,
                     sources=(source,),
                 )
 
         self.assertEqual(resolved, pipeline_path.resolve())
+
+    def test_local_catalog_prefers_official_over_community(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            catalog_root = Path(tmpdir) / "adagio-pipelines"
+            official_path = (
+                catalog_root / "pipelines" / "official" / "denoise" / "pipeline.adg"
+            )
+            community_path = (
+                catalog_root / "pipelines" / "community" / "denoise" / "pipeline.adg"
+            )
+            official_path.parent.mkdir(parents=True)
+            community_path.parent.mkdir(parents=True)
+            official_path.write_text('{"source": "official"}', encoding="utf-8")
+            community_path.write_text('{"source": "community"}', encoding="utf-8")
+            source = PipelineSource(
+                name=DEFAULT_PIPELINE_SOURCE,
+                locations=(LocalCatalogLocation(root=catalog_root),),
+            )
+
+            with ExitStack() as exit_stack:
+                resolved = resolve_pipeline_reference(
+                    f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
+                    exit_stack=exit_stack,
+                    sources=(source,),
+                )
+
+        self.assertEqual(resolved, official_path.resolve())
+
+    def test_local_catalog_hit_skips_network_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            catalog_root = Path(tmpdir) / "adagio-pipelines"
+            pipeline_path = (
+                catalog_root / "pipelines" / "official" / "denoise" / "pipeline.adg"
+            )
+            pipeline_path.parent.mkdir(parents=True)
+            pipeline_path.write_text("{}", encoding="utf-8")
+            source = PipelineSource(
+                name=DEFAULT_PIPELINE_SOURCE,
+                locations=(
+                    LocalCatalogLocation(root=catalog_root),
+                    GitHubCatalogLocation(owner="cymis", repo="adagio-pipelines"),
+                ),
+            )
+
+            with patch("adagio.cli.pipeline_sources.urlopen") as mock_urlopen:
+                with ExitStack() as exit_stack:
+                    resolved = resolve_pipeline_reference(
+                        f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
+                        exit_stack=exit_stack,
+                        sources=(source,),
+                    )
+
+        self.assertEqual(resolved, pipeline_path.resolve())
+        mock_urlopen.assert_not_called()
 
     def test_source_reference_falls_back_to_github_when_needed(self) -> None:
         source = PipelineSource(
@@ -133,15 +196,170 @@ class PipelineSourceTests(unittest.TestCase):
         ) as mock_urlopen:
             with ExitStack() as exit_stack:
                 resolved = resolve_pipeline_reference(
-                    f"{DEFAULT_PIPELINE_SOURCE}/denoise",
+                    f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
                     exit_stack=exit_stack,
                     sources=(source,),
                 )
                 payload = json.loads(resolved.read_text(encoding="utf-8"))
 
         request = mock_urlopen.call_args.args[0]
-        self.assertIn("/pipelines/community/denoise/pipeline.adg", request.full_url)
+        self.assertIn("/pipelines/official/denoise/pipeline.adg", request.full_url)
         self.assertEqual(payload["spec"]["type"], "pipeline")
+
+    def test_source_reference_reports_remote_origin(self) -> None:
+        source = PipelineSource(
+            name=DEFAULT_PIPELINE_SOURCE,
+            locations=(GitHubCatalogLocation(owner="cymis", repo="adagio-pipelines"),),
+        )
+
+        with patch(
+            "adagio.cli.pipeline_sources.urlopen",
+            return_value=_FakeResponse(b"{}"),
+        ):
+            with ExitStack() as exit_stack:
+                resolved = resolve_pipeline_reference_details(
+                    f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
+                    exit_stack=exit_stack,
+                    sources=(source,),
+                )
+
+        self.assertTrue(resolved.is_remote)
+        self.assertIn("/pipelines/official/denoise/pipeline.adg", resolved.origin)
+
+    def test_remote_http_error_is_reported(self) -> None:
+        source = PipelineSource(
+            name=DEFAULT_PIPELINE_SOURCE,
+            locations=(GitHubCatalogLocation(owner="cymis", repo="adagio-pipelines"),),
+        )
+
+        with patch(
+            "adagio.cli.pipeline_sources.urlopen",
+            side_effect=HTTPError(
+                url="https://example.invalid/pipeline.adg",
+                code=500,
+                msg="server error",
+                hdrs=None,
+                fp=None,
+            ),
+        ):
+            with ExitStack() as exit_stack:
+                with self.assertRaises(PipelineResolutionError) as error:
+                    resolve_pipeline_reference(
+                        f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
+                        exit_stack=exit_stack,
+                        sources=(source,),
+                    )
+
+        self.assertIn("HTTP 500", str(error.exception))
+
+    def test_remote_url_error_is_reported(self) -> None:
+        source = PipelineSource(
+            name=DEFAULT_PIPELINE_SOURCE,
+            locations=(GitHubCatalogLocation(owner="cymis", repo="adagio-pipelines"),),
+        )
+
+        with patch(
+            "adagio.cli.pipeline_sources.urlopen",
+            side_effect=URLError("network unavailable"),
+        ):
+            with ExitStack() as exit_stack:
+                with self.assertRaises(PipelineResolutionError) as error:
+                    resolve_pipeline_reference(
+                        f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
+                        exit_stack=exit_stack,
+                        sources=(source,),
+                    )
+
+        self.assertIn("network unavailable", str(error.exception))
+
+    def test_remote_pipeline_downloads_to_cache_dir_when_provided(self) -> None:
+        source = PipelineSource(
+            name=DEFAULT_PIPELINE_SOURCE,
+            locations=(GitHubCatalogLocation(owner="cymis", repo="adagio-pipelines"),),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "cache"
+            expected_path = (
+                cache_dir
+                / "adagio-pipelines"
+                / DEFAULT_PIPELINE_SOURCE
+                / "denoise"
+                / "pipeline.adg"
+            )
+
+            with patch(
+                "adagio.cli.pipeline_sources.urlopen",
+                return_value=_FakeResponse(
+                    b'{"spec": {"type": "pipeline", "signature": {"inputs": [], "parameters": [], "outputs": []}, "graph": []}}'
+                ),
+            ) as mock_urlopen:
+                with ExitStack() as exit_stack:
+                    resolved = resolve_pipeline_reference_details(
+                        f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
+                        exit_stack=exit_stack,
+                        sources=(source,),
+                        download_cache_dir=cache_dir,
+                    )
+                    payload = json.loads(resolved.path.read_text(encoding="utf-8"))
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertIn("/pipelines/official/denoise/pipeline.adg", request.full_url)
+        self.assertEqual(resolved.path, expected_path)
+        self.assertEqual(payload["spec"]["type"], "pipeline")
+        self.assertTrue(resolved.is_remote)
+
+    def test_cached_remote_pipeline_short_circuits_network(self) -> None:
+        source = PipelineSource(
+            name=DEFAULT_PIPELINE_SOURCE,
+            locations=(GitHubCatalogLocation(owner="cymis", repo="adagio-pipelines"),),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "cache"
+            cached_path = (
+                cache_dir
+                / "adagio-pipelines"
+                / DEFAULT_PIPELINE_SOURCE
+                / "denoise"
+                / "pipeline.adg"
+            )
+            cached_path.parent.mkdir(parents=True)
+            cached_path.write_text('{"cached": true}', encoding="utf-8")
+
+            with patch("adagio.cli.pipeline_sources.urlopen") as mock_urlopen:
+                with ExitStack() as exit_stack:
+                    resolved = resolve_pipeline_reference_details(
+                        f"@{DEFAULT_PIPELINE_SOURCE}/denoise",
+                        exit_stack=exit_stack,
+                        sources=(source,),
+                        download_cache_dir=cache_dir,
+                    )
+
+        self.assertEqual(resolved.path, cached_path)
+        self.assertEqual(resolved.origin, str(cached_path))
+        self.assertFalse(resolved.is_remote)
+        mock_urlopen.assert_not_called()
+
+    def test_non_adagio_source_is_rejected(self) -> None:
+        with ExitStack() as exit_stack:
+            with self.assertRaises(PipelineResolutionError) as error:
+                resolve_pipeline_reference(
+                    "@my-personal-channel/denoise",
+                    exit_stack=exit_stack,
+                    sources=(),
+                )
+
+        self.assertIn("Expected @adagio/slug", str(error.exception))
+
+    def test_invalid_at_reference_reports_reference_shape(self) -> None:
+        with ExitStack() as exit_stack:
+            with self.assertRaises(PipelineResolutionError) as error:
+                resolve_pipeline_reference(
+                    "@adagio/../secret",
+                    exit_stack=exit_stack,
+                    sources=(),
+                )
+
+        self.assertIn("Expected @adagio/slug", str(error.exception))
 
     def test_missing_source_reference_reports_attempted_locations(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -155,15 +373,13 @@ class PipelineSourceTests(unittest.TestCase):
             with ExitStack() as exit_stack:
                 with self.assertRaises(PipelineResolutionError) as error:
                     resolve_pipeline_reference(
-                        f"{DEFAULT_PIPELINE_SOURCE}/missing",
+                        f"@{DEFAULT_PIPELINE_SOURCE}/missing",
                         exit_stack=exit_stack,
                         sources=(source,),
                     )
 
         message = str(error.exception)
-        self.assertIn(
-            "Pipeline reference 'adagio-playbook/missing' was not found.", message
-        )
+        self.assertIn("Pipeline reference '@adagio/missing' was not found.", message)
         self.assertIn("pipelines/community/missing/pipeline.adg", message)
 
 
@@ -191,7 +407,7 @@ class PipelineSourceIntegrationTests(unittest.TestCase):
                 return_value=(source,),
             ):
                 with patch("adagio.cli.pipeline.console", console):
-                    show_pipeline(Path(f"{DEFAULT_PIPELINE_SOURCE}/denoise"))
+                    show_pipeline(Path(f"@{DEFAULT_PIPELINE_SOURCE}/denoise"))
 
         self.assertIn("dada2.denoise_single", output.getvalue())
 
