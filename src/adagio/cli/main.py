@@ -1,5 +1,6 @@
 import json
 import sys
+from contextlib import ExitStack
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
@@ -13,11 +14,16 @@ from ..app.parsers.pipeline import Input as InputSpec
 from ..app.parsers.pipeline import Output as OutputSpec
 from ..app.parsers.pipeline import Parameter as ParamSpec
 from ..app.parsers.pipeline import parse_inputs, parse_outputs, parse_parameters
-from ..executors.cache_support import CACHE_DIR_HELP, REUSE_HELP
+from ..executors.cache_support import CACHE_DIR_HELP, REUSE_HELP, resolve_cache_dir_path
 from .args import ShowParamsMode, extract_flag_value, promote_positional_pipeline
 from .config import load_run_config
 from .dynamic import build_dynamic_run
 from .pipeline import run_pipeline_cli
+from .pipeline_sources import (
+    PipelineResolution,
+    PipelineResolutionError,
+    resolve_pipeline_reference_details,
+)
 from .qapi import run_qapi
 from .runner import run_pipeline_from_kwargs
 
@@ -56,6 +62,7 @@ def main(argv: list[str] | None = None) -> None:
 
     argv, positional_pipeline = promote_positional_pipeline(argv)
     pipeline_str = extract_flag_value(argv, "--pipeline", "-p")
+    cache_dir_str = extract_flag_value(argv, "--cache-dir")
     show_mode_str = extract_flag_value(argv, "--show-params")
     try:
         show_mode = (
@@ -108,7 +115,7 @@ def main(argv: list[str] | None = None) -> None:
                 Parameter(
                     name=("--pipeline", "-p"),
                     group=command_group,
-                    help="Path to the pipeline JSON file.",
+                    help="Path to the pipeline file or a catalog reference like @adagio/slug.",
                 ),
             ],
             arguments: Annotated[
@@ -155,45 +162,61 @@ def main(argv: list[str] | None = None) -> None:
         ):
             """Run a pipeline (requires --pipeline; dynamic options come from that file)."""
             _ = (config, show_params, cache_dir, reuse)
-            console.print(CycloptsPanel("Missing --pipeline. Try:\n  adagio run --pipeline pipeline.json --help"))
+            console.print(
+                CycloptsPanel(
+                    "Missing --pipeline. Try:\n"
+                    "  adagio run --pipeline pipeline.adg --help\n"
+                    "  adagio run @adagio/microbial-diversity --help"
+                )
+            )
             sys.exit(1)
 
         app(argv)
         return
 
-    pipeline_path = Path(pipeline_str)
-    data = json.loads(pipeline_path.read_text(encoding="utf-8"))
-    input_specs = parse_inputs(data)
-    param_specs = parse_parameters(data)
-    output_specs = parse_outputs(data)
-    arguments_path_str = extract_flag_value(argv, "--arguments")
-    config_path_str = extract_flag_value(argv, "--config")
-    arguments_data = (
-        _load_arguments_data(Path(arguments_path_str), console) if arguments_path_str else None
-    )
-    if config_path_str:
-        load_run_config(Path(config_path_str))
-    visible_inputs, visible_params, visible_outputs = _filter_visible_specs(
-        input_specs=input_specs,
-        param_specs=param_specs,
-        output_specs=output_specs,
-        show_mode=show_mode,
-        arguments_data=arguments_data,
-    )
+    with ExitStack() as exit_stack:
+        pipeline_resolution = _resolve_pipeline(
+            pipeline_str,
+            console=console,
+            exit_stack=exit_stack,
+            download_cache_dir=_resolve_download_cache_dir(cache_dir_str),
+        )
+        data = json.loads(pipeline_resolution.path.read_text(encoding="utf-8"))
+        input_specs = parse_inputs(data)
+        param_specs = parse_parameters(data)
+        output_specs = parse_outputs(data)
+        arguments_path_str = extract_flag_value(argv, "--arguments")
+        config_path_str = extract_flag_value(argv, "--config")
+        arguments_data = (
+            _load_arguments_data(Path(arguments_path_str), console) if arguments_path_str else None
+        )
+        if config_path_str:
+            load_run_config(Path(config_path_str))
+        visible_inputs, visible_params, visible_outputs = _filter_visible_specs(
+            input_specs=input_specs,
+            param_specs=param_specs,
+            output_specs=output_specs,
+            show_mode=show_mode,
+            arguments_data=arguments_data,
+        )
 
-    dynamic_run = build_dynamic_run(
-        input_specs=input_specs,
-        param_specs=param_specs,
-        output_specs=output_specs,
-        visible_input_names={spec.name for spec in visible_inputs},
-        visible_param_names={spec.name for spec in visible_params},
-        visible_output_names={spec.name for spec in visible_outputs},
-        argument_inputs=arguments_data.get("inputs", {}) if arguments_data else None,
-        argument_params=arguments_data.get("parameters", {}) if arguments_data else None,
-        run_handler=partial(run_pipeline_from_kwargs, console=console),
-    )
-    app.command(dynamic_run, name="run")
-    app(argv)
+        dynamic_run = build_dynamic_run(
+            input_specs=input_specs,
+            param_specs=param_specs,
+            output_specs=output_specs,
+            visible_input_names={spec.name for spec in visible_inputs},
+            visible_param_names={spec.name for spec in visible_params},
+            visible_output_names={spec.name for spec in visible_outputs},
+            argument_inputs=arguments_data.get("inputs", {}) if arguments_data else None,
+            argument_params=arguments_data.get("parameters", {}) if arguments_data else None,
+            run_handler=partial(
+                run_pipeline_from_kwargs,
+                console=console,
+                resolved_pipeline=pipeline_resolution,
+            ),
+        )
+        app.command(dynamic_run, name="run")
+        app(argv)
 
 
 def _filter_visible_specs(
@@ -260,6 +283,30 @@ def _load_arguments_data(path: Path, _console: Console | None = None) -> dict[st
 
 def _is_missing(value: Any) -> bool:
     return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
+
+
+def _resolve_pipeline(
+    reference: str,
+    *,
+    console: Console,
+    exit_stack: ExitStack,
+    download_cache_dir: Path | None = None,
+) -> PipelineResolution:
+    try:
+        return resolve_pipeline_reference_details(
+            reference,
+            exit_stack=exit_stack,
+            download_cache_dir=download_cache_dir,
+        )
+    except PipelineResolutionError as error:
+        console.print(CycloptsPanel(str(error)))
+        sys.exit(1)
+
+
+def _resolve_download_cache_dir(raw_value: str | None) -> Path | None:
+    if raw_value is None:
+        return None
+    return resolve_cache_dir_path(cwd=Path.cwd().resolve(), raw_value=raw_value)
 
 
 if __name__ == "__main__":
