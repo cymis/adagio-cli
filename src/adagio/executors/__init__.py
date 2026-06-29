@@ -1,18 +1,30 @@
 __all__ = ["select_default_executor"]
 
 
+def builtin_task_environment_launchers():
+    from .apptainer import ApptainerTaskEnvironmentLauncher
+    from .conda import CondaTaskEnvironmentLauncher
+    from .docker import DockerTaskEnvironmentLauncher
+
+    launchers = [
+        ApptainerTaskEnvironmentLauncher(),
+        CondaTaskEnvironmentLauncher(),
+        DockerTaskEnvironmentLauncher(),
+    ]
+    return {launcher.kind: launcher for launcher in launchers}
+
+
 def select_default_executor(
     *,
     default_override=None,
     plugin_overrides=None,
     task_overrides=None,
+    launchers=None,
 ):
     from .defaults import (
         ConfigurableTaskEnvironmentResolver,
         DefaultTaskEnvironmentResolver,
     )
-    from .apptainer import ApptainerTaskEnvironmentLauncher
-    from .docker import DockerTaskEnvironmentLauncher
     from .task_environments import TaskEnvironmentExecutor
 
     return TaskEnvironmentExecutor(
@@ -22,8 +34,5 @@ def select_default_executor(
             plugin_overrides=plugin_overrides,
             task_overrides=task_overrides,
         ),
-        launchers={
-            "apptainer": ApptainerTaskEnvironmentLauncher(),
-            "docker": DockerTaskEnvironmentLauncher(),
-        },
+        launchers=launchers or builtin_task_environment_launchers(),
     )

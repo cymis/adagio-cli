@@ -39,6 +39,7 @@ class TaskEnvironmentOverride:
     kind: str | None = None
     reference: str | None = None
     platform: str | None = None
+    options: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)

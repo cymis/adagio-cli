@@ -19,3 +19,25 @@ Set up the project and run the test suite with:
 uv sync --group dev
 uv run pytest
 ```
+
+## Runtime environments
+
+By default, `adagio run` resolves plugin actions to Docker images. A runtime
+config passed with `--config` can override that per default, plugin, or task.
+
+Conda environments are supported with `kind = "conda"`:
+
+```toml
+version = 1
+
+[defaults]
+kind = "conda"
+environment = "qiime2-2026.1"
+
+[plugins]
+dada2 = { kind = "conda", prefix = "/opt/conda/envs/q2-dada2" }
+```
+
+The environment must already exist and contain QIIME 2 plus the plugins needed
+by the pipeline. Adagio enters it with `conda run`; it does not create or manage
+the environment.
