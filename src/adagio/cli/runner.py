@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +11,15 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .config import load_run_config
+from .pipeline_sources import (
+    PipelineResolution,
+    PipelineResolutionError,
+    resolve_pipeline_reference_details,
+)
 from ..executors.base import TaskEnvironmentOverride
 from ..executors.cache_support import (
     describe_cache_config,
+    resolve_cache_dir_path,
     resolve_cache_config,
 )
 
@@ -46,6 +53,7 @@ def run_pipeline_from_kwargs(
     required_params: list[str],
     *,
     console: Console,
+    resolved_pipeline: PipelineResolution | None = None,
 ) -> None:
     """Run a pipeline from resolved CLI keyword arguments."""
     from ..model.arguments import AdagioArgumentsFile
@@ -54,7 +62,21 @@ def run_pipeline_from_kwargs(
     cache_dir = kwargs.pop("cache_dir", None)
     reuse = bool(kwargs.pop("reuse", True))
 
-    data = json.loads(pipeline.read_text(encoding="utf-8"))
+    with ExitStack() as exit_stack:
+        try:
+            pipeline_resolution = (
+                resolved_pipeline
+                or resolve_pipeline_reference_details(
+                    pipeline,
+                    exit_stack=exit_stack,
+                    download_cache_dir=_resolve_download_cache_dir(cache_dir),
+                )
+            )
+        except PipelineResolutionError as error:
+            _error_exit(console, str(error))
+
+        data = json.loads(pipeline_resolution.path.read_text(encoding="utf-8"))
+
     pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
     parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
     arguments = parsed_pipeline.signature.to_default_arguments()
@@ -147,6 +169,7 @@ def run_pipeline_from_kwargs(
     suppress_header = _is_truthy(os.getenv("ADAGIO_SUPPRESS_RUN_HEADER"))
     if not suppress_header:
         console.print(f"[bold]Pipeline:[/bold] {pipeline}")
+        console.print(f"[bold]Resolved from:[/bold] {pipeline_resolution.origin}")
 
     cache_config = resolve_cache_config(
         cwd=Path.cwd().resolve(),
@@ -183,6 +206,12 @@ def run_pipeline_from_kwargs(
 def _is_missing(value: Any) -> bool:
     """Treat placeholders and null values as missing."""
     return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
+
+
+def _resolve_download_cache_dir(raw_value: str | Path | None) -> Path | None:
+    if raw_value is None:
+        return None
+    return resolve_cache_dir_path(cwd=Path.cwd().resolve(), raw_value=raw_value)
 
 
 def _is_missing_output(value: Any) -> bool:
