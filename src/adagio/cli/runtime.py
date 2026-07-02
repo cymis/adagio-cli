@@ -239,7 +239,7 @@ def _apply_named_arguments(
     raw_inputs = runtime_arguments.get("inputs", {})
     if isinstance(raw_inputs, dict):
         for name, value in raw_inputs.items():
-            arguments.inputs[name] = _resolve_input_path(
+            arguments.inputs[name] = _resolve_input_value(
                 value, storage_root=storage_root
             )
 
@@ -283,7 +283,7 @@ def _apply_legacy_arguments(
     named_inputs = runtime_arguments.get("inputs", {})
     if isinstance(named_inputs, dict):
         for name, value in named_inputs.items():
-            arguments.inputs[name] = _resolve_input_path(
+            arguments.inputs[name] = _resolve_input_value(
                 value, storage_root=storage_root
             )
 
@@ -307,6 +307,22 @@ def _resolve_input_path(value: Any, *, storage_root: str) -> str:
         if path is None:
             return str(value)
         return _normalize_path(path, storage_root=storage_root)
+    if isinstance(value, str):
+        return _normalize_path(value, storage_root=storage_root)
+    return str(value)
+
+
+def _resolve_input_value(value: Any, *, storage_root: str) -> Any:
+    if isinstance(value, list):
+        return [_resolve_input_value(item, storage_root=storage_root) for item in value]
+    if isinstance(value, dict):
+        path = value.get("path")
+        if path is not None:
+            return _normalize_path(path, storage_root=storage_root)
+        return {
+            str(key): _resolve_input_value(item, storage_root=storage_root)
+            for key, item in value.items()
+        }
     if isinstance(value, str):
         return _normalize_path(value, storage_root=storage_root)
     return str(value)
@@ -345,7 +361,7 @@ def _outputs_need_default(outputs: str | dict[str, str]) -> bool:
 
 
 def _is_missing(value: Any) -> bool:
-    return value is None or value == "" or value == "<fill me>"
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
 
 
 def _validate_required_arguments(
