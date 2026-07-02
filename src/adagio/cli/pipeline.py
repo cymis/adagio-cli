@@ -1,8 +1,9 @@
 import json
 from contextlib import ExitStack
 from pathlib import Path
+from typing import Annotated
 
-from cyclopts import App
+from cyclopts import App, Parameter
 from rich.console import Console
 
 from ..describe import render_pipeline_text
@@ -21,7 +22,17 @@ def run_pipeline_cli(argv: list[str]) -> None:
     app(argv)
 
 
-def show_pipeline(pipeline: Path) -> None:
+def show_pipeline(
+    pipeline: Path,
+    *,
+    verbose: Annotated[
+        bool,
+        Parameter(
+            name=("--verbose", "-v"),
+            help="Show user-authored descriptions for inputs, outputs, and actions.",
+        ),
+    ] = False,
+) -> None:
     """Print a pipeline summary to the terminal."""
     with ExitStack() as exit_stack:
         try:
@@ -32,4 +43,7 @@ def show_pipeline(pipeline: Path) -> None:
         data = json.loads(pipeline_path.read_text(encoding="utf-8"))
         pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
         parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
-        console.print(render_pipeline_text(parsed_pipeline), soft_wrap=True)
+        console.print(
+            render_pipeline_text(parsed_pipeline, show_user_descriptions=verbose),
+            soft_wrap=True,
+        )
