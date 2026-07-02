@@ -26,6 +26,11 @@ class _DisplayRef:
     user_description: str | None = None
 
 
+_ENTRY_INDENT = "       "
+# Fixed so pipeline-show output remains stable and easy to copy between terminals.
+_PIPELINE_SHOW_TYPE_WIDTH = 72
+
+
 def render_pipeline_text(
     pipeline: AdagioPipeline,
     *,
