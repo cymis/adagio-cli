@@ -10,13 +10,16 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from .config import load_run_config
+from .config import (
+    default_environment_override,
+    load_run_config,
+    named_environment_overrides,
+)
 from .pipeline_sources import (
     PipelineResolution,
     PipelineResolutionError,
     resolve_pipeline_reference_details,
 )
-from ..executors.base import TaskEnvironmentOverride
 from ..executors.cache_support import (
     describe_cache_config,
     resolve_cache_dir_path,
@@ -183,11 +186,11 @@ def run_pipeline_from_kwargs(
     from ..executors import select_default_executor
 
     executor = select_default_executor(
-        default_override=_config_default_override(run_config),
-        plugin_overrides=_config_named_overrides(
+        default_override=default_environment_override(run_config),
+        plugin_overrides=named_environment_overrides(
             run_config.plugins if run_config is not None else {}
         ),
-        task_overrides=_config_named_overrides(
+        task_overrides=named_environment_overrides(
             run_config.tasks if run_config is not None else {}
         ),
     )
@@ -285,35 +288,3 @@ def _is_truthy(value: str | None) -> bool:
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _config_default_override(run_config: Any) -> TaskEnvironmentOverride | None:
-    if run_config is None:
-        return None
-
-    defaults = run_config.defaults
-    if defaults.kind is None and defaults.image is None and defaults.platform is None:
-        return None
-
-    return TaskEnvironmentOverride(
-        kind=defaults.kind,
-        reference=defaults.image,
-        platform=defaults.platform,
-    )
-
-
-def _config_named_overrides(
-    raw_overrides: dict[str, Any],
-) -> dict[str, TaskEnvironmentOverride] | None:
-    resolved = {
-        name: TaskEnvironmentOverride(
-            kind=override.kind,
-            reference=override.image,
-            platform=override.platform,
-        )
-        for name, override in raw_overrides.items()
-        if override.kind is not None
-        or override.image is not None
-        or override.platform is not None
-    }
-    return resolved or None

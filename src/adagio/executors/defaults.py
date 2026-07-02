@@ -69,6 +69,8 @@ class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
             if override is None:
                 continue
             if override.kind is not None:
+                if override.kind != kind and override.reference is None:
+                    reference = ""
                 kind = override.kind
                 configured = True
             if override.reference is not None:
@@ -76,6 +78,9 @@ class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
                 configured = True
             if override.platform is not None:
                 options["platform"] = override.platform
+                configured = True
+            if override.options is not None:
+                options.update(dict(override.options))
                 configured = True
 
         return TaskEnvironmentSpec(
