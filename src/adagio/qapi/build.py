@@ -237,7 +237,6 @@ def generate_qapi_payload(
             ],
             "name": action.name,
             "description": action.description,
-            "source": action.source.replace("\n```python\n", "").replace("```\n", ""),
         }
 
     def build_data_dict(
