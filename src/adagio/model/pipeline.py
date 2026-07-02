@@ -1,8 +1,7 @@
 import typing as t
 import os
-import json
 
-from pydantic import BaseModel, RootModel, model_validator, Field
+from pydantic import BaseModel, RootModel, model_validator
 
 
 from .arguments import AdagioArguments
@@ -65,15 +64,21 @@ class AdagioSignature(BaseModel):
         return lookup
 
     def load_inputs(self, ctx, arguments, scope):
-        from adagio.io import load_input, load_metadata
+        from adagio.io import load_input, load_input_collection, load_metadata
 
         for input in self.inputs:
-            source = arguments.inputs[input.name]
+            source = arguments.inputs.get(input.name)
+            if _is_missing(source):
+                continue
             if _is_metadata_ast(input.ast):
                 print("SCHEDULED:", f'load_metadata({source!r})')
                 scope[input.id] = load_metadata(ctx=ctx, source=source)
                 # IIFE for the dreaded for-loop in the parent closure problem.
                 scope[input.id]._future_.add_done_callback((lambda str: (lambda x: print("DONE:", str)))(f'load_metadata({source!r})'))
+            elif _is_collection_type(input.type):
+                print("SCHEDULED:", f'load_input_collection({source!r})')
+                scope[input.id] = load_input_collection(ctx=ctx, sources=source)
+                scope[input.id]._future_.add_done_callback((lambda str: (lambda x: print("DONE:", str)))(f'load_input_collection({source!r})'))
             else:
                 print("SCHEDULED:", f'load_input({source!r})')
                 scope[input.id] = load_input(ctx=ctx, source=source)
@@ -132,3 +137,11 @@ def _is_metadata_ast(ast: TypeAST) -> bool:
     if isinstance(ast, (TypeASTUnion, TypeASTIntersection)):
         return any(_is_metadata_ast(member) for member in ast.members)
     return False
+
+
+def _is_collection_type(type_name: str) -> bool:
+    return type_name.startswith('List[') or type_name.startswith('Collection[')
+
+
+def _is_missing(value: t.Any) -> bool:
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}

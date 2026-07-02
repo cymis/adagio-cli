@@ -15,6 +15,12 @@ from ..executors.cache_support import (
     CACHE_DIR_HELP,
     REUSE_HELP,
 )
+from ..type_format import (
+    compact_type_text,
+    path_type_label,
+    render_type_text,
+    type_label_display_width,
+)
 from .args import ParamType, ShowParamsMode, dynamic_opt, to_identifier
 
 
@@ -75,10 +81,10 @@ def _pipeline_type_label(type_hint: Any) -> str:
 
 def _display_type_label(*, spec_type: str | None, type_hint: Any, is_input: bool) -> str:
     if is_input:
-        return "PATH"
+        return path_type_label(spec_type)
 
     if spec_type:
-        compact = _compact_type_text(spec_type)
+        compact = compact_type_text(spec_type)
         if compact.startswith("["):
             return compact
 
@@ -95,58 +101,8 @@ def _output_path_help(description: str | None) -> str:
 def _render_pipeline_type(
     entry: Any, entry_metadata: dict[str, dict[str, Any]], width: int
 ) -> Any:
-    from rich.text import Text
-
     label = entry_metadata.get(_entry_key(entry), {}).get("type_label", "TEXT")
-    return Text(_wrap_type_label(label, width), style="bold yellow")
-
-
-def _compact_type_text(type_text: str) -> str:
-    cleaned = type_text.strip()
-    if "Choices(" not in cleaned:
-        return f"({cleaned})"
-
-    match = re.search(r"Choices\((.*)\)", cleaned)
-    if match is None:
-        return f"({cleaned})"
-
-    choices = [
-        choice.strip().strip("'\"")
-        for choice in match.group(1).split(",")
-        if choice.strip()
-    ]
-    if not choices:
-        return f"({cleaned})"
-    return "[" + "|".join(choices) + "]"
-
-
-def _wrap_type_label(label: str, width: int) -> str:
-    if len(label) <= width or not (label.startswith("[") and label.endswith("]")):
-        return label
-
-    choices = [choice for choice in label[1:-1].split("|") if choice]
-    if not choices:
-        return label
-
-    lines: list[str] = []
-    current = "["
-
-    for index, choice in enumerate(choices):
-        is_last = index == len(choices) - 1
-        separator = "" if current in ("[", " |") else "|"
-        suffix = "]" if is_last else ""
-        candidate = current + separator + choice + suffix
-
-        if len(candidate) <= width or current in ("[", " |"):
-            current = candidate
-        else:
-            lines.append(current)
-            current = " |" + choice + suffix
-
-    if not current.endswith("]"):
-        current += "]"
-    lines.append(current)
-    return "\n".join(lines)
+    return render_type_text(label, width)
 
 
 def _render_pipeline_description(
@@ -191,10 +147,12 @@ def _get_pipeline_parameter_columns(
         8,
         min(
             max(
-                len(entry_metadata.get(_entry_key(entry), {}).get("type_label", "TEXT"))
+                type_label_display_width(
+                    entry_metadata.get(_entry_key(entry), {}).get("type_label", "TEXT")
+                )
                 for entry in entries
             ),
-            max(22, min(34, math.ceil(console.width * 0.3))),
+            max(28, min(70, math.ceil(console.width * 0.35))),
         ),
     )
     name_column = ColumnSpec(
@@ -275,11 +233,18 @@ def _is_required_param(spec: ParamSpec) -> bool:
     return bool(spec.required and spec.default is None)
 
 
+def _is_collection_type(type_name: str) -> bool:
+    return type_name.startswith("List[") or type_name.startswith("Collection[")
+
+
 def build_dynamic_run(
     *,
     input_specs: list[InputSpec],
     param_specs: list[ParamSpec],
     output_specs: list[OutputSpec],
+    visible_input_names: set[str] | None = None,
+    visible_param_names: set[str] | None = None,
+    visible_output_names: set[str] | None = None,
     argument_inputs: dict[str, Any] | None = None,
     argument_params: dict[str, Any] | None = None,
     run_handler: Callable[
@@ -299,6 +264,13 @@ def build_dynamic_run(
     ],
 ):
     """Build a dynamic run command from pipeline input, parameter, and output specs."""
+    visible_input_names = (
+        set(visible_input_names) if visible_input_names is not None else None
+    )
+    visible_param_names = set(visible_param_names) if visible_param_names is not None else None
+    visible_output_names = (
+        set(visible_output_names) if visible_output_names is not None else None
+    )
     input_bindings: list[tuple[str, str]] = []
     param_bindings: list[tuple[str, str]] = []
     output_bindings: list[tuple[str, str]] = []
@@ -439,6 +411,7 @@ def build_dynamic_run(
         help_text: str,
         default: Any,
         group: Group | tuple[Group, ...],
+        show: bool = True,
     ) -> None:
         if opt in seen_opts:
             raise ValueError(f"Conflicting CLI option generated: {opt!r}.")
@@ -452,6 +425,7 @@ def build_dynamic_run(
                 group=group,
                 help=help_text,
                 required=required,
+                show=show,
             ),
         ]
         parameters.append(
@@ -484,6 +458,7 @@ def build_dynamic_run(
 
         type_text = spec.type
         opt = dynamic_opt(original, ParamType.INPUT)
+        show = visible_input_names is None or original in visible_input_names
         entry_metadata[opt] = {
             "type_label": _display_type_label(
                 spec_type=type_text, type_hint=str, is_input=True
@@ -495,12 +470,13 @@ def build_dynamic_run(
             ident=ident,
             opt=opt,
             required=False,
-            py_type=str,
+            py_type=list[str] if _is_collection_type(spec.type) else str,
             help_text=_format_help_text(
                 description=spec.description,
             ),
             default=None,
             group=pipeline_group,
+            show=show,
         )
 
     def add_param_spec(spec: ParamSpec) -> None:
@@ -524,6 +500,7 @@ def build_dynamic_run(
         param_default = None
         param_type: Any = _resolve_param_type(spec.type, default)
         opt = dynamic_opt(original, ParamType.PARAM)
+        show = visible_param_names is None or original in visible_param_names
         if is_required:
             required_params.append(original)
         entry_metadata[opt] = {
@@ -543,6 +520,7 @@ def build_dynamic_run(
             ),
             default=param_default,
             group=pipeline_group,
+            show=show,
         )
 
     for spec in required_input_specs:
@@ -564,8 +542,9 @@ def build_dynamic_run(
         seen_idents.add(ident)
         output_bindings.append((ident, original))
         opt = dynamic_opt(original, ParamType.OUTPUT)
+        show = visible_output_names is None or original in visible_output_names
         entry_metadata[opt] = {
-            "type_label": "PATH",
+            "type_label": path_type_label(spec.type),
             "default": None,
             "required": False,
         }
@@ -579,6 +558,7 @@ def build_dynamic_run(
             ),
             default=None,
             group=pipeline_group,
+            show=show,
         )
 
     def run(
@@ -615,4 +595,4 @@ def build_dynamic_run(
 
 
 def _is_missing(value: Any) -> bool:
-    return value is None or value == "<fill me>"
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}

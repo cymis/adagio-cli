@@ -3,9 +3,13 @@ import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from adagio.executors.serial_runner import run_serial_pipeline
+from adagio.executors.base import TaskEnvironmentSpec, TaskExecutionResult
+from adagio.executors.serial_runner import resolve_pipeline_input, run_serial_pipeline
+from adagio.executors.serial_runner import SerialExecutionState
+from adagio.executors.task_environments import TaskEnvironmentExecutor
 from adagio.executors.task_environments import _save_outputs
 from adagio.model.arguments import AdagioArguments
+from adagio.model.task import InputVal, PluginActionTask
 from adagio.monitor.api import Monitor
 
 
@@ -20,6 +24,14 @@ class FakeOutputDef:
     name: str
 
 
+@dataclass(frozen=True)
+class FakeInputDef:
+    id: str
+    name: str
+    type: str
+    required: bool
+
+
 @dataclass
 class FakeTask:
     id: str
@@ -31,8 +43,10 @@ class FakeTask:
 
 
 class FakeSignature:
-    def __init__(self, outputs: list[FakeOutputDef]) -> None:
-        self.inputs: list[object] = []
+    def __init__(
+        self, outputs: list[FakeOutputDef], inputs: list[FakeInputDef] | None = None
+    ) -> None:
+        self.inputs: list[FakeInputDef] = inputs or []
         self.parameters: list[object] = []
         self.outputs = outputs
 
@@ -45,8 +59,14 @@ class FakeSignature:
 
 
 class FakePipeline:
-    def __init__(self, *, tasks: list[FakeTask], outputs: list[FakeOutputDef]) -> None:
-        self.signature = FakeSignature(outputs)
+    def __init__(
+        self,
+        *,
+        tasks: list[FakeTask],
+        outputs: list[FakeOutputDef],
+        inputs: list[FakeInputDef] | None = None,
+    ) -> None:
+        self.signature = FakeSignature(outputs, inputs)
         self._tasks = tasks
 
     def validate_graph(self) -> None:
@@ -81,7 +101,156 @@ class RecordingMonitor(Monitor):
         self.save_finish_count += 1
 
 
+class RecordingResolver:
+    def resolve(self, *, task):  # noqa: ANN001
+        del task
+        return TaskEnvironmentSpec(kind="recording", reference="recording")
+
+
+class RecordingLauncher:
+    kind = "recording"
+
+    def __init__(self) -> None:
+        self.request = None
+
+    def launch(self, *, environment, request, console=None):  # noqa: ANN001
+        del environment, console
+        self.request = request
+        return TaskExecutionResult(outputs={})
+
+
 class SerialRunnerOutputTests(unittest.TestCase):
+    def test_collection_input_manifest_expands_to_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest = root / "matrices.tsv"
+            manifest.write_text(
+                "key\tpath\n1\tdm-a.qza\n2\tdata/dm-b.qza\n",
+                encoding="utf-8",
+            )
+
+            resolved = resolve_pipeline_input(
+                source=str(manifest),
+                type_name="List[DistanceMatrix]",
+                cwd=root,
+            )
+
+        self.assertEqual(
+            resolved,
+            [
+                str((root / "dm-a.qza").resolve()),
+                str((root / "data" / "dm-b.qza").resolve()),
+            ],
+        )
+
+    def test_collection_input_list_resolves_each_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            resolved = resolve_pipeline_input(
+                source=["dm-a.qza", "nested/dm-b.qza"],
+                type_name="List[DistanceMatrix]",
+                cwd=root,
+            )
+
+        self.assertEqual(
+            resolved,
+            [
+                str((root / "dm-a.qza").resolve()),
+                str((root / "nested" / "dm-b.qza").resolve()),
+            ],
+        )
+
+    def test_omitted_optional_input_does_not_block_task_execution(self) -> None:
+        pipeline = FakePipeline(
+            inputs=[
+                FakeInputDef(
+                    id="required-input",
+                    name="seqs",
+                    type="SampleData[Sequences]",
+                    required=True,
+                ),
+                FakeInputDef(
+                    id="optional-input",
+                    name="tree",
+                    type="Phylogeny[Rooted]",
+                    required=False,
+                ),
+            ],
+            tasks=[
+                FakeTask(
+                    id="task-1",
+                    inputs={
+                        "seqs": InputVal(kind="archive", id="required-input"),
+                        "tree": InputVal(kind="archive", id="optional-input"),
+                    },
+                    outputs={},
+                )
+            ],
+            outputs=[],
+        )
+        arguments = AdagioArguments(
+            inputs={"seqs": "seqs.qza", "tree": "<fill me>"},
+            parameters={},
+            outputs={},
+        )
+        seen_scope: dict[str, object] = {}
+        seen_missing_optional_ids: set[str] = set()
+
+        def resolve_task(task, state, console):  # noqa: ANN001
+            del task, console
+            seen_scope.update(state.scope)
+            seen_missing_optional_ids.update(state.missing_optional_ids)
+            return False
+
+        run_serial_pipeline(
+            pipeline=pipeline,
+            arguments=arguments,
+            resolve_task=resolve_task,
+            finish_outputs=_save_outputs,
+        )
+
+        self.assertIn("required-input", seen_scope)
+        self.assertNotIn("optional-input", seen_scope)
+        self.assertIn("optional-input", seen_missing_optional_ids)
+
+    def test_task_environment_executor_omits_missing_optional_inputs(self) -> None:
+        launcher = RecordingLauncher()
+        executor = TaskEnvironmentExecutor(
+            environment_resolver=RecordingResolver(),
+            launchers={launcher.kind: launcher},
+        )
+        task = PluginActionTask.model_validate(
+            {
+                "id": "task-1",
+                "kind": "plugin-action",
+                "plugin": "feature_table",
+                "action": "tabulate_seqs",
+                "inputs": {
+                    "data": {"kind": "archive", "id": "data-input"},
+                    "taxonomy": {"kind": "archive", "id": "taxonomy-input"},
+                },
+                "parameters": {},
+                "outputs": {},
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state = SerialExecutionState(
+                cwd=root,
+                work_path=root,
+                params={},
+                scope={"data-input": "data.qza"},
+                cache_config=None,
+                missing_optional_ids={"taxonomy-input"},
+            )
+
+            executor._resolve_task(task, state, None)
+
+        assert launcher.request is not None
+        self.assertEqual(launcher.request.archive_inputs, {"data": "data.qza"})
+        self.assertEqual(launcher.request.archive_collection_inputs, {})
+
     def test_preserves_completed_output_when_later_task_fails(self) -> None:
         output_def = FakeOutputDef(id="out-1", name="result")
         pipeline = FakePipeline(

@@ -5,6 +5,7 @@ from typing import Annotated
 
 from cyclopts import App, Parameter
 from rich.console import Console
+from rich.markup import escape
 
 from ..qapi import DEFAULT_SCHEMA_VERSION, generate_qapi_payload, submit_qapi_payload
 
@@ -36,7 +37,8 @@ def _print_submission_summary(response_body: object) -> None:
             overwritten = [
                 operation["plugin_name"]
                 for operation in operations
-                if isinstance(operation, dict) and operation.get("action") == "overwrite"
+                if isinstance(operation, dict)
+                and operation.get("action") == "overwrite"
             ]
             if created:
                 console.print(f"[green]Create:[/green] {', '.join(created)}")
@@ -51,6 +53,26 @@ def _print_submission_summary(response_body: object) -> None:
 
     if response_body is not None:
         console.print(json.dumps(response_body, indent=2))
+
+
+def _print_skipped_private_actions(skipped_actions: list[str]) -> None:
+    if not skipped_actions:
+        return
+
+    sorted_actions = sorted(skipped_actions)
+    display_limit = 20
+    displayed_actions = ", ".join(
+        escape(action_name) for action_name in sorted_actions[:display_limit]
+    )
+    remaining_count = len(sorted_actions) - display_limit
+    if remaining_count > 0:
+        displayed_actions += f", and {remaining_count} more"
+
+    noun = "action" if len(sorted_actions) == 1 else "actions"
+    console.print(
+        f"[yellow]Skipped {len(sorted_actions)} private QIIME {noun}:[/yellow] "
+        f"{displayed_actions}"
+    )
 
 
 def build_qapi(
@@ -139,13 +161,16 @@ def build_qapi(
         raise SystemExit("Use either --all or --plugin, not both.")
 
     requested_plugins = None if all_plugins or not plugin else plugin
+    skipped_private_actions: list[str] = []
     try:
         request_body = generate_qapi_payload(
             schema_version=schema_version,
             plugins=requested_plugins,
+            on_skipped_private_action=skipped_private_actions.append,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    _print_skipped_private_actions(skipped_private_actions)
 
     if output is not None:
         output.write_text(json.dumps(request_body, indent=2), encoding="utf-8")
