@@ -4,7 +4,7 @@ from adagio.execution.proxy import ProxyMetadata, lift_parsl, IndexedProxyArtifa
 
 @lift_parsl(lambda fut: IndexedProxyArtifact(fut, 0))
 def load_input(*, ctx, source: str):
-    from qiime2.sdk import Results, Artifact
+    from qiime2.sdk import Artifact
     from qiime2.sdk import PluginManager
     PluginManager()
 

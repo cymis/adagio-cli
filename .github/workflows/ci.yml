@@ -34,7 +34,7 @@ jobs:
         run: uv sync --group dev --locked
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run nox -s test
 
   build:
     name: Build distribution

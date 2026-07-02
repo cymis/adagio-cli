@@ -44,7 +44,14 @@ Issues = "https://github.com/cymis/adagio-cli/issues"
 Changelog = "https://github.com/cymis/adagio-cli/blob/dev/CHANGELOG.md"
 
 [dependency-groups]
-dev = ["build>=1.2.2", "pytest>=8.4.0", "ruff>=0.13.0", "twine>=6.2.0"]
+dev = [
+  "build>=1.2.2",
+  "nox>=2024.4.15,<2025.0.0",
+  "pytest>=8.4.0",
+  "pytest-cov>=6.0.0",
+  "ruff>=0.13.0",
+  "twine>=6.2.0",
+]
 
 [project.scripts]
 adagio = "adagio.cli.main:main"
