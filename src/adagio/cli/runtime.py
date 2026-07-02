@@ -8,7 +8,6 @@ from typing import Any
 
 from rich.console import Console
 
-from ..executors.base import TaskEnvironmentOverride
 from ..executors.cache_support import (
     CACHE_DIR_HELP,
     REUSE_HELP,
@@ -19,7 +18,11 @@ from ..model.pipeline import AdagioPipeline
 from ..monitor.composite import CompositeMonitor
 from ..monitor.connected import ConnectedMonitor
 from ..monitor.log import LogMonitor
-from .config import load_run_config
+from .config import (
+    default_environment_override,
+    load_run_config,
+    named_environment_overrides,
+)
 
 
 def run_runtime(argv: list[str], *, console: Console) -> None:
@@ -113,11 +116,11 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     from ..executors import select_default_executor
 
     executor = select_default_executor(
-        default_override=_default_override(run_config),
-        plugin_overrides=_named_overrides(
+        default_override=default_environment_override(run_config),
+        plugin_overrides=named_environment_overrides(
             run_config.plugins if run_config is not None else {}
         ),
-        task_overrides=_named_overrides(
+        task_overrides=named_environment_overrides(
             run_config.tasks if run_config is not None else {}
         ),
     )
@@ -165,37 +168,6 @@ def _resolve_output_dir(raw_output_dir: str | None, job_id: str | None) -> str:
         output_dir = "/storage/runtime_outputs"
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
-
-
-def _default_override(run_config: Any) -> TaskEnvironmentOverride | None:
-    if run_config is None:
-        return None
-    defaults = run_config.defaults
-    if defaults.kind is None and defaults.image is None and defaults.platform is None:
-        return None
-    return TaskEnvironmentOverride(
-        kind=defaults.kind,
-        reference=defaults.image,
-        platform=defaults.platform,
-    )
-
-
-def _named_overrides(
-    raw_overrides: dict[str, Any],
-) -> dict[str, TaskEnvironmentOverride] | None:
-    resolved = {
-        name: TaskEnvironmentOverride(
-            kind=override.kind,
-            reference=override.image,
-            platform=override.platform,
-        )
-        for name, override in raw_overrides.items()
-        if override.kind is not None
-        or override.image is not None
-        or override.platform is not None
-    }
-    return resolved or None
-
 
 def _build_arguments(
     *,

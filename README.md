@@ -19,3 +19,49 @@ Set up the project and run the test suite with:
 uv sync --group dev
 uv run pytest
 ```
+
+## Runtime environments
+
+By default, `adagio run` resolves plugin actions to Docker images. A runtime
+config passed with `--config` can override that per default, plugin, or task.
+
+Conda environments are supported with `kind = "conda"`:
+
+```toml
+version = 1
+
+[defaults]
+kind = "conda"
+environment = "qiime2-2026.1"
+
+[plugins]
+dada2 = { kind = "conda", prefix = "/opt/conda/envs/q2-dada2" }
+```
+
+The environment must already exist and contain QIIME 2 plus the plugins needed
+by the pipeline. Adagio enters it with `conda run`; it does not create or manage
+the environment.
+
+## Catalog pipelines
+
+Run a pipeline from the Adagio pipeline catalog:
+
+```bash
+adagio pipeline show @adagio/microbial-diversity
+adagio run @adagio/microbial-diversity --cache-dir /path/to/cache --arguments run-arguments.json
+```
+
+`@adagio/<slug>` first resolves against a nearby local `adagio-pipelines`
+checkout when one is available. If no local catalog is found, Adagio fetches
+`pipeline.adg` from `cymis/adagio-pipelines` on GitHub, checking `official`
+before `community`.
+
+During `adagio run`, remote catalog pipelines are downloaded under the selected
+`--cache-dir` and reused by source name and slug on later runs. `adagio pipeline
+show` uses a temporary download when it fetches from GitHub because it does not
+take a cache directory.
+
+Private GitHub access is explicit: set `GITHUB_TOKEN` or `GH_TOKEN` to a token
+that can read `cymis/adagio-pipelines`; with a token, the CLI fetches through
+the GitHub contents API. The CLI does not read browser, git, or `gh` credentials
+automatically.

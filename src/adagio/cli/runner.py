@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -9,10 +10,19 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from .config import load_run_config
-from ..executors.base import TaskEnvironmentOverride
+from .config import (
+    default_environment_override,
+    load_run_config,
+    named_environment_overrides,
+)
+from .pipeline_sources import (
+    PipelineResolution,
+    PipelineResolutionError,
+    resolve_pipeline_reference_details,
+)
 from ..executors.cache_support import (
     describe_cache_config,
+    resolve_cache_dir_path,
     resolve_cache_config,
 )
 
@@ -46,6 +56,7 @@ def run_pipeline_from_kwargs(
     required_params: list[str],
     *,
     console: Console,
+    resolved_pipeline: PipelineResolution | None = None,
 ) -> None:
     """Run a pipeline from resolved CLI keyword arguments."""
     from ..model.arguments import AdagioArgumentsFile
@@ -54,7 +65,21 @@ def run_pipeline_from_kwargs(
     cache_dir = kwargs.pop("cache_dir", None)
     reuse = bool(kwargs.pop("reuse", True))
 
-    data = json.loads(pipeline.read_text(encoding="utf-8"))
+    with ExitStack() as exit_stack:
+        try:
+            pipeline_resolution = (
+                resolved_pipeline
+                or resolve_pipeline_reference_details(
+                    pipeline,
+                    exit_stack=exit_stack,
+                    download_cache_dir=_resolve_download_cache_dir(cache_dir),
+                )
+            )
+        except PipelineResolutionError as error:
+            _error_exit(console, str(error))
+
+        data = json.loads(pipeline_resolution.path.read_text(encoding="utf-8"))
+
     pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
     parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
     arguments = parsed_pipeline.signature.to_default_arguments()
@@ -147,6 +172,7 @@ def run_pipeline_from_kwargs(
     suppress_header = _is_truthy(os.getenv("ADAGIO_SUPPRESS_RUN_HEADER"))
     if not suppress_header:
         console.print(f"[bold]Pipeline:[/bold] {pipeline}")
+        console.print(f"[bold]Resolved from:[/bold] {pipeline_resolution.origin}")
 
     cache_config = resolve_cache_config(
         cwd=Path.cwd().resolve(),
@@ -160,11 +186,11 @@ def run_pipeline_from_kwargs(
     from ..executors import select_default_executor
 
     executor = select_default_executor(
-        default_override=_config_default_override(run_config),
-        plugin_overrides=_config_named_overrides(
+        default_override=default_environment_override(run_config),
+        plugin_overrides=named_environment_overrides(
             run_config.plugins if run_config is not None else {}
         ),
-        task_overrides=_config_named_overrides(
+        task_overrides=named_environment_overrides(
             run_config.tasks if run_config is not None else {}
         ),
     )
@@ -183,6 +209,12 @@ def run_pipeline_from_kwargs(
 def _is_missing(value: Any) -> bool:
     """Treat placeholders and null values as missing."""
     return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
+
+
+def _resolve_download_cache_dir(raw_value: str | Path | None) -> Path | None:
+    if raw_value is None:
+        return None
+    return resolve_cache_dir_path(cwd=Path.cwd().resolve(), raw_value=raw_value)
 
 
 def _is_missing_output(value: Any) -> bool:
@@ -256,35 +288,3 @@ def _is_truthy(value: str | None) -> bool:
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _config_default_override(run_config: Any) -> TaskEnvironmentOverride | None:
-    if run_config is None:
-        return None
-
-    defaults = run_config.defaults
-    if defaults.kind is None and defaults.image is None and defaults.platform is None:
-        return None
-
-    return TaskEnvironmentOverride(
-        kind=defaults.kind,
-        reference=defaults.image,
-        platform=defaults.platform,
-    )
-
-
-def _config_named_overrides(
-    raw_overrides: dict[str, Any],
-) -> dict[str, TaskEnvironmentOverride] | None:
-    resolved = {
-        name: TaskEnvironmentOverride(
-            kind=override.kind,
-            reference=override.image,
-            platform=override.platform,
-        )
-        for name, override in raw_overrides.items()
-        if override.kind is not None
-        or override.image is not None
-        or override.platform is not None
-    }
-    return resolved or None
