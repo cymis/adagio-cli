@@ -168,6 +168,50 @@ def _collection_pipeline_dict() -> dict:
     }
 
 
+def _user_description_pipeline_dict() -> dict:
+    return {
+        "type": "pipeline",
+        "signature": {
+            "inputs": [
+                {
+                    "id": "input-seqs",
+                    "name": "seqs",
+                    "type": "SampleData[SequencesWithQuality]",
+                    "ast": AST,
+                    "required": True,
+                    "description": "Demultiplexed sequence data.",
+                    "user_description": "Raw reads from sequencing run 3",
+                },
+            ],
+            "parameters": [],
+            "outputs": [
+                {
+                    "id": "output-table",
+                    "name": "table",
+                    "type": "FeatureTable[Frequency]",
+                    "ast": AST,
+                    "description": "Denoised feature table.",
+                    "user_description": "Denoised table we publish",
+                },
+            ],
+        },
+        "graph": [
+            {
+                "id": "task-dada2",
+                "kind": "plugin-action",
+                "plugin": "dada2",
+                "action": "denoise_single",
+                "user_description": "Denoise tuned for our amplicon",
+                "inputs": {
+                    "demultiplexed_seqs": {"kind": "archive", "id": "input-seqs"}
+                },
+                "parameters": {},
+                "outputs": {"table": {"kind": "archive", "id": "output-table"}},
+            },
+        ],
+    }
+
+
 def _render_plain(renderable: object) -> str:
     console = Console(record=True, width=160, file=io.StringIO())
     console.print(renderable, soft_wrap=True)
@@ -235,6 +279,64 @@ class PipelineShowTests(unittest.TestCase):
             'tables: list [pipeline input "table_a", pipeline input "table_b"]',
             rendered,
         )
+
+    def test_user_descriptions_hidden_by_default(self) -> None:
+        pipeline = AdagioPipeline.model_validate(_user_description_pipeline_dict())
+
+        rendered = _render_plain(render_pipeline_text(pipeline))
+
+        # Plugin descriptions still render by default ...
+        self.assertIn("Demultiplexed sequence data.", rendered)
+        # ... but the user-authored notes do not.
+        self.assertNotIn("note:", rendered)
+        self.assertNotIn("Raw reads from sequencing run 3", rendered)
+        self.assertNotIn("Denoised table we publish", rendered)
+        self.assertNotIn("Denoise tuned for our amplicon", rendered)
+
+    def test_user_descriptions_shown_when_verbose(self) -> None:
+        pipeline = AdagioPipeline.model_validate(_user_description_pipeline_dict())
+
+        rendered = _render_plain(
+            render_pipeline_text(pipeline, show_user_descriptions=True)
+        )
+
+        # Input, output, and action notes are all rendered, prefixed with "note:".
+        self.assertIn("note: Raw reads from sequencing run 3", rendered)
+        self.assertIn("note: Denoised table we publish", rendered)
+        self.assertIn("note: Denoise tuned for our amplicon", rendered)
+        # The action note appears inside the action panel above its Inputs section.
+        self.assertLess(
+            rendered.index("note: Denoise tuned for our amplicon"),
+            rendered.index("Inputs:"),
+        )
+        # Plugin descriptions remain alongside the user notes.
+        self.assertIn("Demultiplexed sequence data.", rendered)
+
+    def test_pipeline_show_cli_verbose_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline_path = Path(tmpdir) / "pipeline.json"
+            payload = {"spec": _user_description_pipeline_dict()}
+            pipeline_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            base_cmd = [
+                sys.executable,
+                "-m",
+                "adagio.cli.main",
+                "pipeline",
+                "show",
+                str(pipeline_path),
+            ]
+            default = subprocess.run(
+                base_cmd, capture_output=True, check=False, text=True
+            )
+            verbose = subprocess.run(
+                [*base_cmd, "-v"], capture_output=True, check=False, text=True
+            )
+
+        self.assertEqual(default.returncode, 0, msg=default.stderr)
+        self.assertEqual(verbose.returncode, 0, msg=verbose.stderr)
+        self.assertNotIn("note:", default.stdout)
+        self.assertIn("note: Raw reads from sequencing run 3", verbose.stdout)
 
 
 if __name__ == "__main__":

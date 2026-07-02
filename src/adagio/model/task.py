@@ -19,6 +19,7 @@ class PluginActionTask(_BaseTask):
     name: str | None = None
     plugin: str
     action: str
+    user_description: str | None = None
 
     def exec(self, ctx, params, scope):
         from adagio.io import convert_metadata
