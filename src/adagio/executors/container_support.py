@@ -1,7 +1,10 @@
 import os
+import re
 import shutil
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 
@@ -76,6 +79,67 @@ def mount_roots(paths: list[Path]) -> list[Path]:
     return sorted(roots)
 
 
+# Matches an absolute-path token inside a manifest field. Mirrors
+# ``task_exec._ABSOLUTE_PATH_TOKEN``: a leading "/" then any run of chars up to
+# the delimiters QIIME manifest formats use (whitespace, tab, comma, quotes).
+_MANIFEST_PATH_TOKEN = re.compile(r"/[^\s,\t\r\n\"']+")
+
+
+def manifest_referenced_host_paths(
+    *,
+    archive_inputs: Mapping[str, str],
+    materializations: Mapping[str, Mapping[str, Any]] | None,
+) -> list[Path]:
+    """Absolute paths referenced *inside* raw-manifest archive inputs.
+
+    A QIIME manifest import (materialization ``mode == "raw"`` with a
+    ``*Manifest*`` ``input_format``) is a small text file that points at fastq
+    files by absolute host path. Those fastqs may live under a different
+    first-level filesystem root than the manifest, the cwd, the work dir, or the
+    cache. Unless the launcher bind-mounts those roots too, the in-container
+    interior-path remap (``task_exec._localize_manifest_source``) has no
+    ``/host`` copy to resolve against and QIIME cannot find the reads.
+
+    Returns the referenced host paths; callers fold them into ``host_paths`` and
+    ``mount_roots`` reduces the set to first-level roots. Format-agnostic: the
+    token-level scan handles single/paired, phred33/64, V1 CSV, and V2 TSV
+    manifests alike (field names carry no leading slash, so they never match).
+    """
+    if not materializations:
+        return []
+    referenced: list[Path] = []
+    for name, materialization in materializations.items():
+        if not _is_raw_manifest_materialization(materialization):
+            continue
+        source = archive_inputs.get(name)
+        if not source or is_uri(source):
+            continue
+        manifest_path = Path(source)
+        if not manifest_path.is_absolute():
+            continue
+        referenced.extend(_scan_manifest_for_paths(manifest_path))
+    return referenced
+
+
+def _is_raw_manifest_materialization(
+    materialization: Mapping[str, Any] | None,
+) -> bool:
+    if not materialization or materialization.get("mode") != "raw":
+        return False
+    input_format = materialization.get("input_format")
+    return isinstance(input_format, str) and "Manifest" in input_format
+
+
+def _scan_manifest_for_paths(manifest_path: Path) -> list[Path]:
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except OSError:
+        # Unreadable from here -> nothing extra to mount; the in-container import
+        # will surface the real, user-facing error against the original path.
+        return []
+    return [Path(token) for token in _MANIFEST_PATH_TOKEN.findall(text)]
+
+
 def containerize_host_value(value: str) -> str:
     """Map an absolute host path into the container mount."""
     if is_uri(value):
@@ -121,6 +185,20 @@ def container_python_root(*, work_path: Path, module_file: Path | None = None) -
     staged_root = (work_path / STAGED_CONTAINER_PYTHON_ROOT).resolve()
     _stage_adagio_package(package_dir=package_dir, staged_root=staged_root)
     return staged_root
+
+
+def record_container_output(*, log_path: Path, stdout_text: str, stderr_text: str) -> None:
+    """Persist a task's container stdout+stderr to a per-task log file.
+
+    Keeps the live console clean (Nextflow-style): the full container output —
+    including the docker image-pull layer log — lives here and is surfaced only
+    on failure. Best-effort: a logging failure must not mask the task result.
+    """
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text((stdout_text or "") + (stderr_text or ""), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def print_filtered_container_stderr(*, console: Console, stderr_text: str) -> None:

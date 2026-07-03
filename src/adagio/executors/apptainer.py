@@ -17,12 +17,15 @@ from .container_support import (
     containerize_path,
     host_path_from_container,
     is_uri,
+    manifest_referenced_host_paths,
     print_filtered_container_stderr,
     python_warning_env_assignments,
+    record_container_output,
     with_apptainer_binds,
 )
 from .task_contract import (
     build_task_spec,
+    container_log_path,
     parse_result_manifest,
     read_json_file,
     result_manifest_path,
@@ -70,6 +73,9 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             plugin=task.plugin,
             action=task.action,
             archive_inputs=archive_inputs,
+            archive_input_materializations=(
+                dict(request.archive_input_materializations or {})
+            ),
             archive_collection_inputs=archive_collection_inputs,
             metadata_inputs=metadata_inputs,
             params=dict(request.params),
@@ -108,6 +114,15 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 host_paths.append(path)
         if request.cache_path is not None:
             host_paths.append(mount_path_for_cache(Path(request.cache_path)))
+        # A raw-manifest input points at fastqs by absolute host path; mount the
+        # roots of those interior paths too (they may live off a different root
+        # than the manifest/cwd/cache), so the in-container remap can resolve.
+        host_paths.extend(
+            manifest_referenced_host_paths(
+                archive_inputs=request.archive_inputs,
+                materializations=request.archive_input_materializations,
+            )
+        )
 
         command = with_apptainer_binds(command=command, host_paths=host_paths)
         command.extend(
@@ -145,12 +160,18 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 "Apptainer binary location."
             ) from exc
 
-        if console is not None:
-            print_filtered_container_stderr(
-                console=console, stderr_text=result.stderr or ""
-            )
+        log_path = container_log_path(task_id=task.id, work_path=request.work_path)
+        record_container_output(
+            log_path=log_path,
+            stdout_text=result.stdout or "",
+            stderr_text=result.stderr or "",
+        )
 
         if result.returncode != 0:
+            if console is not None:
+                print_filtered_container_stderr(
+                    console=console, stderr_text=result.stderr or ""
+                )
             stdout_text = (result.stdout or "").strip()
             stderr_text = (result.stderr or "").strip()
             if stderr_text:

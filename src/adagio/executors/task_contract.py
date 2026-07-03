@@ -3,6 +3,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable
 
+# Sentinel "plugin" name marking a task spec that imports raw data into a single
+# artifact instead of running a QIIME plugin action. Used to materialize a
+# data-import artifact that is exposed as a pipeline output (the import runs in a
+# consuming action's environment, which already has the relevant QIIME type).
+DATA_IMPORT_PLUGIN = "data-import"
+
 
 def task_file_stem(task_id: str) -> str:
     return task_id.replace("/", "_").replace(" ", "_")
@@ -29,11 +35,17 @@ def result_manifest_path(*, task_id: str, work_path: Path) -> Path:
     return (work_path / f"{task_file_stem(task_id)}_results.json").resolve()
 
 
+def container_log_path(*, task_id: str, work_path: Path) -> Path:
+    """Per-task file capturing the container's stdout+stderr (incl. image pull)."""
+    return (work_path / f"{task_file_stem(task_id)}_container.log").resolve()
+
+
 def build_task_spec(
     *,
     plugin: str,
     action: str,
     archive_inputs: dict[str, str],
+    archive_input_materializations: dict[str, dict[str, Any]] | None,
     archive_collection_inputs: dict[str, list[str]],
     metadata_inputs: dict[str, str],
     params: dict[str, Any],
@@ -47,6 +59,7 @@ def build_task_spec(
         "plugin": plugin,
         "action": action,
         "archive_inputs": archive_inputs,
+        "archive_input_materializations": archive_input_materializations or {},
         "archive_collection_inputs": archive_collection_inputs,
         "metadata_inputs": metadata_inputs,
         "params": params,

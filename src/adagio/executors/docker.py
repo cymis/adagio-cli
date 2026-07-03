@@ -17,13 +17,16 @@ from .container_support import (
     docker_tty_flags,
     host_path_from_container,
     is_uri,
+    manifest_referenced_host_paths,
     print_filtered_container_stderr,
     python_warning_env_flags,
+    record_container_output,
     with_mounts,
 )
 from .task_contract import (
     parse_result_manifest,
     build_task_spec,
+    container_log_path,
     read_json_file,
     result_manifest_path,
     task_spec_path,
@@ -65,6 +68,9 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             plugin=task.plugin,
             action=task.action,
             archive_inputs=archive_inputs,
+            archive_input_materializations=(
+                dict(request.archive_input_materializations or {})
+            ),
             archive_collection_inputs=archive_collection_inputs,
             metadata_inputs=metadata_inputs,
             params=dict(request.params),
@@ -124,6 +130,15 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 host_paths.append(path)
         if request.cache_path is not None:
             host_paths.append(mount_path_for_cache(Path(request.cache_path)))
+        # A raw-manifest input points at fastqs by absolute host path; mount the
+        # roots of those interior paths too (they may live off a different root
+        # than the manifest/cwd/cache), so the in-container remap can resolve.
+        host_paths.extend(
+            manifest_referenced_host_paths(
+                archive_inputs=request.archive_inputs,
+                materializations=request.archive_input_materializations,
+            )
+        )
 
         command = with_mounts(command=command, host_paths=host_paths)
 
@@ -133,6 +148,13 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 label = f"docker --platform {platform} {environment.reference}"
             if not getattr(console, "_adagio_inline_monitor_active", False):
                 console.print(f"[dim]Task environment:[/dim] {label}")
+
+        # Pull the image up front (first run only) behind a single line, so the
+        # `docker run` below stays quiet instead of dumping the layer-by-layer
+        # pull log to the console. Safe because the executor runs tasks serially.
+        _ensure_docker_image(
+            reference=environment.reference, platform=platform, console=console
+        )
 
         try:
             result = subprocess.run(
@@ -147,10 +169,20 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 "Docker is required for task environment execution but was not found in PATH."
             ) from exc
 
-        if console is not None:
-            print_filtered_container_stderr(console=console, stderr_text=result.stderr or "")
+        # Capture container output to a per-task log; keep the console clean on
+        # success and surface it only when the task fails.
+        log_path = container_log_path(task_id=task.id, work_path=request.work_path)
+        record_container_output(
+            log_path=log_path,
+            stdout_text=result.stdout or "",
+            stderr_text=result.stderr or "",
+        )
 
         if result.returncode != 0:
+            if console is not None:
+                print_filtered_container_stderr(
+                    console=console, stderr_text=result.stderr or ""
+                )
             stdout_text = (result.stdout or "").strip()
             stderr_text = (result.stderr or "").strip()
             if stderr_text:
@@ -182,3 +214,55 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             outputs[output_name] = str(host_path_from_container(actual_path))
 
         return TaskExecutionResult(outputs=outputs, reused=reused)
+
+
+def _ensure_docker_image(
+    *, reference: str, platform: str | None, console: Console | None
+) -> None:
+    """Pull a missing image once, behind a single console line.
+
+    Keeps the layer-by-layer pull log out of the run output: ``docker pull
+    --quiet`` prints only the digest, and once the image is present ``docker
+    run`` performs no pull at all. Only runs on the first use of an image; the
+    executor is serial, so there is no concurrent-pull race to guard against.
+    """
+    if is_uri(reference):
+        return
+    try:
+        present = (
+            subprocess.run(
+                ["docker", "image", "inspect", reference],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).returncode
+            == 0
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            "Docker is required for task environment execution but was not found in PATH."
+        ) from exc
+    if present:
+        return
+
+    if console is not None and not getattr(
+        console, "_adagio_inline_monitor_active", False
+    ):
+        console.print(f"[dim]Pulling image[/dim] {reference} [dim](first run)…[/dim]")
+
+    command = ["docker", "pull", "--quiet"]
+    if platform:
+        command.extend(["--platform", platform])
+    command.append(reference)
+    result = subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to pull image {reference!r}: {(result.stderr or '').strip()}"
+        )

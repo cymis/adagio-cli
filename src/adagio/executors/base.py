@@ -53,6 +53,7 @@ class TaskExecutionRequest:
     params: Mapping[str, Any]
     metadata_column_kwargs: Mapping[str, Mapping[str, str]]
     outputs: Mapping[str, str]
+    archive_input_materializations: Mapping[str, Mapping[str, Any]] | None = None
     cache_path: str | None = None
     recycle_pool: str | None = None
 

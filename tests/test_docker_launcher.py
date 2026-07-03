@@ -127,3 +127,87 @@ class DockerLauncherTests(unittest.TestCase):
             )
             self.assertEqual(result.outputs, {"visualization": str(output_path)})
             self.assertFalse(result.reused)
+
+    def test_launch_mounts_manifest_referenced_fastq_roots(self) -> None:
+        launcher = DockerTaskEnvironmentLauncher()
+        task = _task()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            cwd = root / "cwd"
+            work_path = root / "work"
+            cwd.mkdir()
+            work_path.mkdir()
+            output_path = work_path / "summary.qzv"
+
+            # The manifest lives under the cwd, but the fastqs it points at live
+            # under a *different* top-level root that nothing else mounts.
+            fastq_root = _foreign_root(cwd)
+            manifest_path = cwd / "manifest.tsv"
+            manifest_path.write_text(
+                "sample-id\tabsolute-filepath\n"
+                f"sample1\t{fastq_root}/adagio-reads/s1.fastq.gz\n"
+                f"sample2\t{fastq_root}/adagio-reads/s2.fastq.gz\n",
+                encoding="utf-8",
+            )
+
+            request = TaskExecutionRequest(
+                task=task,
+                cwd=cwd,
+                work_path=work_path,
+                archive_inputs={"seqs": str(manifest_path)},
+                archive_collection_inputs={},
+                metadata_inputs={},
+                params={},
+                metadata_column_kwargs={},
+                outputs={"visualization": str(output_path)},
+                archive_input_materializations={
+                    "seqs": {
+                        "mode": "raw",
+                        "semantic_type": "SampleData[SequencesWithQuality]",
+                        "input_format": "SingleEndFastqManifestPhred33V2",
+                        "validate_level": "max",
+                    }
+                },
+            )
+
+            result_path = result_manifest_path(task_id=task.id, work_path=work_path)
+
+            def fake_run(cmd, check, stdout, stderr, text):  # noqa: ANN001
+                write_json_file(
+                    result_path,
+                    build_result_manifest(
+                        outputs={"visualization": containerize_path(output_path)},
+                        reused=False,
+                    ),
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with patch(
+                "adagio.executors.docker.subprocess.run",
+                side_effect=fake_run,
+            ) as run_mock:
+                launcher.launch(
+                    environment=TaskEnvironmentSpec(
+                        kind="docker", reference="img:test"
+                    ),
+                    request=request,
+                )
+
+            command = run_mock.call_args.args[0]
+            fastq_bind = f"{fastq_root}:{containerize_path(fastq_root)}:rw"
+            self.assertIn(fastq_bind, command)
+            # The fastq root genuinely differs from the cwd's top-level root.
+            self.assertNotEqual(fastq_root.parts[1], cwd.parts[1])
+
+
+def _foreign_root(path: Path) -> Path:
+    """A first-level filesystem root that exists and differs from ``path``'s."""
+    excluded = path.parts[1] if len(path.parts) > 1 else None
+    for candidate in ("usr", "bin", "etc", "opt", "var", "lib"):
+        if candidate == excluded:
+            continue
+        root = Path("/", candidate)
+        if root.exists():
+            return root
+    raise unittest.SkipTest("No foreign top-level root available on this host.")

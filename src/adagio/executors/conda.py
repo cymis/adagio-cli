@@ -46,6 +46,9 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             plugin=task.plugin,
             action=task.action,
             archive_inputs=dict(request.archive_inputs),
+            archive_input_materializations=(
+                dict(request.archive_input_materializations or {})
+            ),
             archive_collection_inputs={
                 name: list(values)
                 for name, values in request.archive_collection_inputs.items()
