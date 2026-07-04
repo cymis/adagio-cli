@@ -398,7 +398,10 @@ def _normalize_path(path: str, *, storage_root: str) -> str:
 def _outputs_need_default(outputs: str | dict[str, str]) -> bool:
     if isinstance(outputs, str):
         return outputs == "" or outputs == "<fill me>"
-    return any(value in {"", "<fill me>"} for value in outputs.values())
+    # An empty map means no destinations were provided (the run UI sends
+    # ``outputs: {}``) → fall back to --output-dir, which yields one file per
+    # pipeline output. A non-empty map still defaults only if it has holes.
+    return not outputs or any(value in {"", "<fill me>"} for value in outputs.values())
 
 
 def _is_missing(value: Any) -> bool:
