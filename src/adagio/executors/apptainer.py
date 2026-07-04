@@ -1,8 +1,11 @@
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from rich.console import Console
+
+from adagio.monitor.api import Monitor
 
 from .base import (
     TaskEnvironmentLauncher,
@@ -43,11 +46,14 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         environment: TaskEnvironmentSpec,
         request: TaskExecutionRequest,
         console: Console | None = None,
+        monitor: Monitor | None = None,
+        task_id: str | None = None,
     ) -> TaskExecutionResult:
         image_path = _resolve_sif_image(environment.reference)
         runtime_executable = _resolve_runtime_executable()
 
         task = request.task
+        event_task_id = task_id if task_id is not None else task.id
         archive_inputs = {
             name: containerize_host_value(value)
             for name, value in request.archive_inputs.items()
@@ -145,6 +151,11 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             if not getattr(console, "_adagio_inline_monitor_active", False):
                 console.print(f"[dim]Task environment:[/dim] {label}")
 
+        if monitor is not None:
+            monitor.starting_container(
+                task_id=event_task_id, image_ref=str(image_path)
+            )
+        run_started = time.monotonic()
         try:
             result = subprocess.run(
                 command,
@@ -159,6 +170,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 "but was not found in PATH. Ensure the job environment includes the "
                 "Apptainer binary location."
             ) from exc
+        run_seconds = time.monotonic() - run_started
 
         log_path = container_log_path(task_id=task.id, work_path=request.work_path)
         record_container_output(
@@ -202,7 +214,15 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 )
             resolved_outputs[output_name] = str(host_path_from_container(actual_path))
 
-        return TaskExecutionResult(outputs=resolved_outputs, reused=reused)
+        return TaskExecutionResult(
+            outputs=resolved_outputs,
+            reused=reused,
+            command=list(command),
+            exit_code=result.returncode,
+            image_ref=str(image_path),
+            log_path=str(log_path),
+            timings={"run_seconds": run_seconds},
+        )
 
 
 def _resolve_runtime_executable() -> str:

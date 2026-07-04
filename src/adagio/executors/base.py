@@ -62,6 +62,14 @@ class TaskExecutionRequest:
 class TaskExecutionResult:
     outputs: Mapping[str, str]
     reused: bool = False
+    # Optional enrichment (design §5.1). Best-effort: any of these may be None
+    # when unavailable. Never load-bearing for correctness.
+    command: list[str] | None = None
+    exit_code: int | None = None
+    image_ref: str | None = None
+    image_digest: str | None = None
+    log_path: str | None = None
+    timings: Mapping[str, float] | None = None
 
 
 class TaskEnvironmentResolver(Protocol):
@@ -77,4 +85,6 @@ class TaskEnvironmentLauncher(Protocol):
         environment: TaskEnvironmentSpec,
         request: TaskExecutionRequest,
         console: Console | None = None,
+        monitor: "Monitor | None" = None,
+        task_id: str | None = None,
     ) -> TaskExecutionResult: ...

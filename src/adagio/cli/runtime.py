@@ -10,6 +10,7 @@ from rich.console import Console
 
 from ..executors.cache_support import (
     CACHE_DIR_HELP,
+    RECYCLE_POOL_HELP,
     REUSE_HELP,
     resolve_cache_config,
 )
@@ -62,6 +63,30 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         help=REUSE_HELP,
     )
     parser.add_argument(
+        "--recycle-pool",
+        required=False,
+        default=None,
+        help=RECYCLE_POOL_HELP,
+    )
+    parser.add_argument(
+        "--log-dir",
+        required=False,
+        default=None,
+        help=(
+            "Directory to copy each task's container log into before the temp "
+            "work dir is torn down. Enables live tail + past-run log fetch."
+        ),
+    )
+    parser.add_argument(
+        "--targets",
+        required=False,
+        default=None,
+        help=(
+            "Comma-separated node ids to produce. The plan is pruned to the "
+            "upstream closure needed for these nodes. Defaults to all nodes."
+        ),
+    )
+    parser.add_argument(
         "--connected",
         action="store_true",
         help="Emit execution status updates to the runtime-adapter.",
@@ -89,7 +114,9 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         cwd=Path.cwd().resolve(),
         cache_dir=opts.cache_dir,
         reuse=opts.reuse,
+        recycle_pool=opts.recycle_pool,
     )
+    target_ids = _parse_targets(opts.targets)
 
     connected = bool(
         opts.connected
@@ -113,6 +140,11 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
             payload={"event": "job_status", "status": "running"},
         )
 
+    # Run-level reproducibility header (design §5.1). adagio_version is cheap;
+    # qiime/plugin versions are intentionally left empty (never import qiime2 in
+    # the host process) and image digests are filled per-task on node events.
+    monitor.report_reproducibility(reproducibility=_build_reproducibility())
+
     from ..executors import select_default_executor
 
     executor = select_default_executor(
@@ -132,6 +164,8 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
             console=console,
             monitor=monitor,
             cache_config=cache_config,
+            target_ids=target_ids,
+            log_dir=opts.log_dir,
         )
     except Exception as exc:  # noqa: BLE001
         if connected and runtime_url and opts.job_id:
@@ -148,6 +182,32 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
                 job_id=opts.job_id,
                 payload={"event": "job_status", "status": "succeeded"},
             )
+
+
+def _parse_targets(raw: str | None) -> set[str] | None:
+    """Parse ``--targets id[,id...]`` into a set of node ids (None => all)."""
+    if not raw:
+        return None
+    ids = {part.strip() for part in raw.split(",") if part.strip()}
+    return ids or None
+
+
+def _build_reproducibility() -> dict[str, Any]:
+    """Assemble the run-level reproducibility header (design §5.1).
+
+    ``adagio_version`` comes from installed metadata. QIIME / plugin versions are
+    deliberately omitted here — importing ``qiime2`` in the host process is
+    forbidden; those live inside the containers. Image digests are resolved
+    per-task and surfaced on node events, so ``image_digests`` starts empty.
+    """
+    from .. import __version__
+
+    return {
+        "adagio_version": __version__,
+        "qiime_version": None,
+        "plugin_versions": {},
+        "image_digests": {},
+    }
 
 
 def _load_json(path: Path) -> Any:

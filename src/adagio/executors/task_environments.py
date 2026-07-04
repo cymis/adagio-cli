@@ -1,3 +1,4 @@
+import inspect
 import os
 import shutil
 from dataclasses import dataclass
@@ -23,7 +24,8 @@ from .base import (
 )
 from .cache_support import ExecutionCacheConfig
 from .path_utils import resolve_output_destination
-from .serial_runner import SerialExecutionState, run_serial_pipeline
+from .serial_runner import SerialExecutionState, TaskOutcome, run_serial_pipeline
+from .signature import compute_input_signature, environment_reference
 from .task_contract import DATA_IMPORT_PLUGIN, build_task_outputs
 
 
@@ -47,6 +49,8 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         console: Console | None = None,
         monitor: Monitor | None = None,
         cache_config: ExecutionCacheConfig | None = None,
+        target_ids: set[str] | None = None,
+        log_dir: str | None = None,
     ) -> None:
         consumer_environments = self._build_consumer_environments(pipeline)
 
@@ -80,6 +84,8 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             console=console,
             monitor=monitor,
             cache_config=cache_config,
+            target_ids=target_ids,
+            log_dir=log_dir,
         )
 
     def _build_consumer_environments(self, pipeline) -> dict[str, TaskEnvironmentSpec]:
@@ -193,7 +199,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         task,
         state: SerialExecutionState,
         console: Console | None,
-    ) -> bool:
+    ) -> "bool | TaskOutcome":
         if isinstance(task, RootInputTask):
             for name, src in task.inputs.items():
                 dst = task.outputs[name]
@@ -291,7 +297,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         task: PluginActionTask,
         state: SerialExecutionState,
         console: Console | None,
-    ) -> bool:
+    ) -> TaskOutcome:
         environment = self._environment_resolver.resolve(task=task)
         launcher = self._launchers.get(environment.kind)
         if launcher is None:
@@ -386,10 +392,34 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                 else None
             ),
         )
-        result = launcher.launch(
+        # Per-node input signature (design §1.5): content-hash file inputs, hash
+        # the resolved params, and pin the environment reference. Best-effort:
+        # never let signature computation fail a task.
+        input_signature: str | None = None
+        try:
+            signature_inputs: dict[str, object] = {}
+            signature_inputs.update(archive_inputs)
+            signature_inputs.update(
+                {name: values for name, values in archive_collection_inputs.items()}
+            )
+            signature_inputs.update(metadata_inputs)
+            input_signature = compute_input_signature(
+                params=resolved_params,
+                inputs=signature_inputs,
+                env=environment_reference(
+                    kind=environment.kind, reference=environment.reference
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            input_signature = None
+
+        result = _launch(
+            launcher,
             environment=environment,
             request=request,
             console=console,
+            monitor=state.monitor,
+            task_id=task.id,
         )
 
         for output_name, dest in task.outputs.items():
@@ -400,7 +430,46 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                 )
             state.scope[dest.id] = actual_path
 
-        return result.reused
+        enrichment: dict[str, object] = {}
+        if input_signature is not None:
+            enrichment["input_signature"] = input_signature
+        if result.command is not None:
+            enrichment["command"] = result.command
+        if result.exit_code is not None:
+            enrichment["exit_code"] = result.exit_code
+        if result.image_ref is not None:
+            enrichment["image_ref"] = result.image_ref
+        if result.image_digest is not None:
+            enrichment["image_digest"] = result.image_digest
+        if result.timings is not None:
+            enrichment["timings"] = dict(result.timings)
+        if result.log_path is not None:
+            enrichment["log_path"] = result.log_path
+        enrichment["reused"] = result.reused
+
+        return TaskOutcome(reused=result.reused, enrichment=enrichment)
+
+
+def _launch(launcher, **kwargs):  # noqa: ANN001, ANN003
+    """Call ``launcher.launch`` passing only the kwargs it accepts.
+
+    The launcher protocol gained optional ``monitor`` / ``task_id`` parameters
+    for fine-phase telemetry. Third-party launchers (and test doubles) written
+    against the older signature do not accept them; filter to the callable's
+    real parameters so those keep working unchanged.
+    """
+    try:
+        signature = inspect.signature(launcher.launch)
+    except (TypeError, ValueError):
+        return launcher.launch(**kwargs)
+    params = signature.parameters
+    accepts_var_kw = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    if accepts_var_kw:
+        return launcher.launch(**kwargs)
+    accepted = {name: value for name, value in kwargs.items() if name in params}
+    return launcher.launch(**accepted)
 
 
 @dataclass(frozen=True)

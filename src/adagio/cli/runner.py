@@ -64,6 +64,9 @@ def run_pipeline_from_kwargs(
 
     cache_dir = kwargs.pop("cache_dir", None)
     reuse = bool(kwargs.pop("reuse", True))
+    recycle_pool = kwargs.pop("recycle_pool", None)
+    log_dir = kwargs.pop("log_dir", None)
+    targets_raw = kwargs.pop("targets", None)
 
     with ExitStack() as exit_stack:
         try:
@@ -178,6 +181,7 @@ def run_pipeline_from_kwargs(
         cwd=Path.cwd().resolve(),
         cache_dir=cache_dir,
         reuse=reuse,
+        recycle_pool=str(recycle_pool) if recycle_pool else None,
     )
 
     if not suppress_header:
@@ -198,11 +202,19 @@ def run_pipeline_from_kwargs(
     if not suppress_header:
         console.print(f"[bold]Executing pipeline[/bold] ({executor.mode_label})")
 
+    target_ids: set[str] | None = None
+    if targets_raw:
+        target_ids = {
+            part.strip() for part in str(targets_raw).split(",") if part.strip()
+        } or None
+
     executor.execute(
         pipeline=parsed_pipeline,
         arguments=arguments,
         console=console,
         cache_config=cache_config,
+        target_ids=target_ids,
+        log_dir=str(log_dir) if log_dir else None,
     )
 
 

@@ -1,7 +1,10 @@
 import subprocess
+import time
 from pathlib import Path
 
 from rich.console import Console
+
+from adagio.monitor.api import Monitor
 
 from .base import (
     TaskEnvironmentLauncher,
@@ -43,8 +46,11 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         environment: TaskEnvironmentSpec,
         request: TaskExecutionRequest,
         console: Console | None = None,
+        monitor: Monitor | None = None,
+        task_id: str | None = None,
     ) -> TaskExecutionResult:
         task = request.task
+        event_task_id = task_id if task_id is not None else task.id
         archive_inputs = {
             name: containerize_host_value(value)
             for name, value in request.archive_inputs.items()
@@ -152,10 +158,23 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         # Pull the image up front (first run only) behind a single line, so the
         # `docker run` below stays quiet instead of dumping the layer-by-layer
         # pull log to the console. Safe because the executor runs tasks serially.
+        pull_started = time.monotonic()
+        if monitor is not None:
+            monitor.pulling_image(
+                task_id=event_task_id, image_ref=environment.reference
+            )
         _ensure_docker_image(
             reference=environment.reference, platform=platform, console=console
         )
+        pull_seconds = time.monotonic() - pull_started
 
+        image_digest = _resolve_image_digest(reference=environment.reference)
+
+        if monitor is not None:
+            monitor.starting_container(
+                task_id=event_task_id, image_ref=environment.reference
+            )
+        run_started = time.monotonic()
         try:
             result = subprocess.run(
                 command,
@@ -168,6 +187,8 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             raise SystemExit(
                 "Docker is required for task environment execution but was not found in PATH."
             ) from exc
+        run_seconds = time.monotonic() - run_started
+        timings = {"pull_seconds": pull_seconds, "run_seconds": run_seconds}
 
         # Capture container output to a per-task log; keep the console clean on
         # success and surface it only when the task fails.
@@ -213,7 +234,49 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 )
             outputs[output_name] = str(host_path_from_container(actual_path))
 
-        return TaskExecutionResult(outputs=outputs, reused=reused)
+        return TaskExecutionResult(
+            outputs=outputs,
+            reused=reused,
+            command=list(command),
+            exit_code=result.returncode,
+            image_ref=environment.reference,
+            image_digest=image_digest,
+            log_path=str(log_path),
+            timings=timings,
+        )
+
+
+def _resolve_image_digest(*, reference: str) -> str | None:
+    """Best-effort resolve an image's repo digest (``sha256:…``).
+
+    Uses ``docker image inspect --format '{{index .RepoDigests 0}}'`` (design
+    §5.1). Returns the ``…@sha256:…`` digest string, or ``None`` when Docker is
+    absent, the image is not present, or it has no repo digest (e.g. built
+    locally). Never raises — enrichment must not break a run.
+    """
+    if is_uri(reference):
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{index .RepoDigests 0}}",
+                reference,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    digest = (result.stdout or "").strip()
+    return digest or None
 
 
 def _ensure_docker_image(

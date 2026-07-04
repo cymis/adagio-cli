@@ -7,6 +7,11 @@ CACHE_DIR_HELP = "Path to the shared QIIME cache directory. Required."
 REUSE_HELP = (
     "Reuse matching prior task results from the selected cache. Enabled by default."
 )
+RECYCLE_POOL_HELP = (
+    "Name of the cache recycle pool to reuse task results from. Defaults to "
+    f"{DEFAULT_RECYCLE_POOL!r}. Lineage-scoped pools (e.g. 'pipeline:<id>' or "
+    "'job:<id>') let separate runs share or isolate their caches."
+)
 
 
 @dataclass(frozen=True)
@@ -20,10 +25,23 @@ def resolve_cache_config(
     cwd: Path,
     cache_dir: str | Path | None,
     reuse: bool,
+    recycle_pool: str | None = None,
 ) -> ExecutionCacheConfig:
+    """Resolve the cache directory and the recycle pool for a run.
+
+    ``recycle_pool`` overrides :data:`DEFAULT_RECYCLE_POOL` when supplied (design
+    §1.6: lineage-scoped pools such as ``pipeline:<id>`` / ``job:<id>``). When
+    ``reuse`` is disabled the pool is always ``None`` regardless of the override.
+    Default behavior (override absent) is unchanged.
+    """
     resolved_cache_dir = resolve_cache_dir_path(cwd=cwd, raw_value=cache_dir)
     resolved_cache_dir.parent.mkdir(parents=True, exist_ok=True)
-    resolved_recycle_pool = DEFAULT_RECYCLE_POOL if reuse else None
+    if not reuse:
+        resolved_recycle_pool = None
+    elif recycle_pool:
+        resolved_recycle_pool = recycle_pool
+    else:
+        resolved_recycle_pool = DEFAULT_RECYCLE_POOL
 
     return ExecutionCacheConfig(
         cache_dir=resolved_cache_dir,

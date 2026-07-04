@@ -1,10 +1,13 @@
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 from rich.console import Console
+
+from adagio.monitor.api import Monitor
 
 from .base import (
     TaskEnvironmentLauncher,
@@ -16,9 +19,11 @@ from .container_support import (
     container_python_root,
     print_filtered_container_stderr,
     python_warning_env_assignments,
+    record_container_output,
 )
 from .task_contract import (
     build_task_spec,
+    container_log_path,
     parse_result_manifest,
     read_json_file,
     result_manifest_path,
@@ -36,8 +41,11 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         environment: TaskEnvironmentSpec,
         request: TaskExecutionRequest,
         console: Console | None = None,
+        monitor: Monitor | None = None,
+        task_id: str | None = None,
     ) -> TaskExecutionResult:
         task = request.task
+        event_task_id = task_id if task_id is not None else task.id
         manifest_path = result_manifest_path(
             task_id=task.id, work_path=request.work_path
         )
@@ -85,6 +93,11 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             if not getattr(console, "_adagio_inline_monitor_active", False):
                 console.print(f"[dim]Task environment:[/dim] {label}")
 
+        if monitor is not None:
+            # Conda has no image to pull; the environment is already resolved on
+            # the host, so we jump straight to the container-start phase.
+            monitor.starting_container(task_id=event_task_id, image_ref=reference)
+        run_started = time.monotonic()
         try:
             result = subprocess.run(
                 command,
@@ -101,6 +114,17 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 "not found in PATH. Set ADAGIO_CONDA_EXE or conda_executable in "
                 "the runtime config."
             ) from exc
+        run_seconds = time.monotonic() - run_started
+
+        # Persist the conda subprocess output to a per-task log so it matches the
+        # docker/apptainer launchers and can be copied out by ``--log-dir``.
+        # Previously conda wrote no container log at all.
+        log_path = container_log_path(task_id=task.id, work_path=request.work_path)
+        record_container_output(
+            log_path=log_path,
+            stdout_text=result.stdout or "",
+            stderr_text=result.stderr or "",
+        )
 
         if console is not None:
             print_filtered_container_stderr(
@@ -138,7 +162,15 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 )
             outputs[output_name] = actual_path
 
-        return TaskExecutionResult(outputs=outputs, reused=reused)
+        return TaskExecutionResult(
+            outputs=outputs,
+            reused=reused,
+            command=list(command),
+            exit_code=result.returncode,
+            image_ref=reference,
+            log_path=str(log_path),
+            timings={"run_seconds": run_seconds},
+        )
 
 
 def _conda_environment_selector(*, environment: TaskEnvironmentSpec) -> tuple[str, str]:

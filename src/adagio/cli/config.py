@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 
@@ -77,11 +78,33 @@ def load_run_config(path: Path | None) -> AdagioRunConfig | None:
     if path is None:
         return None
 
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    data = _parse_config_text(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise SystemExit("Invalid config file: expected a TOML table.")
+        raise SystemExit("Invalid config file: expected a TOML table or JSON object.")
 
     return AdagioRunConfig.model_validate(data)
+
+
+def _parse_config_text(text: str) -> Any:
+    """Parse a runtime config as TOML *or* JSON (auto-detect).
+
+    The runtime launch contract lets an adapter hand the CLI a valid
+    ``AdagioRunConfig`` serialized as either TOML or JSON (design §5.7). A JSON
+    document (leading ``{``/``[``) parses cleanly as JSON but not as TOML, so we
+    sniff the first non-whitespace character and prefer JSON there; otherwise we
+    parse TOML. Existing TOML behavior is unchanged — a TOML config never starts
+    with ``{``/``[`` at document scope (``[table]`` headers do, so we fall back
+    to TOML on JSON-parse failure to stay safe).
+    """
+    stripped = text.lstrip()
+    if stripped[:1] in ("{", "["):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # A TOML file legitimately begins with an ``[table]`` header; fall
+            # through to the TOML parser rather than failing outright.
+            pass
+    return tomllib.loads(text)
 
 
 def default_environment_override(

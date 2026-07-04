@@ -49,6 +49,61 @@ def plan_execution_order(
     return planned
 
 
+def prune_to_targets(
+    *,
+    execution_plan: list[t.Any],
+    target_ids: set[str],
+) -> list[t.Any]:
+    """Prune a topologically ordered plan to the closure needed for ``target_ids``.
+
+    ``target_ids`` are node ids the caller wants produced (design §5.6). A task
+    is retained when it (a) produces one of the target ids via an ``outputs``
+    entry, (b) *is* one of the target ids, or (c) is required upstream to produce
+    a retained task's inputs. Serial engine only; input order (already
+    dependency-respecting) is preserved.
+
+    v1 callers pass *all* node ids, so this is a no-op then; it must be correct
+    when a strict subset is given.
+    """
+    if not target_ids:
+        return execution_plan
+
+    # Map each element id an output produces -> the task that produces it.
+    producer_of: dict[str, t.Any] = {}
+    for task in execution_plan:
+        for output in task.outputs.values():
+            producer_of[output.id] = task
+
+    needed_task_ids: set[str] = set()
+    frontier: list[str] = []
+
+    def _need(task: t.Any) -> None:
+        if task.id not in needed_task_ids:
+            needed_task_ids.add(task.id)
+            frontier.append(task.id)
+
+    task_by_id = {task.id: task for task in execution_plan}
+
+    # Seed from targets: a target may be a task id or an output element id.
+    for target in target_ids:
+        if target in task_by_id:
+            _need(task_by_id[target])
+        producer = producer_of.get(target)
+        if producer is not None:
+            _need(producer)
+
+    # Walk upstream: pull in the producers of every retained task's inputs.
+    while frontier:
+        task = task_by_id[frontier.pop()]
+        for src in task.inputs.values():
+            for source_id in input_source_ids(src):
+                producer = producer_of.get(source_id)
+                if producer is not None:
+                    _need(producer)
+
+    return [task for task in execution_plan if task.id in needed_task_ids]
+
+
 def task_label(task: t.Any) -> str:
     kind = getattr(task, "kind", "unknown")
     task_id = getattr(task, "id", "<unknown>")
