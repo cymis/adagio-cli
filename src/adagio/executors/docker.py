@@ -1,3 +1,4 @@
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -114,6 +115,13 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         ]
         if platform:
             command.extend(["--platform", platform])
+        # Label per-task containers with the runtime job id (design §8) so the
+        # adapter's cancel path can `docker kill` them by
+        # ``adagio.job_id={job_id}``. The adapter exports RUNTIME_JOB_ID when it
+        # spawns the CLI; standalone runs have no job id and get no label.
+        runtime_job_id = os.getenv("RUNTIME_JOB_ID")
+        if runtime_job_id:
+            command.extend(["--label", f"adagio.job_id={runtime_job_id}"])
         command.extend([
             environment.reference,
             "python",

@@ -133,17 +133,26 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
             ConnectedMonitor(runtime_url=runtime_url, job_id=opts.job_id or ""),
         )
 
-    if connected and runtime_url and opts.job_id:
-        _post_job_event(
-            runtime_url=runtime_url,
-            job_id=opts.job_id,
-            payload={"event": "job_status", "status": "running"},
-        )
-
     # Run-level reproducibility header (design §5.1). adagio_version is cheap;
     # qiime/plugin versions are intentionally left empty (never import qiime2 in
     # the host process) and image digests are filled per-task on node events.
-    monitor.report_reproducibility(reproducibility=_build_reproducibility())
+    reproducibility = _build_reproducibility()
+
+    if connected and runtime_url and opts.job_id:
+        # The adapter captures the reproducibility header from ``job_status``
+        # events (its relay ignores unknown event types), so it rides on the
+        # initial "running" post rather than only on the monitor event below.
+        _post_job_event(
+            runtime_url=runtime_url,
+            job_id=opts.job_id,
+            payload={
+                "event": "job_status",
+                "status": "running",
+                "reproducibility": reproducibility,
+            },
+        )
+
+    monitor.report_reproducibility(reproducibility=reproducibility)
 
     from ..executors import select_default_executor
 
@@ -423,11 +432,17 @@ def _post_job_event(*, runtime_url: str, job_id: str, payload: dict[str, Any]) -
     base = runtime_url.rstrip("/")
     url = f"{base}/jobs/{job_id}/events"
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    # Connected posts gain optional Authorization from RUNTIME_TOKEN (design
+    # §5.2), matching ConnectedMonitor's transport.
+    token = os.getenv("RUNTIME_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         url,
         data=data,
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=5):

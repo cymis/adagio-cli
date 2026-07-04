@@ -117,6 +117,11 @@ class ExecutorEnrichmentTests(unittest.TestCase):
         self.assertTrue(enrichment["input_signature"].startswith("sha256:"))
         self.assertIn("timings", enrichment)
         self.assertIsInstance(enrichment["command"], list)
+        # Minimal NodeResources block derived from the run timing.
+        self.assertEqual(
+            enrichment["resources"],
+            {"wall_seconds": enrichment["timings"]["run_seconds"]},
+        )
 
         emitted = [name for name, _ in monitor.events]
         self.assertEqual(emitted, ["pulling_image", "starting_container"])

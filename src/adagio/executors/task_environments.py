@@ -443,6 +443,12 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             enrichment["image_digest"] = result.image_digest
         if result.timings is not None:
             enrichment["timings"] = dict(result.timings)
+            # Minimal resources block (design §4.2 NodeResources): wall time is
+            # the only value the host can measure honestly for every launcher.
+            # peak_rss/cpu/disk stay unset until in-container measurement lands.
+            run_seconds = result.timings.get("run_seconds")
+            if isinstance(run_seconds, (int, float)):
+                enrichment["resources"] = {"wall_seconds": float(run_seconds)}
         if result.log_path is not None:
             enrichment["log_path"] = result.log_path
         enrichment["reused"] = result.reused

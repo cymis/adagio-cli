@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -127,6 +128,113 @@ class DockerLauncherTests(unittest.TestCase):
             )
             self.assertEqual(result.outputs, {"visualization": str(output_path)})
             self.assertFalse(result.reused)
+
+    def test_launch_labels_container_with_runtime_job_id(self) -> None:
+        # Design §8: the adapter cancels a job's per-task containers via
+        # `docker kill --filter label=adagio.job_id={id}`; the launcher must
+        # stamp the label when RUNTIME_JOB_ID is set (adapter-spawned runs).
+        launcher = DockerTaskEnvironmentLauncher()
+        task = _task()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            cwd = root / "cwd"
+            work_path = root / "work"
+            cwd.mkdir()
+            work_path.mkdir()
+            output_path = work_path / "summary.qzv"
+            manifest_path = result_manifest_path(task_id=task.id, work_path=work_path)
+
+            request = TaskExecutionRequest(
+                task=task,
+                cwd=cwd,
+                work_path=work_path,
+                archive_inputs={},
+                archive_collection_inputs={},
+                metadata_inputs={},
+                params={},
+                metadata_column_kwargs={},
+                outputs={"visualization": str(output_path)},
+            )
+
+            def fake_run(cmd, check, stdout, stderr, text):  # noqa: ANN001
+                write_json_file(
+                    manifest_path,
+                    build_result_manifest(
+                        outputs={"visualization": containerize_path(output_path)},
+                        reused=False,
+                    ),
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with patch(
+                "adagio.executors.docker.subprocess.run",
+                side_effect=fake_run,
+            ) as run_mock, patch.dict(
+                "os.environ", {"RUNTIME_JOB_ID": "job-42"}
+            ):
+                launcher.launch(
+                    environment=TaskEnvironmentSpec(
+                        kind="docker", reference="img:test"
+                    ),
+                    request=request,
+                )
+
+            command = run_mock.call_args.args[0]
+            label_index = command.index("--label")
+            self.assertEqual(command[label_index + 1], "adagio.job_id=job-42")
+            # The label must precede the image reference (docker run flag order).
+            self.assertLess(label_index, command.index("img:test"))
+
+    def test_launch_has_no_label_without_runtime_job_id(self) -> None:
+        launcher = DockerTaskEnvironmentLauncher()
+        task = _task()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            cwd = root / "cwd"
+            work_path = root / "work"
+            cwd.mkdir()
+            work_path.mkdir()
+            output_path = work_path / "summary.qzv"
+            manifest_path = result_manifest_path(task_id=task.id, work_path=work_path)
+
+            request = TaskExecutionRequest(
+                task=task,
+                cwd=cwd,
+                work_path=work_path,
+                archive_inputs={},
+                archive_collection_inputs={},
+                metadata_inputs={},
+                params={},
+                metadata_column_kwargs={},
+                outputs={"visualization": str(output_path)},
+            )
+
+            def fake_run(cmd, check, stdout, stderr, text):  # noqa: ANN001
+                write_json_file(
+                    manifest_path,
+                    build_result_manifest(
+                        outputs={"visualization": containerize_path(output_path)},
+                        reused=False,
+                    ),
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            env = {k: v for k, v in os.environ.items() if k != "RUNTIME_JOB_ID"}
+            with patch(
+                "adagio.executors.docker.subprocess.run",
+                side_effect=fake_run,
+            ) as run_mock, patch.dict("os.environ", env, clear=True):
+                launcher.launch(
+                    environment=TaskEnvironmentSpec(
+                        kind="docker", reference="img:test"
+                    ),
+                    request=request,
+                )
+
+            command = run_mock.call_args.args[0]
+            self.assertNotIn("--label", command)
 
     def test_launch_mounts_manifest_referenced_fastq_roots(self) -> None:
         launcher = DockerTaskEnvironmentLauncher()

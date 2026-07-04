@@ -8,7 +8,6 @@ from unittest.mock import patch
 from adagio.executors.base import TaskEnvironmentSpec, TaskExecutionRequest
 from adagio.executors.conda import CondaTaskEnvironmentLauncher
 from adagio.executors.serial_runner import (
-    SerialExecutionState,
     TaskOutcome,
     run_serial_pipeline,
 )
