@@ -1,4 +1,5 @@
 import os
+import platform as _platform
 import subprocess
 import time
 from pathlib import Path
@@ -6,6 +7,21 @@ from pathlib import Path
 from rich.console import Console
 
 from adagio.monitor.api import Monitor
+
+
+def _host_platform_default() -> str | None:
+    """Return a default ``--platform`` for the host, or None to run natively.
+
+    The default plugin images are ``linux/amd64``. On a non-amd64 host (e.g.
+    Apple Silicon ``arm64``) we request ``linux/amd64`` so Docker runs the image
+    under emulation deterministically rather than emitting a platform-mismatch
+    warning. amd64 hosts get None (native). Users can override per-node via the
+    env config ``platform`` field for genuinely multi-arch images.
+    """
+    machine = _platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return None
+    return "linux/amd64"
 
 from .base import (
     TaskEnvironmentLauncher,
@@ -99,6 +115,13 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             raw_platform = environment.options.get("platform")
             if isinstance(raw_platform, str) and raw_platform:
                 platform = raw_platform
+        if platform is None:
+            # No explicit platform: adapt to the host. The default plugin images
+            # are linux/amd64; on a non-amd64 host (e.g. Apple Silicon arm64)
+            # request linux/amd64 so Docker runs it under emulation determinist-
+            # ically instead of emitting a platform-mismatch warning. amd64 hosts
+            # run natively (no flag). Override per-node via env config `platform`.
+            platform = _host_platform_default()
 
         command = [
             "docker",

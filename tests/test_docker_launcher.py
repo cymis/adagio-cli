@@ -319,3 +319,19 @@ def _foreign_root(path: Path) -> Path:
         if root.exists():
             return root
     raise unittest.SkipTest("No foreign top-level root available on this host.")
+
+
+class HostPlatformDefaultTests(unittest.TestCase):
+    """The docker launcher adapts --platform to the host when unspecified."""
+
+    def test_amd64_host_runs_native(self):
+        from adagio.executors import docker
+
+        with patch.object(docker._platform, "machine", return_value="x86_64"):
+            self.assertIsNone(docker._host_platform_default())
+
+    def test_arm64_host_requests_amd64(self):
+        from adagio.executors import docker
+
+        with patch.object(docker._platform, "machine", return_value="arm64"):
+            self.assertEqual(docker._host_platform_default(), "linux/amd64")
