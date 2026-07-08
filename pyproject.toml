@@ -33,7 +33,6 @@ dependencies = [
   "cyclopts>=4.5.3",
   "pydantic>=2.12.5",
   "rich>=14.1.0",
-  "parsl>=2024.12.16",
   "tomli>=2.2.1; python_version < '3.11'",
 ]
 
