@@ -24,6 +24,7 @@ from .container_support import (
     print_filtered_container_stderr,
     python_warning_env_assignments,
     record_container_output,
+    signal_task_running,
     with_apptainer_binds,
 )
 from .task_contract import (
@@ -155,6 +156,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             monitor.starting_container(
                 task_id=event_task_id, image_ref=str(image_path)
             )
+        signal_task_running(monitor=monitor, event_task_id=event_task_id)
         run_started = time.monotonic()
         try:
             result = subprocess.run(

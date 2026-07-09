@@ -20,6 +20,7 @@ from .container_support import (
     print_filtered_container_stderr,
     python_warning_env_assignments,
     record_container_output,
+    signal_task_running,
 )
 from .task_contract import (
     build_task_spec,
@@ -97,6 +98,7 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             # Conda has no image to pull; the environment is already resolved on
             # the host, so we jump straight to the container-start phase.
             monitor.starting_container(task_id=event_task_id, image_ref=reference)
+        signal_task_running(monitor=monitor, event_task_id=event_task_id)
         run_started = time.monotonic()
         try:
             result = subprocess.run(

@@ -41,6 +41,7 @@ from .container_support import (
     print_filtered_container_stderr,
     python_warning_env_flags,
     record_container_output,
+    signal_task_running,
     with_mounts,
 )
 from .task_contract import (
@@ -205,6 +206,7 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             monitor.starting_container(
                 task_id=event_task_id, image_ref=environment.reference
             )
+        signal_task_running(monitor=monitor, event_task_id=event_task_id)
         run_started = time.monotonic()
         try:
             result = subprocess.run(

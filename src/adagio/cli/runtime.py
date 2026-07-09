@@ -109,14 +109,14 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         runtime_arguments=runtime_arguments,
         output_dir=output_dir,
     )
-    _validate_required_arguments(pipeline, arguments)
+    target_ids = _parse_targets(opts.targets)
+    _validate_required_arguments(pipeline, arguments, target_ids=target_ids)
     cache_config = resolve_cache_config(
         cwd=Path.cwd().resolve(),
         cache_dir=opts.cache_dir,
         reuse=opts.reuse,
         recycle_pool=opts.recycle_pool,
     )
-    target_ids = _parse_targets(opts.targets)
 
     connected = bool(
         opts.connected
@@ -409,18 +409,31 @@ def _is_missing(value: Any) -> bool:
 
 
 def _validate_required_arguments(
-    pipeline: AdagioPipeline, arguments: AdagioArguments
+    pipeline: AdagioPipeline,
+    arguments: AdagioArguments,
+    target_ids: set[str] | None = None,
 ) -> None:
+    sig = pipeline.signature
+
+    # For a partial run, only require the inputs/params the target closure
+    # actually consumes — a downstream target must not demand root inputs that
+    # feed unrelated branches (that SystemExit'd valid partial runs before any
+    # node reported, leaving the editor stuck on yellow). None => require all.
+    needed_input_ids, needed_param_ids = _closure_argument_ids(pipeline, target_ids)
+
     missing_inputs = [
         input_def.name
-        for input_def in pipeline.signature.inputs
-        if input_def.required and _is_missing(arguments.inputs.get(input_def.name))
+        for input_def in sig.inputs
+        if input_def.required
+        and (needed_input_ids is None or input_def.id in needed_input_ids)
+        and _is_missing(arguments.inputs.get(input_def.name))
     ]
     missing_params = [
         param.name
-        for param in pipeline.signature.parameters
+        for param in sig.parameters
         if param.required
         and param.default is None
+        and (needed_param_ids is None or param.id in needed_param_ids)
         and _is_missing(arguments.parameters.get(param.name))
     ]
 
@@ -429,6 +442,42 @@ def _validate_required_arguments(
             f"param:{name}" for name in missing_params
         ]
         raise SystemExit("Missing required runtime arguments: " + ", ".join(missing))
+
+
+def _closure_argument_ids(
+    pipeline: AdagioPipeline, target_ids: set[str] | None
+) -> tuple[set[str] | None, set[str] | None]:
+    """Pipeline input ids + param ids the ``target_ids`` closure consumes.
+
+    Returns ``(None, None)`` for a full run (require everything). For a partial
+    run, walks the same target closure the executor runs (``prune_to_targets``)
+    and collects the signature input ids (a RootInputTask's input src.id equals
+    the pipeline input id) and promoted param ids those tasks reference.
+    """
+    if not target_ids:
+        return None, None
+
+    from ..executors.common import prune_to_targets
+    from ..model.task import input_source_ids
+
+    closure = prune_to_targets(
+        execution_plan=list(pipeline.iter_tasks()), target_ids=target_ids
+    )
+    input_ids: set[str] = set()
+    param_ids: set[str] = set()
+    for task in closure:
+        for src in task.inputs.values():
+            for source_id in input_source_ids(src):
+                input_ids.add(source_id)
+        for param in task.parameters.values():
+            kind = getattr(param, "kind", None)
+            if kind == "promoted":
+                param_ids.add(param.id)
+            elif kind == "metadata":
+                column = getattr(param, "column", None)
+                if getattr(column, "kind", None) == "promoted":
+                    param_ids.add(column.id)
+    return input_ids, param_ids
 
 
 def _post_job_event(*, runtime_url: str, job_id: str, payload: dict[str, Any]) -> None:

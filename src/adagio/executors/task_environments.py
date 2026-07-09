@@ -559,7 +559,14 @@ def _save_outputs(
         if output.id in state.saved_output_ids:
             continue
         if output.id not in state.scope:
-            if require_all:
+            # ``require_all`` demands a produced value, but for a partial run an
+            # output whose producing task was pruned away is not expected — only
+            # the target closure's outputs (``expected_output_ids``) are.
+            required = require_all and (
+                state.expected_output_ids is None
+                or output.id in state.expected_output_ids
+            )
+            if required:
                 raise KeyError(
                     f"Missing output value for {output.name!r} ({output.id})."
                 )

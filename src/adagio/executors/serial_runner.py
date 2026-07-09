@@ -46,6 +46,11 @@ class SerialExecutionState:
     missing_optional_ids: set[str] = field(default_factory=set)
     saved_output_ids: set[str] = field(default_factory=set)
     save_output_started: bool = False
+    # For a partial (``target_ids``) run, the pipeline outputs the pruned plan
+    # is actually expected to produce. The terminal ``require_all`` save only
+    # demands these — outputs whose producing task was pruned away are not
+    # required (they were never meant to run). ``None`` => full run, require all.
+    expected_output_ids: set[str] | None = None
     # Set per task by ``resolve_task`` so the runner can copy the container log
     # out to ``--log-dir`` before the temp work dir is torn down (design §5.5).
     log_dir: Path | None = None
@@ -122,6 +127,22 @@ def run_serial_pipeline(
                 execution_plan=execution_plan, target_ids=state.target_ids
             )
         planned_task_ids = {task.id for task in execution_plan}
+
+        # A partial run only produces the outputs of its pruned plan, so the
+        # terminal require_all save must not demand outputs from pruned tasks
+        # (that KeyError'd every editor "run node"). Full runs keep None and
+        # still require every signature output.
+        if state.target_ids:
+            producer_task_of_output = {
+                output.id: task.id
+                for task in tasks
+                for output in task.outputs.values()
+            }
+            state.expected_output_ids = {
+                out.id
+                for out in sig.outputs
+                if producer_task_of_output.get(out.id) in planned_task_ids
+            }
 
         for task in execution_plan:
             active_monitor.queue_task(

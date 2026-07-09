@@ -12,6 +12,19 @@ HOST_MOUNT_POINT = "/host"
 STAGED_CONTAINER_PYTHON_ROOT = ".adagio-container-python"
 
 
+def signal_task_running(*, monitor: Any, event_task_id: str) -> None:
+    """Tick a task to the ``running`` phase just before the blocking launch.
+
+    The launchers emit ``starting_container`` and then block in
+    ``subprocess.run`` for the task's whole execution, so monitors (connected
+    step list, node cards) would sit on "starting container" until
+    ``task_finished``. A zero-advance progress tick moves the phase to
+    ``running`` without disturbing console progress bars.
+    """
+    if monitor is not None:
+        monitor.advance_task(task_id=event_task_id, advance=0, message="Running task")
+
+
 def with_mounts(*, command: list[str], host_paths: list[Path]) -> list[str]:
     """Attach bind mounts for top-level host roots needed by this execution."""
     roots = mount_roots(host_paths)
