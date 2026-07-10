@@ -9,6 +9,7 @@ from rich.text import Text
 from .executors.common import plan_execution_order
 from .model.pipeline import AdagioPipeline
 from .model.task import (
+    DataImportTask,
     LiteralVal,
     MetadataVal,
     PluginActionTask,
@@ -71,6 +72,10 @@ def render_pipeline_text(
     for task in execution_plan:
         if isinstance(task, RootInputTask):
             _record_root_input_outputs(task=task, available_ids=available_ids)
+            continue
+
+        if isinstance(task, DataImportTask):
+            _record_data_import_outputs(task=task, available_ids=available_ids)
             continue
 
         if not isinstance(task, PluginActionTask):
@@ -421,6 +426,35 @@ def _record_root_input_outputs(
             source.id,
             _unknown_reference(source.id),
         )
+
+
+def _record_data_import_outputs(
+    *,
+    task: DataImportTask,
+    available_ids: dict[str, _DisplayRef],
+) -> None:
+    semantic_type = _literal_parameter(task, "semantic_type")
+    source = task.inputs.get("source")
+    source_ref = (
+        available_ids.get(source.id, _unknown_reference(source.id))
+        if source is not None
+        else None
+    )
+    user_description = _clean_description(task.user_description)
+    for output in task.outputs.values():
+        available_ids[output.id] = _DisplayRef(
+            label="data import",
+            type_label=_format_spec_type(semantic_type),
+            description=source_ref.description if source_ref is not None else None,
+            user_description=user_description,
+        )
+
+
+def _literal_parameter(task: DataImportTask, name: str) -> str | None:
+    parameter = task.parameters.get(name)
+    if isinstance(parameter, LiteralVal):
+        return str(parameter.value)
+    return None
 
 
 def _output_annotation(*, output_name: str, output_id: str) -> str | None:

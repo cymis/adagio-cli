@@ -13,6 +13,7 @@ from ..app.parsers.pipeline import Output as OutputSpec
 from ..app.parsers.pipeline import Parameter as ParamSpec
 from ..executors.cache_support import (
     CACHE_DIR_HELP,
+    RECYCLE_POOL_HELP,
     REUSE_HELP,
 )
 from ..type_format import (
@@ -288,6 +289,9 @@ def build_dynamic_run(
         "--reuse",
         "--no-reuse",
         "--output-dir",
+        "--recycle-pool",
+        "--log-dir",
+        "--targets",
     }
     argument_inputs = argument_inputs or {}
     argument_params = argument_params or {}
@@ -358,6 +362,36 @@ def build_dynamic_run(
             help="Directory for all pipeline outputs.",
         ),
     ]
+    annotations["recycle_pool"] = Annotated[
+        str | None,
+        CliParameter(
+            name=("--recycle-pool",),
+            group=command_group,
+            help=RECYCLE_POOL_HELP,
+        ),
+    ]
+    annotations["log_dir"] = Annotated[
+        Path | None,
+        CliParameter(
+            name=("--log-dir",),
+            group=command_group,
+            help=(
+                "Directory to copy each task's container log into before the "
+                "temp work dir is torn down."
+            ),
+        ),
+    ]
+    annotations["targets"] = Annotated[
+        str | None,
+        CliParameter(
+            name=("--targets",),
+            group=command_group,
+            help=(
+                "Comma-separated node ids to produce; the plan is pruned to "
+                "their upstream closure. Defaults to all nodes."
+            ),
+        ),
+    ]
 
     parameters: list[inspect.Parameter] = [
         inspect.Parameter(
@@ -399,6 +433,24 @@ def build_dynamic_run(
             kind=inspect.Parameter.KEYWORD_ONLY,
             default=None,
             annotation=annotations["output_dir"],
+        ),
+        inspect.Parameter(
+            name="recycle_pool",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation=annotations["recycle_pool"],
+        ),
+        inspect.Parameter(
+            name="log_dir",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation=annotations["log_dir"],
+        ),
+        inspect.Parameter(
+            name="targets",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation=annotations["targets"],
         ),
     ]
 
@@ -567,10 +619,16 @@ def build_dynamic_run(
         show_params: ShowParamsMode = ShowParamsMode.REQUIRED,
         config_file: Path | None = None,
         output_dir: Path | None = None,
+        recycle_pool: str | None = None,
+        log_dir: Path | None = None,
+        targets: str | None = None,
         **kwargs: Any,
     ) -> None:
         _ = show_params
         kwargs["output_dir"] = output_dir
+        kwargs["recycle_pool"] = recycle_pool
+        kwargs["log_dir"] = log_dir
+        kwargs["targets"] = targets
         run_handler(
             pipeline,
             arguments_file,

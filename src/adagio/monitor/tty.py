@@ -2,6 +2,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from rich.console import Console
 from rich.control import Control
@@ -91,8 +92,9 @@ class RichMonitor(Monitor):
             self._task_order.append(task_id)
             self._print_row(self._render_row(state))
 
-    def start_task(self, *, task_id: str) -> None:
+    def start_task(self, *, task_id: str, **details: Any) -> None:
         """Mark a task as running."""
+        del details
         with self._lock:
             task = self._task_lookup.get(task_id)
             if task is None:
@@ -116,9 +118,15 @@ class RichMonitor(Monitor):
             self._refresh_row(task)
 
     def finish_task(
-        self, *, task_id: str, status: str = "completed", error: str | None = None
+        self,
+        *,
+        task_id: str,
+        status: str = "completed",
+        error: str | None = None,
+        **details: Any,
     ) -> None:
         """Mark a task as finished."""
+        del details
         with self._lock:
             task = self._task_lookup.get(task_id)
             if task is None:

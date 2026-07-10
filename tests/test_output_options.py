@@ -137,7 +137,7 @@ class OutputOptionTests(unittest.TestCase):
 
         self.assertEqual(output_dir_group[0]._name, "Command Options")
         self.assertEqual(
-            list(dynamic_run.__signature__.parameters)[:7],
+            list(dynamic_run.__signature__.parameters)[:10],
             [
                 "pipeline",
                 "cache_dir",
@@ -146,10 +146,13 @@ class OutputOptionTests(unittest.TestCase):
                 "config_file",
                 "reuse",
                 "output_dir",
+                "recycle_pool",
+                "log_dir",
+                "targets",
             ],
         )
         self.assertEqual(
-            list(dynamic_run.__signature__.parameters)[7:],
+            list(dynamic_run.__signature__.parameters)[10:],
             [
                 "input_seqs",
                 "param_metric",

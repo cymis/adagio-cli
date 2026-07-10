@@ -34,6 +34,18 @@ def _task() -> PluginActionTask:
     )
 
 
+def _foreign_root(path: Path) -> Path:
+    """A first-level filesystem root that exists and differs from ``path``'s."""
+    excluded = path.parts[1] if len(path.parts) > 1 else None
+    for candidate in ("usr", "bin", "etc", "opt", "var", "lib"):
+        if candidate == excluded:
+            continue
+        root = Path("/", candidate)
+        if root.exists():
+            return root
+    raise unittest.SkipTest("No foreign top-level root available on this host.")
+
+
 class ApptainerLauncherTests(unittest.TestCase):
     def test_launch_builds_apptainer_exec_command(self) -> None:
         launcher = ApptainerTaskEnvironmentLauncher()
@@ -181,6 +193,89 @@ class ApptainerLauncherTests(unittest.TestCase):
 
         command = run_mock.call_args.args[0]
         self.assertEqual(command[0], "/usr/bin/singularity")
+
+    def test_launch_mounts_manifest_referenced_fastq_roots(self) -> None:
+        launcher = ApptainerTaskEnvironmentLauncher()
+        task = _task()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            cwd = root / "cwd"
+            work_path = root / "work"
+            cwd.mkdir()
+            work_path.mkdir()
+            image_path = root / "q2-dada2.sif"
+            image_path.write_text("stub", encoding="utf-8")
+            output_path = work_path / "table.qza"
+
+            # The manifest lives under the cwd, but the fastqs it points at live
+            # under a *different* top-level root that nothing else binds.
+            fastq_root = _foreign_root(cwd)
+            manifest_path = cwd / "manifest.tsv"
+            manifest_path.write_text(
+                "sample-id\tforward-absolute-filepath\treverse-absolute-filepath\n"
+                f"sample1\t{fastq_root}/adagio-reads/s1_R1.fastq.gz"
+                f"\t{fastq_root}/adagio-reads/s1_R2.fastq.gz\n",
+                encoding="utf-8",
+            )
+
+            request = TaskExecutionRequest(
+                task=task,
+                cwd=cwd,
+                work_path=work_path,
+                archive_inputs={"seqs": str(manifest_path)},
+                archive_collection_inputs={},
+                metadata_inputs={},
+                params={},
+                metadata_column_kwargs={},
+                outputs={"table": str(output_path)},
+                archive_input_materializations={
+                    "seqs": {
+                        "mode": "raw",
+                        "semantic_type": (
+                            "SampleData[PairedEndSequencesWithQuality]"
+                        ),
+                        "input_format": "PairedEndFastqManifestPhred33V2",
+                        "validate_level": "max",
+                    }
+                },
+            )
+
+            result_path = result_manifest_path(task_id=task.id, work_path=work_path)
+
+            def fake_run(cmd, check, stdout, stderr, text):  # noqa: ANN001
+                write_json_file(
+                    result_path,
+                    build_result_manifest(
+                        outputs={"table": containerize_path(output_path)},
+                        reused=False,
+                    ),
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with (
+                patch(
+                    "adagio.executors.apptainer.shutil.which",
+                    side_effect=["/usr/bin/apptainer", None],
+                ),
+                patch(
+                    "adagio.executors.apptainer.subprocess.run",
+                    side_effect=fake_run,
+                ) as run_mock,
+            ):
+                launcher.launch(
+                    environment=TaskEnvironmentSpec(
+                        kind="apptainer",
+                        reference=str(image_path),
+                    ),
+                    request=request,
+                )
+
+        command = run_mock.call_args.args[0]
+        fastq_bind = f"{fastq_root}:{containerize_path(fastq_root)}:rw"
+        self.assertIn(fastq_bind, command)
+        # The fastq root genuinely differs from the cwd's top-level root.
+        self.assertNotEqual(fastq_root.parts[1], cwd.parts[1])
 
     def test_launch_rejects_non_local_image_reference(self) -> None:
         launcher = ApptainerTaskEnvironmentLauncher()

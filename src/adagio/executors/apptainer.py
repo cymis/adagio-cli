@@ -1,8 +1,11 @@
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from rich.console import Console
+
+from adagio.monitor.api import Monitor
 
 from .base import (
     TaskEnvironmentLauncher,
@@ -17,12 +20,16 @@ from .container_support import (
     containerize_path,
     host_path_from_container,
     is_uri,
+    manifest_referenced_host_paths,
     print_filtered_container_stderr,
     python_warning_env_assignments,
+    record_container_output,
+    signal_task_running,
     with_apptainer_binds,
 )
 from .task_contract import (
     build_task_spec,
+    container_log_path,
     parse_result_manifest,
     read_json_file,
     result_manifest_path,
@@ -40,11 +47,14 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         environment: TaskEnvironmentSpec,
         request: TaskExecutionRequest,
         console: Console | None = None,
+        monitor: Monitor | None = None,
+        task_id: str | None = None,
     ) -> TaskExecutionResult:
         image_path = _resolve_sif_image(environment.reference)
         runtime_executable = _resolve_runtime_executable()
 
         task = request.task
+        event_task_id = task_id if task_id is not None else task.id
         archive_inputs = {
             name: containerize_host_value(value)
             for name, value in request.archive_inputs.items()
@@ -70,6 +80,9 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             plugin=task.plugin,
             action=task.action,
             archive_inputs=archive_inputs,
+            archive_input_materializations=(
+                dict(request.archive_input_materializations or {})
+            ),
             archive_collection_inputs=archive_collection_inputs,
             metadata_inputs=metadata_inputs,
             params=dict(request.params),
@@ -108,6 +121,15 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 host_paths.append(path)
         if request.cache_path is not None:
             host_paths.append(mount_path_for_cache(Path(request.cache_path)))
+        # A raw-manifest input points at fastqs by absolute host path; mount the
+        # roots of those interior paths too (they may live off a different root
+        # than the manifest/cwd/cache), so the in-container remap can resolve.
+        host_paths.extend(
+            manifest_referenced_host_paths(
+                archive_inputs=request.archive_inputs,
+                materializations=request.archive_input_materializations,
+            )
+        )
 
         command = with_apptainer_binds(command=command, host_paths=host_paths)
         command.extend(
@@ -130,6 +152,12 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             if not getattr(console, "_adagio_inline_monitor_active", False):
                 console.print(f"[dim]Task environment:[/dim] {label}")
 
+        if monitor is not None:
+            monitor.starting_container(
+                task_id=event_task_id, image_ref=str(image_path)
+            )
+        signal_task_running(monitor=monitor, event_task_id=event_task_id)
+        run_started = time.monotonic()
         try:
             result = subprocess.run(
                 command,
@@ -144,13 +172,20 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 "but was not found in PATH. Ensure the job environment includes the "
                 "Apptainer binary location."
             ) from exc
+        run_seconds = time.monotonic() - run_started
 
-        if console is not None:
-            print_filtered_container_stderr(
-                console=console, stderr_text=result.stderr or ""
-            )
+        log_path = container_log_path(task_id=task.id, work_path=request.work_path)
+        record_container_output(
+            log_path=log_path,
+            stdout_text=result.stdout or "",
+            stderr_text=result.stderr or "",
+        )
 
         if result.returncode != 0:
+            if console is not None:
+                print_filtered_container_stderr(
+                    console=console, stderr_text=result.stderr or ""
+                )
             stdout_text = (result.stdout or "").strip()
             stderr_text = (result.stderr or "").strip()
             if stderr_text:
@@ -181,7 +216,15 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 )
             resolved_outputs[output_name] = str(host_path_from_container(actual_path))
 
-        return TaskExecutionResult(outputs=resolved_outputs, reused=reused)
+        return TaskExecutionResult(
+            outputs=resolved_outputs,
+            reused=reused,
+            command=list(command),
+            exit_code=result.returncode,
+            image_ref=str(image_path),
+            log_path=str(log_path),
+            timings={"run_seconds": run_seconds},
+        )
 
 
 def _resolve_runtime_executable() -> str:

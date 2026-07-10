@@ -21,59 +21,6 @@ class PluginActionTask(_BaseTask):
     action: str
     user_description: str | None = None
 
-    def exec(self, ctx, params, scope):
-        from adagio.io import convert_metadata
-
-        action = ctx.get_action(self.plugin, self.action)
-        kwargs = {}
-        metadata = {}
-        for name, src in self.inputs.items():
-            if src.kind == "archive":
-                if src.id not in scope:
-                    continue
-                kwargs[name] = scope[src.id]
-            elif src.kind == "archive-collection":
-                kwargs[name] = _flatten_collection_values(
-                    [scope[item.id] for item in src.items if item.id in scope]
-                )
-            elif src.kind == "metadata":
-                if src.id not in scope:
-                    continue
-                # store for second pass in params
-                metadata[name] = scope[src.id]
-            else:
-                raise NotImplementedError("impossible")
-
-        for name, param in self.parameters.items():
-            if param.kind == "metadata":
-                if param.column.kind == "literal":
-                    col = param.value
-                elif param.column.kind == "promoted":
-                    col = params[param.column.id]
-                else:
-                    raise NotImplementedError("impossible")
-
-                source = metadata.pop(name)
-                md = convert_metadata(ctx=ctx, metadata=source)
-                kwargs[name] = md.get_column(col)
-
-            elif param.kind == "literal":
-                kwargs[name] = param.value
-
-            elif param.kind == "promoted":
-                kwargs[name] = params[param.id]
-
-            else:
-                raise NotImplementedError("impossible")
-
-        # any remaining metadata is used directly
-        for name, value in metadata.items():
-            kwargs[name] = convert_metadata(ctx=ctx, metadata=value)
-
-        results = action(**kwargs)
-        for name, dest in self.outputs.items():
-            scope[dest.id] = getattr(results, name)
-
 
 class RootInputTask(_BaseTask):
     kind: t.Literal["built-in"]
@@ -95,6 +42,50 @@ class ConvertToMetadataTask(_BaseTask):
         dst = self.outputs["metadata"]
         if src.id in scope:
             scope[dst.id] = scope[src.id]
+
+
+class DataImportTask(_BaseTask):
+    """Import raw (non-QIIME) data into a typed QIIME artifact.
+
+    Emitted by the editor's built-in ``data-import`` node. ``source`` is a raw
+    data path; the ``semantic_type`` / ``input_format`` / ``validate_level``
+    parameters describe how to import it. ``user_description`` mirrors
+    ``PluginActionTask`` so ``pipeline show -v`` surfaces editor-authored notes.
+    """
+
+    kind: t.Literal["built-in"]
+    name: t.Literal["data-import"]
+    user_description: str | None = None
+
+    def _param_value(self, name, params, default=None):
+        param = self.parameters.get(name)
+        if param is None:
+            return default
+        if param.kind == "literal":
+            return param.value
+        if param.kind == "promoted":
+            return params[param.id]
+        raise NotImplementedError(f"Unsupported parameter kind for {name!r}: {param.kind}")
+
+    def exec(self, ctx, params, scope):
+        from qiime2 import Artifact
+
+        src = self.inputs["source"]
+        if src.id not in scope:
+            return
+        source = scope[src.id]
+
+        semantic_type = self._param_value("semantic_type", params)
+        input_format = self._param_value("input_format", params)
+        validate_level = self._param_value("validate_level", params, "max")
+
+        artifact = Artifact.import_data(
+            semantic_type, source, view_type=input_format or None
+        )
+        if validate_level in ("min", "max"):
+            artifact.validate(level=validate_level)
+
+        scope[self.outputs["artifact"].id] = artifact
 
 
 class InputVal(BaseModel):
@@ -144,7 +135,8 @@ TaskInputVal = t.Annotated[
     t.Union[InputVal, ArchiveCollectionInputVal], Field(discriminator="kind")
 ]
 BuiltInTask = t.Annotated[
-    t.Union[RootInputTask, ConvertToMetadataTask], Field(discriminator="name")
+    t.Union[RootInputTask, ConvertToMetadataTask, DataImportTask],
+    Field(discriminator="name"),
 ]
 AdagioTask = t.Annotated[
     t.Union[PluginActionTask, BuiltInTask], Field(discriminator="kind")
@@ -155,15 +147,3 @@ def input_source_ids(value: TaskInputVal) -> list[str]:
     if value.kind == "archive-collection":
         return [item.id for item in value.items]
     return [value.id]
-
-
-def _flatten_collection_values(values: list[t.Any]) -> list[t.Any]:
-    result: list[t.Any] = []
-    for value in values:
-        if isinstance(value, list):
-            result.extend(value)
-        elif isinstance(value, dict):
-            result.extend(value.values())
-        else:
-            result.append(value)
-    return result
