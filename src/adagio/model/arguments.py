@@ -9,6 +9,7 @@ class AdagioArguments(BaseModel):
     inputs: dict[str, InputValue]
     parameters: dict[str, AllowableValue]
     outputs: str | dict[str, str]
+    publish: dict[str, str] = Field(default_factory=dict)
 
     def __repr__(self):
         """Format arguments for display."""
@@ -16,6 +17,7 @@ class AdagioArguments(BaseModel):
             *self._format_repr_sect(self.inputs, 'inputs'),
             *self._format_repr_sect(self.parameters, 'parameters'),
             *self._format_repr_sect(self.outputs, 'outputs'),
+            *self._format_repr_sect(self.publish, 'publish'),
         ])
 
     def _format_repr_sect(self, section, name):
@@ -38,3 +40,4 @@ class AdagioArgumentsFile(BaseModel):
     inputs: dict[str, InputValue] = Field(default_factory=dict)
     parameters: dict[str, AllowableValue] = Field(default_factory=dict)
     outputs: str | dict[str, str] | None = None
+    publish: dict[str, str] = Field(default_factory=dict)

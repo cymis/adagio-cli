@@ -3,11 +3,13 @@ import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from rich.console import Console
 
 from adagio.cli import runtime as runtime_cli
+from adagio.model.arguments import AdagioArguments
 
 
 _SPEC = {
@@ -37,6 +39,27 @@ def _write(root: Path, name: str, payload) -> Path:
 
 
 class RuntimeFlagsTests(unittest.TestCase):
+    def test_publish_paths_are_kept_separate_from_normal_outputs(self) -> None:
+        signature = SimpleNamespace(
+            outputs=[SimpleNamespace(name="table")],
+            to_default_arguments=lambda: AdagioArguments(
+                inputs={}, parameters={}, outputs={"table": "<fill me>"}
+            ),
+        )
+        pipeline = SimpleNamespace(signature=signature)
+
+        arguments = runtime_cli._build_arguments(
+            pipeline=pipeline,
+            runtime_arguments={
+                "inputs": {},
+                "publish": {"table": "/exports/table.qza"},
+            },
+            output_dir="/jobs/current/outputs",
+        )
+
+        self.assertEqual(arguments.outputs, "/jobs/current/outputs")
+        self.assertEqual(arguments.publish, {"table": "/exports/table.qza"})
+
     def _run(self, extra_argv, config_payload):
         console = Console()
         executor = _CapturingExecutor()

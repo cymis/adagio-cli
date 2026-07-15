@@ -120,6 +120,46 @@ class RecordingLauncher:
 
 
 class SerialRunnerOutputTests(unittest.TestCase):
+    def test_publish_copies_output_without_replacing_normal_destination(self) -> None:
+        output_def = FakeOutputDef(id="out-1", name="result")
+        pipeline = FakePipeline(
+            tasks=[FakeTask(id="task-1", outputs={"result": FakeEndpoint("out-1")})],
+            outputs=[output_def],
+        )
+        monitor = RecordingMonitor()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "outputs"
+            publish_path = root / "published" / "named-result"
+            arguments = AdagioArguments(
+                inputs={},
+                parameters={},
+                outputs=str(output_dir),
+                publish={"result": str(publish_path)},
+            )
+
+            def resolve_task(task, state, console):  # noqa: ANN001
+                del task, console
+                produced = state.work_path / "task-result.qza"
+                produced.write_text("published", encoding="utf-8")
+                state.scope["out-1"] = str(produced)
+                return False
+
+            run_serial_pipeline(
+                pipeline=pipeline,
+                arguments=arguments,
+                resolve_task=resolve_task,
+                finish_outputs=_save_outputs,
+                monitor=monitor,
+            )
+
+            normal = output_dir / "result.qza"
+            published = publish_path.with_suffix(".qza")
+            self.assertEqual(normal.read_text(encoding="utf-8"), "published")
+            self.assertEqual(published.read_text(encoding="utf-8"), "published")
+            self.assertEqual(monitor.saved_outputs[0][2], str(normal))
+
     def test_collection_input_manifest_expands_to_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
