@@ -8,6 +8,32 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+## 0.1.0a5 - 2026-07-16
+
+### Added
+
+- Adds catalog pipeline resolution with `@adagio/<slug>` sources, including
+  authenticated GitHub access and local caching for remote pipeline specs.
+- Adds Docker, Apptainer, and existing Conda-environment execution controls,
+  including per-platform image selection and per-task runtime overrides.
+- Adds manifest data imports, target-aware partial runs, structured connected
+  execution events, resource reporting, cancellation, and reproducibility data.
+- Adds optional secondary publish paths for pipeline outputs and user-authored
+  element descriptions in exported pipeline specifications.
+
+### Changed
+
+- Replaces the legacy Parsl path with the task-environment executor and removes
+  Parsl from the package dependencies.
+- Expands automated coverage and runs the release test suite through Nox.
+
+### Fixed
+
+- Treats an empty output mapping as a request to use `--output-dir` defaults.
+- Preserves node logs and reports complete task tracebacks for failed runs.
+- Defaults unspecified Docker platforms to the host architecture and validates
+  partial-run arguments against the selected target subgraph.
+
 ## 0.1.0a4 - 2026-05-01
 
 ### Added
