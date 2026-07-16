@@ -81,6 +81,19 @@ class RecordingMonitor(Monitor):
         self.save_start_count = 0
         self.save_finish_count = 0
         self.saved_outputs: list[tuple[str, str, str, str]] = []
+        self.finished_tasks: list[dict[str, object]] = []
+
+    def finish_task(
+        self,
+        *,
+        task_id: str,
+        status: str = "completed",
+        error: str | None = None,
+        **details,
+    ) -> None:
+        self.finished_tasks.append(
+            {"task_id": task_id, "status": status, "error": error, **details}
+        )
 
     def start_save_output(self) -> None:
         self.save_start_count += 1
@@ -332,6 +345,16 @@ class SerialRunnerOutputTests(unittest.TestCase):
             self.assertEqual(saved_path.read_text(encoding="utf-8"), "done")
             self.assertEqual(monitor.save_start_count, 1)
             self.assertEqual(monitor.save_finish_count, 1)
+            failed = next(
+                event
+                for event in monitor.finished_tasks
+                if event["task_id"] == "task-2"
+            )
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["error"], "task 2 failed")
+            self.assertIn("Traceback (most recent call last):", failed["traceback"])
+            self.assertIn('raise RuntimeError("task 2 failed")', failed["traceback"])
+            self.assertIn("RuntimeError: task 2 failed", failed["traceback"])
 
     def test_partial_run_does_not_require_pruned_outputs(self) -> None:
         # Two independent branches; a targeted run of task-1 prunes task-2, so

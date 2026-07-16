@@ -59,6 +59,7 @@ class ConnectedMonitorEventTests(unittest.TestCase):
                 input_signature="sha256:sig",
                 timings={"run_seconds": 1.5},
                 log_path="/logs/t1_container.log",
+                traceback="Traceback (most recent call last):\nRuntimeError: exploded",
             )
         payload = _captured_payloads(urlopen.call_args_list)[0]
         self.assertEqual(payload["event"], "task_finished")
@@ -70,6 +71,10 @@ class ConnectedMonitorEventTests(unittest.TestCase):
         self.assertEqual(payload["input_signature"], "sha256:sig")
         self.assertEqual(payload["timings"], {"run_seconds": 1.5})
         self.assertEqual(payload["log_path"], "/logs/t1_container.log")
+        self.assertEqual(
+            payload["traceback"],
+            "Traceback (most recent call last):\nRuntimeError: exploded",
+        )
         self.assertFalse(payload["reused"])
 
     def test_reproducibility_event(self) -> None:
