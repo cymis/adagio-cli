@@ -1,5 +1,6 @@
 import shutil
 import tempfile
+import traceback
 import typing as t
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -173,7 +174,10 @@ def run_serial_pipeline(
                     completed_task_ids.add(task.id)
                 except Exception as exc:  # noqa: BLE001
                     active_monitor.finish_task(
-                        task_id=task.id, status="failed", error=str(exc)
+                        task_id=task.id,
+                        status="failed",
+                        error=str(exc),
+                        traceback=traceback.format_exc(),
                     )
                     for skipped_task in execution_plan:
                         if (
