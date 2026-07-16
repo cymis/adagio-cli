@@ -120,10 +120,18 @@ def run_pipeline_from_kwargs(
                 "Unknown outputs in arguments file: " + ", ".join(unknown_outputs),
             )
 
+        unknown_publish = sorted(set(arguments_data.publish) - output_name_set)
+        if unknown_publish:
+            _error_exit(
+                console,
+                "Unknown publish outputs in arguments file: " + ", ".join(unknown_publish),
+            )
+
         arguments.inputs.update(arguments_data.inputs)
         arguments.parameters.update(arguments_data.parameters)
         if arguments_data.outputs is not None:
             arguments.outputs = arguments_data.outputs
+        arguments.publish = arguments_data.publish
 
     for ident, original in input_bindings:
         value = kwargs.get(ident)

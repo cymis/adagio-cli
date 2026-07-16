@@ -268,6 +268,18 @@ def _build_arguments(
         if resolved_outputs is not None:
             arguments.outputs = resolved_outputs
 
+        resolved_publish = _resolve_outputs(
+            runtime_arguments.get("publish"), storage_root=storage_root
+        )
+        if isinstance(resolved_publish, dict):
+            output_names = {output.name for output in pipeline.signature.outputs}
+            unknown = sorted(set(resolved_publish) - output_names)
+            if unknown:
+                raise SystemExit(
+                    "Unknown publish outputs in arguments file: " + ", ".join(unknown)
+                )
+            arguments.publish = resolved_publish
+
     if _outputs_need_default(arguments.outputs):
         arguments.outputs = output_dir
 

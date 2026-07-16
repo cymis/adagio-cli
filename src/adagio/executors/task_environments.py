@@ -588,14 +588,27 @@ def _save_outputs(
             monitor.start_save_output()
             state.save_output_started = True
 
+        publish_destination = None
         try:
             shutil.copy2(source_path, destination)
+            if output.name in arguments.publish:
+                publish_destination = resolve_output_destination(
+                    output_name=output.name,
+                    output_names=[item.name for item in sig.outputs],
+                    outputs=arguments.publish,
+                    source_path=Path(destination),
+                )
+                publish_parent = os.path.dirname(publish_destination)
+                if publish_parent:
+                    os.makedirs(publish_parent, exist_ok=True)
+                if Path(publish_destination).resolve() != Path(destination).resolve():
+                    shutil.copy2(destination, publish_destination)
         except Exception as exc:  # noqa: BLE001
             if monitor is not None:
                 monitor.finish_output(
                     output_id=output.id,
                     output_name=output.name,
-                    destination=destination,
+                    destination=publish_destination or destination,
                     status="failed",
                     error=str(exc),
                 )
