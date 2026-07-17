@@ -9,6 +9,51 @@ CONVERT_TO_METADATA_ACTION_ID = "convert_to_metadata"
 CONVERT_TO_METADATA_ACTION_NAME = "convert-to-metadata"
 
 
+def _plugin_display_name(plugin: Any, plugin_name: str) -> str:
+    """Return a readable plugin name without changing intentional branding."""
+    raw_name = str(getattr(plugin, "name", "") or plugin_name).strip()
+    if raw_name == raw_name.lower():
+        return raw_name.replace("_", " ").replace("-", " ").title()
+    return raw_name
+
+
+def build_plugin_metadata(plugin: Any, plugin_name: str) -> dict[str, str]:
+    """Return QAPI metadata shared by plugin listings and full payloads."""
+    short_description = str(getattr(plugin, "short_description", "") or "").strip()
+    description = short_description or str(
+        getattr(plugin, "description", "") or ""
+    ).strip()
+    return {
+        "display_name": _plugin_display_name(plugin, plugin_name),
+        "description": description,
+        "version": str(getattr(plugin, "version", "") or "").strip(),
+    }
+
+
+def generate_qapi_plugin_index() -> dict[str, Any]:
+    """List registered QIIME plugins without building their full interfaces."""
+    import qiime2
+    import qiime2.sdk
+
+    plugin_manager = qiime2.sdk.PluginManager()
+    plugins = []
+    for plugin_name in sorted(plugin_manager.plugins):
+        plugin = plugin_manager.plugins[plugin_name]
+        action_count = sum(1 for _ in _iter_public_qiime_actions(plugin.actions))
+        plugins.append(
+            {
+                "name": plugin_name,
+                **build_plugin_metadata(plugin, plugin_name),
+                "action_count": action_count,
+            }
+        )
+
+    return {
+        "qiime_version": qiime2.__version__,
+        "plugins": plugins,
+    }
+
+
 def _metadata_ast() -> dict[str, Any]:
     return {
         "name": "Metadata",
@@ -345,7 +390,10 @@ def generate_qapi_payload(
         )
         semantic_types = build_semantic_type_dict(plugin.actions)
         semantic_types.update(build_semantic_type_dict(plugin.pipelines))
-        qapi[plugin_name] = {"methods": methods_dict}
+        qapi[plugin_name] = {
+            **build_plugin_metadata(plugin, plugin_name),
+            "methods": methods_dict,
+        }
         if semantic_types:
             qapi[plugin_name]["semantic_types"] = semantic_types
 

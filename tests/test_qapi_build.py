@@ -1,5 +1,8 @@
 import io
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,10 +16,74 @@ from adagio.qapi.build import (
     CONVERT_TO_METADATA_ACTION_NAME,
     _build_convert_to_metadata_action,
     _iter_public_qiime_actions,
+    build_plugin_metadata,
 )
 
 
 class QapiBuildTests(unittest.TestCase):
+    def test_plugin_metadata_prefers_short_description_and_humanizes_name(self) -> None:
+        metadata = build_plugin_metadata(
+            SimpleNamespace(
+                name="mystery-stew",
+                version="0.8.0.dev12",
+                short_description="Experimental actions.",
+                description="Long description.",
+            ),
+            "mystery_stew",
+        )
+
+        self.assertEqual(
+            metadata,
+            {
+                "display_name": "Mystery Stew",
+                "description": "Experimental actions.",
+                "version": "0.8.0.dev12",
+            },
+        )
+
+    def test_list_qapi_plugins_writes_json_listing(self) -> None:
+        payload = {
+            "qiime_version": "2026.1.0",
+            "plugins": [
+                {
+                    "name": "mystery_stew",
+                    "display_name": "Mystery Stew",
+                    "description": "Experimental actions.",
+                    "version": "0.8.0.dev12",
+                    "action_count": 8,
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "plugins.json"
+            with patch(
+                "adagio.cli.qapi.generate_qapi_plugin_index",
+                return_value=payload,
+            ):
+                qapi_cli.list_qapi_plugins(output=output)
+
+            self.assertEqual(json.loads(output.read_text()), payload)
+
+    def test_build_qapi_no_submit_writes_payload_without_client_call(self) -> None:
+        payload = {
+            "qiime_version": "2026.1.0",
+            "schema_version": "0.1.0",
+            "data": {"example": {"methods": {}}},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "qapi.json"
+            with (
+                patch(
+                    "adagio.cli.qapi.generate_qapi_payload",
+                    return_value=payload,
+                ),
+                patch("adagio.cli.qapi.submit_qapi_payload") as submit_mock,
+            ):
+                qapi_cli.build_qapi(output=output, no_submit=True)
+
+            self.assertEqual(json.loads(output.read_text()), payload)
+            submit_mock.assert_not_called()
+
     def test_iter_public_qiime_actions_skips_private_action_names(self) -> None:
         public_action = SimpleNamespace(id="public_action")
         skipped_actions: list[str] = []
