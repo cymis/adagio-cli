@@ -69,6 +69,15 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         help=RECYCLE_POOL_HELP,
     )
     parser.add_argument(
+        "--no-reuse-nodes",
+        required=False,
+        default=None,
+        help=(
+            "Comma-separated node ids that must execute fresh. Other nodes keep "
+            "ordinary cache eligibility unless --no-reuse disables it run-wide."
+        ),
+    )
+    parser.add_argument(
         "--log-dir",
         required=False,
         default=None,
@@ -116,6 +125,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         cache_dir=opts.cache_dir,
         reuse=opts.reuse,
         recycle_pool=opts.recycle_pool,
+        no_reuse_nodes=_parse_node_ids(opts.no_reuse_nodes),
     )
 
     connected = bool(
@@ -193,11 +203,16 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
             )
 
 
+def _parse_node_ids(raw: str | None) -> set[str]:
+    """Parse a comma-separated node-id argument."""
+    if not raw:
+        return set()
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
 def _parse_targets(raw: str | None) -> set[str] | None:
     """Parse ``--targets id[,id...]`` into a set of node ids (None => all)."""
-    if not raw:
-        return None
-    ids = {part.strip() for part in raw.split(",") if part.strip()}
+    ids = _parse_node_ids(raw)
     return ids or None
 
 

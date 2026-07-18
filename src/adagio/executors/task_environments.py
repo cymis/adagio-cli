@@ -387,7 +387,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                 else None
             ),
             recycle_pool=(
-                state.cache_config.recycle_pool
+                state.cache_config.recycle_pool_for(task.id)
                 if state.cache_config is not None
                 else None
             ),

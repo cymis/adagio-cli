@@ -4,7 +4,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from adagio.executors.base import TaskEnvironmentSpec
+from adagio.executors.base import (
+    TaskEnvironmentSpec,
+    TaskExecutionRequest,
+    TaskExecutionResult,
+)
+from adagio.executors.cache_support import ExecutionCacheConfig
 from adagio.executors.serial_runner import SerialExecutionState, TaskOutcome
 from adagio.executors.task_environments import TaskEnvironmentExecutor
 from adagio.executors.task_contract import (
@@ -38,10 +43,22 @@ class _Resolver:
         )
 
 
-def _task() -> PluginActionTask:
+class _CapturingLauncher:
+    kind = "docker"
+
+    def __init__(self) -> None:
+        self.requests: list[TaskExecutionRequest] = []
+
+    def launch(self, *, environment, request, console=None):  # noqa: ANN001
+        del environment, console
+        self.requests.append(request)
+        return TaskExecutionResult(outputs=request.outputs)
+
+
+def _task(task_id: str = "task-1") -> PluginActionTask:
     return PluginActionTask.model_validate(
         {
-            "id": "task-1",
+            "id": task_id,
             "kind": "plugin-action",
             "plugin": "demux",
             "action": "summarize",
@@ -53,6 +70,41 @@ def _task() -> PluginActionTask:
 
 
 class ExecutorEnrichmentTests(unittest.TestCase):
+    def test_selective_no_reuse_assigns_no_pool_only_to_matching_tasks(self) -> None:
+        launcher = _CapturingLauncher()
+        executor = TaskEnvironmentExecutor(
+            environment_resolver=_Resolver(),
+            launchers={"docker": launcher},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            work_path = root / "work"
+            work_path.mkdir()
+            state = SerialExecutionState(
+                cwd=root,
+                work_path=work_path,
+                params={},
+                scope={},
+                cache_config=ExecutionCacheConfig(
+                    cache_dir=root / "cache",
+                    recycle_pool="pipeline:test",
+                    no_reuse_nodes=frozenset({"local-task"}),
+                ),
+                monitor=None,
+            )
+
+            executor._resolve_task(_task("official-upstream"), state, None)
+            executor._resolve_task(_task("local-task"), state, None)
+            executor._resolve_task(_task("official-downstream"), state, None)
+
+        pools = {
+            request.task.id: request.recycle_pool for request in launcher.requests
+        }
+        self.assertEqual(pools["official-upstream"], "pipeline:test")
+        self.assertIsNone(pools["local-task"])
+        self.assertEqual(pools["official-downstream"], "pipeline:test")
+
     def test_plugin_action_returns_enriched_outcome_and_emits_phase_events(self) -> None:
         from adagio.executors.docker import DockerTaskEnvironmentLauncher
 

@@ -18,6 +18,13 @@ RECYCLE_POOL_HELP = (
 class ExecutionCacheConfig:
     cache_dir: Path
     recycle_pool: str | None = None
+    no_reuse_nodes: frozenset[str] = frozenset()
+
+    def recycle_pool_for(self, node_id: str) -> str | None:
+        """Return the ordinary pool unless this node must execute fresh."""
+        if node_id in self.no_reuse_nodes:
+            return None
+        return self.recycle_pool
 
 
 def resolve_cache_config(
@@ -26,6 +33,7 @@ def resolve_cache_config(
     cache_dir: str | Path | None,
     reuse: bool,
     recycle_pool: str | None = None,
+    no_reuse_nodes: set[str] | frozenset[str] | None = None,
 ) -> ExecutionCacheConfig:
     """Resolve the cache directory and the recycle pool for a run.
 
@@ -46,6 +54,7 @@ def resolve_cache_config(
     return ExecutionCacheConfig(
         cache_dir=resolved_cache_dir,
         recycle_pool=resolved_recycle_pool,
+        no_reuse_nodes=frozenset(no_reuse_nodes or ()),
     )
 
 

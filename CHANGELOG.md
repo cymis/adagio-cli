@@ -8,6 +8,19 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+## 0.1.0a6 - 2026-07-18
+
+### Added
+
+- Adds per-task cache exclusions for connected runs. Nodes listed through
+  `--no-reuse-nodes` execute without a recycle pool while all other tasks keep
+  normal cache eligibility.
+
+### Changed
+
+- Keeps explicit run-wide `--no-reuse` authoritative: it still disables reuse
+  for every task, including tasks not listed in `--no-reuse-nodes`.
+
 ## 0.1.0a5 - 2026-07-16
 
 ### Added

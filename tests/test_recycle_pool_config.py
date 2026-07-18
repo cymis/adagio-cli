@@ -40,6 +40,19 @@ class RecyclePoolThreadingTests(unittest.TestCase):
             )
         self.assertEqual(config.recycle_pool, DEFAULT_RECYCLE_POOL)
 
+    def test_selective_no_reuse_only_removes_matching_node_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = resolve_cache_config(
+                cwd=Path(tmp),
+                cache_dir="cache",
+                reuse=True,
+                recycle_pool="pipeline:abc",
+                no_reuse_nodes={"local-1", "local-2"},
+            )
+        self.assertEqual(config.recycle_pool_for("official-upstream"), "pipeline:abc")
+        self.assertIsNone(config.recycle_pool_for("local-1"))
+        self.assertEqual(config.recycle_pool_for("official-downstream"), "pipeline:abc")
+
 
 if __name__ == "__main__":
     unittest.main()

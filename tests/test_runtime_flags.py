@@ -110,6 +110,29 @@ class RuntimeFlagsTests(unittest.TestCase):
         )
         self.assertEqual(call["cache_config"].recycle_pool, "pipeline:xyz")
 
+    def test_no_reuse_nodes_thread_into_cache_config(self) -> None:
+        call = self._run(
+            ["--recycle-pool", "pipeline:xyz", "--no-reuse-nodes", "n1, n2 ,n1"],
+            {"version": 1},
+        )
+        self.assertEqual(call["cache_config"].no_reuse_nodes, {"n1", "n2"})
+        self.assertIsNone(call["cache_config"].recycle_pool_for("n1"))
+        self.assertEqual(call["cache_config"].recycle_pool_for("n3"), "pipeline:xyz")
+
+    def test_global_no_reuse_still_disables_every_node(self) -> None:
+        call = self._run(
+            [
+                "--no-reuse",
+                "--recycle-pool",
+                "pipeline:xyz",
+                "--no-reuse-nodes",
+                "n1",
+            ],
+            {"version": 1},
+        )
+        self.assertIsNone(call["cache_config"].recycle_pool_for("n1"))
+        self.assertIsNone(call["cache_config"].recycle_pool_for("n2"))
+
     def test_log_dir_and_targets_thread_through(self) -> None:
         call = self._run(
             ["--log-dir", "/tmp/adagio-logs", "--targets", "n1, n2 ,n3"],
