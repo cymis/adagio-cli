@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -99,7 +100,9 @@ class CondaLauncherTests(unittest.TestCase):
             kwargs = run_mock.call_args.kwargs
             python_root = container_python_root(work_path=work_path)
 
-        self.assertEqual(command[:4], [str(conda_executable), "run", "-n", "qiime2-2026.1"])
+        self.assertEqual(
+            command[:4], [str(conda_executable), "run", "-n", "qiime2-2026.1"]
+        )
         self.assertIn("python", command)
         self.assertIn("-m", command)
         self.assertIn("adagio.cli.task_exec", command)
@@ -155,10 +158,20 @@ class CondaLauncherTests(unittest.TestCase):
                 )
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
-            with patch(
-                "adagio.executors.conda.subprocess.run",
-                side_effect=fake_run,
-            ) as run_mock:
+            with (
+                patch(
+                    "adagio.executors.conda.subprocess.run",
+                    side_effect=fake_run,
+                ) as run_mock,
+                patch.dict(
+                    os.environ,
+                    {
+                        "PYTHONHOME": "/bundled/python",
+                        "PYTHONPATH": "/bundled/site-packages",
+                        "VIRTUAL_ENV": "/bundled/venv",
+                    },
+                ),
+            ):
                 launcher.launch(
                     environment=TaskEnvironmentSpec(
                         kind="conda",
@@ -172,7 +185,14 @@ class CondaLauncherTests(unittest.TestCase):
                 )
 
         command = run_mock.call_args.args[0]
+        child_env = run_mock.call_args.kwargs["env"]
+        python_root = container_python_root(work_path=work_path)
         self.assertEqual(command[:4], [str(conda_executable), "run", "-p", str(prefix)])
+        self.assertEqual(command[4], str(prefix / "bin" / "python"))
+        self.assertIn("adagio.cli.task_exec", command)
+        self.assertEqual(child_env["PYTHONPATH"], str(python_root))
+        self.assertNotIn("PYTHONHOME", child_env)
+        self.assertNotIn("VIRTUAL_ENV", child_env)
 
     def test_launch_requires_environment_reference(self) -> None:
         launcher = CondaTaskEnvironmentLauncher()

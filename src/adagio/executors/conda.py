@@ -75,22 +75,27 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         options = dict(environment.options or {})
         selector, reference = _conda_environment_selector(environment=environment)
         conda_executable = _resolve_conda_executable(options=options)
+        python_executable = _conda_python_executable(
+            selector=selector,
+            reference=reference,
+        )
         python_root = container_python_root(work_path=request.work_path)
-
+        # Keep Conda in the launch path for both names and prefixes. Packages
+        # such as OpenJDK rely on activate.d hooks to configure their runtime.
         command = [
             conda_executable,
             "run",
             selector,
             reference,
-            "python",
+            python_executable,
             "-m",
             "adagio.cli.task_exec",
             "--task",
             str(spec_path),
         ]
+        label = f"conda run {selector} {reference}"
 
         if console is not None:
-            label = f"conda run {selector} {reference}"
             if not getattr(console, "_adagio_inline_monitor_active", False):
                 console.print(f"[dim]Task environment:[/dim] {label}")
 
@@ -137,9 +142,9 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             stdout_text = (result.stdout or "").strip()
             stderr_text = (result.stderr or "").strip()
             if stderr_text:
-                detail = f" Conda reported: {stderr_text}"
+                detail = f" Environment reported: {stderr_text}"
             elif stdout_text:
-                detail = f" Conda stdout: {stdout_text}"
+                detail = f" Environment stdout: {stdout_text}"
             else:
                 detail = ""
             raise RuntimeError(
@@ -180,7 +185,7 @@ def _conda_environment_selector(*, environment: TaskEnvironmentSpec) -> tuple[st
     if not reference:
         raise RuntimeError(
             "Conda task environments require an environment name or prefix. "
-            "Set environment = \"<name>\" or prefix = \"/path/to/env\"."
+            'Set environment = "<name>" or prefix = "/path/to/env".'
         )
 
     options = dict(environment.options or {})
@@ -195,6 +200,16 @@ def _conda_environment_selector(*, environment: TaskEnvironmentSpec) -> tuple[st
     if _looks_like_path(reference):
         return "-p", str(Path(reference).expanduser().resolve())
     return "-n", reference
+
+
+def _conda_python_executable(*, selector: str, reference: str) -> str:
+    """Use a prefix's interpreter explicitly while retaining ``conda run`` hooks."""
+    if selector != "-p":
+        return "python"
+    prefix = Path(reference)
+    if os.name == "nt":
+        return str(prefix / "python.exe")
+    return str(prefix / "bin" / "python")
 
 
 def _resolve_conda_executable(*, options: dict[str, Any]) -> str:
@@ -231,11 +246,11 @@ def _resolve_executable(value: str) -> str | None:
 
 def _subprocess_env(*, python_root: Path) -> dict[str, str]:
     env = os.environ.copy()
-    existing_pythonpath = env.get("PYTHONPATH")
-    pythonpath_parts = [str(python_root)]
-    if existing_pythonpath:
-        pythonpath_parts.append(existing_pythonpath)
-    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    # The desktop sidecar may itself run from a bundled or virtual Python.
+    # Those variables must not redirect the selected environment's interpreter.
+    env.pop("PYTHONHOME", None)
+    env.pop("VIRTUAL_ENV", None)
+    env["PYTHONPATH"] = str(python_root)
     env["PYTHONNOUSERSITE"] = "1"
 
     for assignment in python_warning_env_assignments():
