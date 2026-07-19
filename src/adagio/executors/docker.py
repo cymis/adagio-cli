@@ -1,7 +1,27 @@
+import os
+import platform as _platform
 import subprocess
+import time
 from pathlib import Path
 
 from rich.console import Console
+
+from adagio.monitor.api import Monitor
+
+
+def _host_platform_default() -> str | None:
+    """Return a default ``--platform`` for the host, or None to run natively.
+
+    The default plugin images are ``linux/amd64``. On a non-amd64 host (e.g.
+    Apple Silicon ``arm64``) we request ``linux/amd64`` so Docker runs the image
+    under emulation deterministically rather than emitting a platform-mismatch
+    warning. amd64 hosts get None (native). Users can override per-node via the
+    env config ``platform`` field for genuinely multi-arch images.
+    """
+    machine = _platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return None
+    return "linux/amd64"
 
 from .base import (
     TaskEnvironmentLauncher,
@@ -17,13 +37,17 @@ from .container_support import (
     docker_tty_flags,
     host_path_from_container,
     is_uri,
+    manifest_referenced_host_paths,
     print_filtered_container_stderr,
     python_warning_env_flags,
+    record_container_output,
+    signal_task_running,
     with_mounts,
 )
 from .task_contract import (
     parse_result_manifest,
     build_task_spec,
+    container_log_path,
     read_json_file,
     result_manifest_path,
     task_spec_path,
@@ -40,8 +64,11 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         environment: TaskEnvironmentSpec,
         request: TaskExecutionRequest,
         console: Console | None = None,
+        monitor: Monitor | None = None,
+        task_id: str | None = None,
     ) -> TaskExecutionResult:
         task = request.task
+        event_task_id = task_id if task_id is not None else task.id
         archive_inputs = {
             name: containerize_host_value(value)
             for name, value in request.archive_inputs.items()
@@ -65,6 +92,9 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             plugin=task.plugin,
             action=task.action,
             archive_inputs=archive_inputs,
+            archive_input_materializations=(
+                dict(request.archive_input_materializations or {})
+            ),
             archive_collection_inputs=archive_collection_inputs,
             metadata_inputs=metadata_inputs,
             params=dict(request.params),
@@ -86,6 +116,13 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             raw_platform = environment.options.get("platform")
             if isinstance(raw_platform, str) and raw_platform:
                 platform = raw_platform
+        if platform is None:
+            # No explicit platform: adapt to the host. The default plugin images
+            # are linux/amd64; on a non-amd64 host (e.g. Apple Silicon arm64)
+            # request linux/amd64 so Docker runs it under emulation determinist-
+            # ically instead of emitting a platform-mismatch warning. amd64 hosts
+            # run natively (no flag). Override per-node via env config `platform`.
+            platform = _host_platform_default()
 
         command = [
             "docker",
@@ -102,6 +139,13 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         ]
         if platform:
             command.extend(["--platform", platform])
+        # Label per-task containers with the runtime job id (design §8) so the
+        # adapter's cancel path can `docker kill` them by
+        # ``adagio.job_id={job_id}``. The adapter exports RUNTIME_JOB_ID when it
+        # spawns the CLI; standalone runs have no job id and get no label.
+        runtime_job_id = os.getenv("RUNTIME_JOB_ID")
+        if runtime_job_id:
+            command.extend(["--label", f"adagio.job_id={runtime_job_id}"])
         command.extend([
             environment.reference,
             "python",
@@ -124,6 +168,15 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 host_paths.append(path)
         if request.cache_path is not None:
             host_paths.append(mount_path_for_cache(Path(request.cache_path)))
+        # A raw-manifest input points at fastqs by absolute host path; mount the
+        # roots of those interior paths too (they may live off a different root
+        # than the manifest/cwd/cache), so the in-container remap can resolve.
+        host_paths.extend(
+            manifest_referenced_host_paths(
+                archive_inputs=request.archive_inputs,
+                materializations=request.archive_input_materializations,
+            )
+        )
 
         command = with_mounts(command=command, host_paths=host_paths)
 
@@ -134,6 +187,27 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             if not getattr(console, "_adagio_inline_monitor_active", False):
                 console.print(f"[dim]Task environment:[/dim] {label}")
 
+        # Pull the image up front (first run only) behind a single line, so the
+        # `docker run` below stays quiet instead of dumping the layer-by-layer
+        # pull log to the console. Safe because the executor runs tasks serially.
+        pull_started = time.monotonic()
+        if monitor is not None:
+            monitor.pulling_image(
+                task_id=event_task_id, image_ref=environment.reference
+            )
+        _ensure_docker_image(
+            reference=environment.reference, platform=platform, console=console
+        )
+        pull_seconds = time.monotonic() - pull_started
+
+        image_digest = _resolve_image_digest(reference=environment.reference)
+
+        if monitor is not None:
+            monitor.starting_container(
+                task_id=event_task_id, image_ref=environment.reference
+            )
+        signal_task_running(monitor=monitor, event_task_id=event_task_id)
+        run_started = time.monotonic()
         try:
             result = subprocess.run(
                 command,
@@ -146,11 +220,23 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             raise SystemExit(
                 "Docker is required for task environment execution but was not found in PATH."
             ) from exc
+        run_seconds = time.monotonic() - run_started
+        timings = {"pull_seconds": pull_seconds, "run_seconds": run_seconds}
 
-        if console is not None:
-            print_filtered_container_stderr(console=console, stderr_text=result.stderr or "")
+        # Capture container output to a per-task log; keep the console clean on
+        # success and surface it only when the task fails.
+        log_path = container_log_path(task_id=task.id, work_path=request.work_path)
+        record_container_output(
+            log_path=log_path,
+            stdout_text=result.stdout or "",
+            stderr_text=result.stderr or "",
+        )
 
         if result.returncode != 0:
+            if console is not None:
+                print_filtered_container_stderr(
+                    console=console, stderr_text=result.stderr or ""
+                )
             stdout_text = (result.stdout or "").strip()
             stderr_text = (result.stderr or "").strip()
             if stderr_text:
@@ -181,4 +267,98 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 )
             outputs[output_name] = str(host_path_from_container(actual_path))
 
-        return TaskExecutionResult(outputs=outputs, reused=reused)
+        return TaskExecutionResult(
+            outputs=outputs,
+            reused=reused,
+            command=list(command),
+            exit_code=result.returncode,
+            image_ref=environment.reference,
+            image_digest=image_digest,
+            log_path=str(log_path),
+            timings=timings,
+        )
+
+
+def _resolve_image_digest(*, reference: str) -> str | None:
+    """Best-effort resolve an image's repo digest (``sha256:…``).
+
+    Uses ``docker image inspect --format '{{index .RepoDigests 0}}'`` (design
+    §5.1). Returns the ``…@sha256:…`` digest string, or ``None`` when Docker is
+    absent, the image is not present, or it has no repo digest (e.g. built
+    locally). Never raises — enrichment must not break a run.
+    """
+    if is_uri(reference):
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{index .RepoDigests 0}}",
+                reference,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    digest = (result.stdout or "").strip()
+    return digest or None
+
+
+def _ensure_docker_image(
+    *, reference: str, platform: str | None, console: Console | None
+) -> None:
+    """Pull a missing image once, behind a single console line.
+
+    Keeps the layer-by-layer pull log out of the run output: ``docker pull
+    --quiet`` prints only the digest, and once the image is present ``docker
+    run`` performs no pull at all. Only runs on the first use of an image; the
+    executor is serial, so there is no concurrent-pull race to guard against.
+    """
+    if is_uri(reference):
+        return
+    try:
+        present = (
+            subprocess.run(
+                ["docker", "image", "inspect", reference],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).returncode
+            == 0
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            "Docker is required for task environment execution but was not found in PATH."
+        ) from exc
+    if present:
+        return
+
+    if console is not None and not getattr(
+        console, "_adagio_inline_monitor_active", False
+    ):
+        console.print(f"[dim]Pulling image[/dim] {reference} [dim](first run)…[/dim]")
+
+    command = ["docker", "pull", "--quiet"]
+    if platform:
+        command.extend(["--platform", platform])
+    command.append(reference)
+    result = subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to pull image {reference!r}: {(result.stderr or '').strip()}"
+        )

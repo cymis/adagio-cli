@@ -9,6 +9,51 @@ CONVERT_TO_METADATA_ACTION_ID = "convert_to_metadata"
 CONVERT_TO_METADATA_ACTION_NAME = "convert-to-metadata"
 
 
+def _plugin_display_name(plugin: Any, plugin_name: str) -> str:
+    """Return a readable plugin name without changing intentional branding."""
+    raw_name = str(getattr(plugin, "name", "") or plugin_name).strip()
+    if raw_name == raw_name.lower():
+        return raw_name.replace("_", " ").replace("-", " ").title()
+    return raw_name
+
+
+def build_plugin_metadata(plugin: Any, plugin_name: str) -> dict[str, str]:
+    """Return QAPI metadata shared by plugin listings and full payloads."""
+    short_description = str(getattr(plugin, "short_description", "") or "").strip()
+    description = short_description or str(
+        getattr(plugin, "description", "") or ""
+    ).strip()
+    return {
+        "display_name": _plugin_display_name(plugin, plugin_name),
+        "description": description,
+        "version": str(getattr(plugin, "version", "") or "").strip(),
+    }
+
+
+def generate_qapi_plugin_index() -> dict[str, Any]:
+    """List registered QIIME plugins without building their full interfaces."""
+    import qiime2
+    import qiime2.sdk
+
+    plugin_manager = qiime2.sdk.PluginManager()
+    plugins = []
+    for plugin_name in sorted(plugin_manager.plugins):
+        plugin = plugin_manager.plugins[plugin_name]
+        action_count = sum(1 for _ in _iter_public_qiime_actions(plugin.actions))
+        plugins.append(
+            {
+                "name": plugin_name,
+                **build_plugin_metadata(plugin, plugin_name),
+                "action_count": action_count,
+            }
+        )
+
+    return {
+        "qiime_version": qiime2.__version__,
+        "plugins": plugins,
+    }
+
+
 def _metadata_ast() -> dict[str, Any]:
     return {
         "name": "Metadata",
@@ -196,6 +241,72 @@ def generate_qapi_payload(
             except Exception:
                 continue
 
+    def find_artifact_class(semantic_type: Any) -> Any | None:
+        for artifact_class in plugin_manager.artifact_classes.values():
+            try:
+                if semantic_type <= artifact_class.semantic_type:
+                    return artifact_class
+            except Exception:
+                continue
+        return None
+
+    def iter_concrete_artifact_types(qiime_type: Any) -> list[Any]:
+        concrete_types: list[Any] = []
+        for artifact_class in plugin_manager.artifact_classes.values():
+            semantic_type = artifact_class.semantic_type
+            try:
+                if semantic_type <= qiime_type:
+                    concrete_types.append(semantic_type)
+            except Exception:
+                continue
+        return concrete_types
+
+    def collect_action_semantic_types(action: Any) -> dict[str, Any]:
+        semantic_types: dict[str, Any] = {}
+        for spec in [
+            *action.signature.inputs.values(),
+            *action.signature.outputs.values(),
+        ]:
+            for semantic_type in iter_concrete_artifact_types(spec.qiime_type):
+                semantic_types[repr(semantic_type)] = semantic_type
+        return semantic_types
+
+    def format_record_payload(name: str, record: Any) -> dict[str, Any]:
+        plugin = getattr(record, "plugin", None)
+        return {
+            "name": name,
+            "provider_plugin": getattr(plugin, "name", None),
+        }
+
+    def build_semantic_type_payload(semantic_type: Any) -> dict[str, Any]:
+        artifact_class = find_artifact_class(semantic_type)
+        canonical_format = getattr(artifact_class, "format", None)
+        provider_plugin = getattr(getattr(artifact_class, "plugin", None), "name", None)
+
+        try:
+            importable_format_records = plugin_manager.get_formats(
+                filter="IMPORTABLE",
+                semantic_type=semantic_type,
+            )
+        except Exception:
+            importable_format_records = {}
+
+        examples = getattr(artifact_class, "examples", {}) if artifact_class is not None else {}
+        return {
+            "type": repr(semantic_type),
+            "ast": flatten_type_maps(semantic_type).to_ast(),
+            "description": getattr(artifact_class, "description", None),
+            "provider_plugin": provider_plugin,
+            "canonical_format": (
+                canonical_format.__name__ if canonical_format is not None else None
+            ),
+            "importable_formats": [
+                format_record_payload(name, record)
+                for name, record in sorted(importable_format_records.items())
+            ],
+            "examples": sorted(str(name) for name in getattr(examples, "keys", lambda: [])()),
+        }
+
     def optional_desc(value: Any) -> str | None:
         no_value = qiime2.core.type.signature.__NoValueMeta  # type: ignore[attr-defined]
         return value if type(value) is not no_value else None
@@ -237,7 +348,6 @@ def generate_qapi_payload(
             ],
             "name": action.name,
             "description": action.description,
-            "source": action.source.replace("\n```python\n", "").replace("```\n", ""),
         }
 
     def build_data_dict(
@@ -251,6 +361,15 @@ def generate_qapi_payload(
         ):
             result[str(key)] = build_inspect_dict(value)
         return result
+
+    def build_semantic_type_dict(data: Any) -> dict[str, Any]:
+        semantic_types: dict[str, Any] = {}
+        for action in data.values():
+            semantic_types.update(collect_action_semantic_types(action))
+        return {
+            type_name: build_semantic_type_payload(semantic_type)
+            for type_name, semantic_type in sorted(semantic_types.items())
+        }
 
     qapi: dict[str, Any] = {}
     requested_plugins = normalize_plugin_selection(plugins)
@@ -269,7 +388,14 @@ def generate_qapi_payload(
         methods_dict.update(
             build_data_dict(plugin_name=plugin_name, data=plugin.pipelines)
         )
-        qapi[plugin_name] = {"methods": methods_dict}
+        semantic_types = build_semantic_type_dict(plugin.actions)
+        semantic_types.update(build_semantic_type_dict(plugin.pipelines))
+        qapi[plugin_name] = {
+            **build_plugin_metadata(plugin, plugin_name),
+            "methods": methods_dict,
+        }
+        if semantic_types:
+            qapi[plugin_name]["semantic_types"] = semantic_types
 
     if requested_plugins is None:
         convert_to_metadata = _build_convert_to_metadata_action(

@@ -1,6 +1,6 @@
 [project]
 name = "adagio-cli"
-version = "0.1.0a4"
+version = "0.1.0a6"
 description = "Command-line runner for Adagio pipeline files."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,7 +33,6 @@ dependencies = [
   "cyclopts>=4.5.3",
   "pydantic>=2.12.5",
   "rich>=14.1.0",
-  "parsl>=2024.12.16",
   "tomli>=2.2.1; python_version < '3.11'",
 ]
 
@@ -44,7 +43,14 @@ Issues = "https://github.com/cymis/adagio-cli/issues"
 Changelog = "https://github.com/cymis/adagio-cli/blob/dev/CHANGELOG.md"
 
 [dependency-groups]
-dev = ["build>=1.2.2", "pytest>=8.4.0", "ruff>=0.13.0", "twine>=6.2.0"]
+dev = [
+  "build>=1.2.2",
+  "nox>=2024.4.15,<2025.0.0",
+  "pytest>=8.4.0",
+  "pytest-cov>=6.0.0",
+  "ruff>=0.13.0",
+  "twine>=6.2.0",
+]
 
 [project.scripts]
 adagio = "adagio.cli.main:main"

@@ -81,6 +81,19 @@ class RecordingMonitor(Monitor):
         self.save_start_count = 0
         self.save_finish_count = 0
         self.saved_outputs: list[tuple[str, str, str, str]] = []
+        self.finished_tasks: list[dict[str, object]] = []
+
+    def finish_task(
+        self,
+        *,
+        task_id: str,
+        status: str = "completed",
+        error: str | None = None,
+        **details,
+    ) -> None:
+        self.finished_tasks.append(
+            {"task_id": task_id, "status": status, "error": error, **details}
+        )
 
     def start_save_output(self) -> None:
         self.save_start_count += 1
@@ -120,6 +133,46 @@ class RecordingLauncher:
 
 
 class SerialRunnerOutputTests(unittest.TestCase):
+    def test_publish_copies_output_without_replacing_normal_destination(self) -> None:
+        output_def = FakeOutputDef(id="out-1", name="result")
+        pipeline = FakePipeline(
+            tasks=[FakeTask(id="task-1", outputs={"result": FakeEndpoint("out-1")})],
+            outputs=[output_def],
+        )
+        monitor = RecordingMonitor()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "outputs"
+            publish_path = root / "published" / "named-result"
+            arguments = AdagioArguments(
+                inputs={},
+                parameters={},
+                outputs=str(output_dir),
+                publish={"result": str(publish_path)},
+            )
+
+            def resolve_task(task, state, console):  # noqa: ANN001
+                del task, console
+                produced = state.work_path / "task-result.qza"
+                produced.write_text("published", encoding="utf-8")
+                state.scope["out-1"] = str(produced)
+                return False
+
+            run_serial_pipeline(
+                pipeline=pipeline,
+                arguments=arguments,
+                resolve_task=resolve_task,
+                finish_outputs=_save_outputs,
+                monitor=monitor,
+            )
+
+            normal = output_dir / "result.qza"
+            published = publish_path.with_suffix(".qza")
+            self.assertEqual(normal.read_text(encoding="utf-8"), "published")
+            self.assertEqual(published.read_text(encoding="utf-8"), "published")
+            self.assertEqual(monitor.saved_outputs[0][2], str(normal))
+
     def test_collection_input_manifest_expands_to_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -292,6 +345,87 @@ class SerialRunnerOutputTests(unittest.TestCase):
             self.assertEqual(saved_path.read_text(encoding="utf-8"), "done")
             self.assertEqual(monitor.save_start_count, 1)
             self.assertEqual(monitor.save_finish_count, 1)
+            failed = next(
+                event
+                for event in monitor.finished_tasks
+                if event["task_id"] == "task-2"
+            )
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["error"], "task 2 failed")
+            self.assertIn("Traceback (most recent call last):", failed["traceback"])
+            self.assertIn('raise RuntimeError("task 2 failed")', failed["traceback"])
+            self.assertIn("RuntimeError: task 2 failed", failed["traceback"])
+
+    def test_partial_run_does_not_require_pruned_outputs(self) -> None:
+        # Two independent branches; a targeted run of task-1 prunes task-2, so
+        # its output (out-2) is never produced. The terminal require_all save
+        # must NOT demand out-2 (that KeyError'd every editor "run node").
+        out1 = FakeOutputDef(id="out-1", name="result")
+        out2 = FakeOutputDef(id="out-2", name="other")
+        pipeline = FakePipeline(
+            tasks=[
+                FakeTask(id="task-1", outputs={"result": FakeEndpoint("out-1")}),
+                FakeTask(id="task-2", outputs={"other": FakeEndpoint("out-2")}),
+            ],
+            outputs=[out1, out2],
+        )
+        monitor = RecordingMonitor()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "outputs"
+            arguments = AdagioArguments(inputs={}, parameters={}, outputs=str(output_dir))
+
+            ran: list[str] = []
+
+            def resolve_task(task, state, console):  # noqa: ANN001
+                del console
+                ran.append(task.id)
+                produced = state.work_path / f"{task.id}.qza"
+                produced.write_text("done", encoding="utf-8")
+                state.scope[task.outputs["result"].id] = str(produced)
+                return False
+
+            # Must not raise despite out-2 never being produced.
+            run_serial_pipeline(
+                pipeline=pipeline,
+                arguments=arguments,
+                resolve_task=resolve_task,
+                finish_outputs=_save_outputs,
+                monitor=monitor,
+                target_ids={"task-1"},
+            )
+
+            self.assertEqual(ran, ["task-1"])  # task-2 pruned
+            self.assertTrue((output_dir / "result.qza").exists())
+            self.assertFalse((output_dir / "other.qza").exists())
+
+    def test_full_run_still_requires_every_output(self) -> None:
+        # A full run where a task fails to produce its declared output must
+        # still surface the missing-output KeyError (regression guard for the
+        # partial-run relaxation above).
+        out1 = FakeOutputDef(id="out-1", name="result")
+        pipeline = FakePipeline(
+            tasks=[FakeTask(id="task-1", outputs={"result": FakeEndpoint("out-1")})],
+            outputs=[out1],
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            arguments = AdagioArguments(
+                inputs={}, parameters={}, outputs=str(Path(tmpdir) / "outputs")
+            )
+
+            def resolve_task(task, state, console):  # noqa: ANN001
+                del task, state, console  # never populates scope["out-1"]
+                return False
+
+            with self.assertRaisesRegex(KeyError, "Missing output value for 'result'"):
+                run_serial_pipeline(
+                    pipeline=pipeline,
+                    arguments=arguments,
+                    resolve_task=resolve_task,
+                    finish_outputs=_save_outputs,
+                )
 
     def test_saves_each_output_only_once_across_multiple_tasks(self) -> None:
         output_def = FakeOutputDef(id="out-1", name="result")

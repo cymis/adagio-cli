@@ -1,3 +1,5 @@
+from typing import Any
+
 from rich.console import Console
 
 from .api import Monitor
@@ -22,8 +24,9 @@ class LogMonitor(Monitor):
             f"queued task id={task_id} label={label!r} subtasks={total_subtasks}"
         )
 
-    def start_task(self, *, task_id: str) -> None:
+    def start_task(self, *, task_id: str, **details: Any) -> None:
         """Log task start."""
+        del details
         self._console.log(f"started task id={task_id}")
 
     def advance_task(
@@ -36,13 +39,19 @@ class LogMonitor(Monitor):
         self._console.log(f"updated task id={task_id}{details}")
 
     def finish_task(
-        self, *, task_id: str, status: str = "completed", error: str | None = None
+        self,
+        *,
+        task_id: str,
+        status: str = "completed",
+        error: str | None = None,
+        **details: Any,
     ) -> None:
         """Log task completion."""
-        details = f"status={status}"
+        del details
+        detail = f"status={status}"
         if error:
-            details += f" error={error!r}"
-        self._console.log(f"finished task id={task_id} {details}")
+            detail += f" error={error!r}"
+        self._console.log(f"finished task id={task_id} {detail}")
 
     def start_save_output(self) -> None:
         """Log output-save start."""
@@ -56,12 +65,14 @@ class LogMonitor(Monitor):
         destination: str,
         status: str = "succeeded",
         error: str | None = None,
+        **details: Any,
     ) -> None:
         """Log completion of an individual output."""
-        details = f"status={status} id={output_id} name={output_name!r} destination={destination!r}"
+        del details
+        detail = f"status={status} id={output_id} name={output_name!r} destination={destination!r}"
         if error:
-            details += f" error={error!r}"
-        self._console.log(f"saved output {details}")
+            detail += f" error={error!r}"
+        self._console.log(f"saved output {detail}")
 
     def finish_save_output(self) -> None:
         """Log output-save completion."""

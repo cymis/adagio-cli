@@ -9,6 +9,7 @@ from rich.text import Text
 from .executors.common import plan_execution_order
 from .model.pipeline import AdagioPipeline
 from .model.task import (
+    DataImportTask,
     LiteralVal,
     MetadataVal,
     PluginActionTask,
@@ -23,6 +24,7 @@ class _DisplayRef:
     label: str
     type_label: str | None = None
     description: str | None = None
+    user_description: str | None = None
 
 
 _ENTRY_INDENT = "       "
@@ -30,12 +32,17 @@ _ENTRY_INDENT = "       "
 _PIPELINE_SHOW_TYPE_WIDTH = 72
 
 
-def render_pipeline_text(pipeline: AdagioPipeline) -> Text | Group:
+def render_pipeline_text(
+    pipeline: AdagioPipeline,
+    *,
+    show_user_descriptions: bool = False,
+) -> Text | Group:
     available_ids = {
         input_def.id: _DisplayRef(
             label=_pipeline_input_label(input_def.name),
             type_label=_format_spec_type(input_def.type),
             description=_clean_description(input_def.description),
+            user_description=_clean_description(input_def.user_description),
         )
         for input_def in pipeline.signature.inputs
     }
@@ -52,6 +59,7 @@ def render_pipeline_text(pipeline: AdagioPipeline) -> Text | Group:
             label=f'pipeline output "{output.name}"',
             type_label=_format_spec_type(output.type),
             description=_clean_description(output.description),
+            user_description=_clean_description(output.user_description),
         )
         for output in pipeline.signature.outputs
     }
@@ -66,24 +74,40 @@ def render_pipeline_text(pipeline: AdagioPipeline) -> Text | Group:
             _record_root_input_outputs(task=task, available_ids=available_ids)
             continue
 
+        if isinstance(task, DataImportTask):
+            _record_data_import_outputs(task=task, available_ids=available_ids)
+            continue
+
         if not isinstance(task, PluginActionTask):
             continue
 
         body = Text(no_wrap=False, overflow="fold")
+        _append_action_user_description(
+            body,
+            task=task,
+            show_user_descriptions=show_user_descriptions,
+        )
         _append_section_header(body, "Inputs")
-        _append_input_lines(body, task=task, available_ids=available_ids)
+        _append_input_lines(
+            body,
+            task=task,
+            available_ids=available_ids,
+            show_user_descriptions=show_user_descriptions,
+        )
         _append_section_header(body, "Parameters")
         _append_parameter_lines(
             body,
             task=task,
             available_ids=available_ids,
             parameter_refs=parameter_refs,
+            show_user_descriptions=show_user_descriptions,
         )
         _append_section_header(body, "Outputs")
         _append_output_lines(
             body,
             task=task,
             pipeline_output_refs=pipeline_output_refs,
+            show_user_descriptions=show_user_descriptions,
         )
         panels.append(
             Panel(
@@ -110,6 +134,11 @@ def render_pipeline_text(pipeline: AdagioPipeline) -> Text | Group:
                     if pipeline_output_ref is not None
                     else None
                 ),
+                user_description=(
+                    pipeline_output_ref.user_description
+                    if pipeline_output_ref is not None
+                    else None
+                ),
             )
 
     if not panels:
@@ -127,11 +156,26 @@ def _append_section_header(rendered: Text, title: str) -> None:
     rendered.append(f"   {title}:\n", style="bold cyan")
 
 
+def _append_action_user_description(
+    rendered: Text,
+    *,
+    task: PluginActionTask,
+    show_user_descriptions: bool,
+) -> None:
+    if not show_user_descriptions:
+        return
+    user_description = _clean_description(task.user_description)
+    if not user_description:
+        return
+    _append_user_description_line(rendered, user_description, indent="   ")
+
+
 def _append_input_lines(
     rendered: Text,
     *,
     task: PluginActionTask,
     available_ids: dict[str, _DisplayRef],
+    show_user_descriptions: bool,
 ) -> None:
     if not task.inputs:
         _append_none_line(rendered)
@@ -149,6 +193,8 @@ def _append_input_lines(
                 type_label="list",
                 value_text=f"[{', '.join(labels)}]",
                 description=None,
+                user_description=None,
+                show_user_descriptions=show_user_descriptions,
             )
             continue
         reference = available_ids.get(source.id, _unknown_reference(source.id))
@@ -158,6 +204,8 @@ def _append_input_lines(
             type_label=reference.type_label,
             value_text=reference.label,
             description=reference.description,
+            user_description=reference.user_description,
+            show_user_descriptions=show_user_descriptions,
         )
 
 
@@ -167,6 +215,7 @@ def _append_parameter_lines(
     task: PluginActionTask,
     available_ids: dict[str, _DisplayRef],
     parameter_refs: dict[str, _DisplayRef],
+    show_user_descriptions: bool,
 ) -> None:
     if not task.parameters:
         _append_none_line(rendered)
@@ -186,6 +235,8 @@ def _append_parameter_lines(
             type_label=display.type_label if display is not None else None,
             value_text=rendered_value,
             description=display.description if display is not None else None,
+            user_description=None,
+            show_user_descriptions=show_user_descriptions,
         )
 
 
@@ -194,6 +245,7 @@ def _append_output_lines(
     *,
     task: PluginActionTask,
     pipeline_output_refs: dict[str, _DisplayRef],
+    show_user_descriptions: bool,
 ) -> None:
     if not task.outputs:
         _append_none_line(rendered)
@@ -216,6 +268,12 @@ def _append_output_lines(
                 if pipeline_output_ref is not None
                 else None
             ),
+            user_description=(
+                pipeline_output_ref.user_description
+                if pipeline_output_ref is not None
+                else None
+            ),
+            show_user_descriptions=show_user_descriptions,
         )
 
 
@@ -230,6 +288,8 @@ def _append_entry_line(
     type_label: str | None,
     value_text: str | None,
     description: str | None,
+    user_description: str | None = None,
+    show_user_descriptions: bool = False,
 ) -> None:
     rendered.append("     - ")
     rendered.append(name, style="cyan")
@@ -259,6 +319,20 @@ def _append_entry_line(
         rendered.append(_ENTRY_INDENT)
         rendered.append(description, style="dim")
         rendered.append("\n")
+    if show_user_descriptions and user_description:
+        _append_user_description_line(rendered, user_description, indent="       ")
+
+
+def _append_user_description_line(
+    rendered: Text,
+    user_description: str,
+    *,
+    indent: str,
+) -> None:
+    rendered.append(indent)
+    rendered.append("note: ", style="dim italic cyan")
+    rendered.append(user_description, style="dim italic")
+    rendered.append("\n")
 
 
 def _render_parameter_value(
@@ -352,6 +426,35 @@ def _record_root_input_outputs(
             source.id,
             _unknown_reference(source.id),
         )
+
+
+def _record_data_import_outputs(
+    *,
+    task: DataImportTask,
+    available_ids: dict[str, _DisplayRef],
+) -> None:
+    semantic_type = _literal_parameter(task, "semantic_type")
+    source = task.inputs.get("source")
+    source_ref = (
+        available_ids.get(source.id, _unknown_reference(source.id))
+        if source is not None
+        else None
+    )
+    user_description = _clean_description(task.user_description)
+    for output in task.outputs.values():
+        available_ids[output.id] = _DisplayRef(
+            label="data import",
+            type_label=_format_spec_type(semantic_type),
+            description=source_ref.description if source_ref is not None else None,
+            user_description=user_description,
+        )
+
+
+def _literal_parameter(task: DataImportTask, name: str) -> str | None:
+    parameter = task.parameters.get(name)
+    if isinstance(parameter, LiteralVal):
+        return str(parameter.value)
+    return None
 
 
 def _output_annotation(*, output_name: str, output_id: str) -> str | None:

@@ -57,6 +57,55 @@ class RunConfigTests(unittest.TestCase):
         self.assertEqual(config.plugins["dada2"].kind, "apptainer")
         self.assertEqual(config.tasks["dada2.denoise_single"].image, "/images/task.sif")
 
+    def test_load_run_config_accepts_conda_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "runtime.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        "",
+                        "[defaults]",
+                        'kind = "conda"',
+                        'environment = "qiime2-2026.1"',
+                        'conda_executable = "/opt/conda/bin/conda"',
+                        "",
+                        "[plugins]",
+                        'dada2 = { environment = "q2-dada2-dev" }',
+                        "",
+                        "[tasks]",
+                        '"dada2.denoise_single" = { prefix = "/envs/q2-dada2" }',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_run_config(config_path)
+
+        assert config is not None
+        default_override = config.defaults.to_task_environment_override()
+        plugin_override = config.plugins["dada2"].to_task_environment_override()
+        task_override = config.tasks[
+            "dada2.denoise_single"
+        ].to_task_environment_override()
+
+        assert default_override is not None
+        assert plugin_override is not None
+        assert task_override is not None
+        self.assertEqual(default_override.kind, "conda")
+        self.assertEqual(default_override.reference, "qiime2-2026.1")
+        self.assertEqual(
+            default_override.options,
+            {
+                "conda_reference_type": "environment",
+                "conda_executable": "/opt/conda/bin/conda",
+            },
+        )
+        self.assertEqual(plugin_override.reference, "q2-dada2-dev")
+        self.assertEqual(plugin_override.options, {"conda_reference_type": "environment"})
+        self.assertEqual(task_override.reference, "/envs/q2-dada2")
+        self.assertEqual(task_override.options, {"conda_reference_type": "prefix"})
+
 
 class ConfigurableResolverTests(unittest.TestCase):
     def test_plugin_override_inherits_default_apptainer_kind(self) -> None:
@@ -97,3 +146,14 @@ class ConfigurableResolverTests(unittest.TestCase):
         self.assertEqual(environment.kind, "docker")
         self.assertEqual(environment.reference, "registry.internal/dada2:1.0")
         self.assertEqual(environment.options, {"platform": "linux/amd64"})
+
+    def test_kind_override_without_reference_clears_inherited_reference(self) -> None:
+        resolver = ConfigurableTaskEnvironmentResolver(
+            base=DefaultTaskEnvironmentResolver(),
+            default_override=TaskEnvironmentOverride(kind="conda"),
+        )
+
+        environment = resolver.resolve(task=_task())
+
+        self.assertEqual(environment.kind, "conda")
+        self.assertEqual(environment.reference, "")

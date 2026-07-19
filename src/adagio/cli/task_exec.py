@@ -4,13 +4,16 @@ import argparse
 from collections.abc import Mapping
 from contextlib import nullcontext
 import os
+import re
 import sys
+import tempfile
 import warnings
 import zipfile
 from pathlib import Path
 from typing import Any
 
 from adagio.executors.task_contract import (
+    DATA_IMPORT_PLUGIN,
     build_result_manifest,
     read_json_file,
     write_json_file,
@@ -31,12 +34,19 @@ def run_task_exec(argv: list[str]) -> None:
 
 
 def _run_task(spec: dict[str, Any]) -> None:
+    if spec.get("plugin") == DATA_IMPORT_PLUGIN:
+        _run_data_import(spec)
+        return
+
     from qiime2 import Artifact, Cache, Metadata
     from qiime2.sdk import PluginManager
 
     plugin_name: str = spec["plugin"]
     action_name: str = spec["action"]
     archive_inputs: dict[str, str] = spec.get("archive_inputs", {})
+    archive_input_materializations: dict[str, dict[str, Any]] = spec.get(
+        "archive_input_materializations", {}
+    )
     archive_collection_inputs: dict[str, list[str]] = spec.get("archive_collection_inputs", {})
     metadata_inputs: dict[str, str] = spec.get("metadata_inputs", {})
     params: dict[str, Any] = spec.get("params", {})
@@ -72,7 +82,12 @@ def _run_task(spec: dict[str, Any]) -> None:
         kwargs: dict[str, Any] = {}
 
         for name, path in archive_inputs.items():
-            loaded = Artifact.load(path)
+            loaded = _load_archive_input(
+                action=action,
+                input_name=name,
+                path=path,
+                materialization=archive_input_materializations.get(name),
+            )
             kwargs[name] = _cache_loaded_input(cache=cache, value=loaded)
 
         for name, paths in archive_collection_inputs.items():
@@ -131,10 +146,170 @@ def _run_task(spec: dict[str, Any]) -> None:
         )
 
 
+def _run_data_import(spec: dict[str, Any]) -> None:
+    """Import raw data into a single artifact and save it (no plugin action).
+
+    Used to materialize a data-import artifact that is exposed as a pipeline
+    output. Runs inside a consuming action's environment, which already has the
+    relevant QIIME semantic type registered, and reuses the same raw-import
+    logic as lazily-materialized plugin inputs.
+    """
+    archive_inputs: dict[str, str] = spec.get("archive_inputs", {})
+    materializations: dict[str, dict[str, Any]] = spec.get(
+        "archive_input_materializations", {}
+    )
+    outputs: dict[str, str] = spec["outputs"]
+    result_manifest: str | None = spec.get("result_manifest")
+
+    if len(archive_inputs) != 1 or len(outputs) != 1:
+        raise ValueError(
+            "Data import tasks require exactly one source input and one "
+            "artifact output."
+        )
+
+    ((input_name, source_path),) = archive_inputs.items()
+    ((output_name, dest_path),) = outputs.items()
+
+    artifact = _load_archive_input(
+        action=None,
+        input_name=input_name,
+        path=source_path,
+        materialization=materializations.get(input_name),
+    )
+    saved = artifact.save(dest_path)
+
+    if result_manifest:
+        write_json_file(
+            Path(result_manifest),
+            build_result_manifest(outputs={output_name: saved}, reused=False),
+        )
+
+
 def _cache_loaded_input(*, cache: Any, value: Any) -> Any:
     if cache is None:
         return value
     return cache.process_pool.save(value)
+
+
+def _load_archive_input(
+    *,
+    action: Any,
+    input_name: str,
+    path: str,
+    materialization: Mapping[str, Any] | None,
+) -> Any:
+    from qiime2 import Artifact
+
+    if not materialization:
+        return Artifact.load(path)
+
+    if materialization.get("mode") != "raw":
+        raise ValueError(
+            f"Unsupported materialization mode for input {input_name!r}: "
+            f"{materialization.get('mode')!r}."
+        )
+
+    input_format = materialization.get("input_format")
+    if input_format is not None and (
+        not isinstance(input_format, str) or not input_format
+    ):
+        raise ValueError(
+            f"Raw input {input_name!r} has invalid QIIME import format."
+        )
+
+    validate_level = materialization.get("validate_level", "max")
+    if validate_level not in {"min", "max"}:
+        raise ValueError(
+            f"Raw input {input_name!r} has invalid validation level "
+            f"{validate_level!r}."
+        )
+
+    semantic_type = materialization.get("semantic_type")
+    if not isinstance(semantic_type, str) or not semantic_type:
+        semantic_type = _archive_input_type(action=action, input_name=input_name)
+
+    source = _localize_manifest_source(path=path, input_format=input_format)
+
+    return Artifact.import_data(
+        semantic_type,
+        source,
+        view_type=input_format,
+        validate_level=validate_level,
+    )
+
+
+# Matches an absolute-path token inside a manifest field (stops at whitespace,
+# tab, comma, or quotes — the delimiters QIIME manifest formats use).
+_ABSOLUTE_PATH_TOKEN = re.compile(r"/[^\s,\t\r\n\"']+")
+
+
+def _localize_manifest_source(*, path: str, input_format: str | None) -> str:
+    """Rewrite a manifest's interior host paths to the container mount, if needed.
+
+    QIIME manifest formats (``*Manifest*``) point at fastq files by absolute
+    path. When a plugin runs in a container the launcher bind-mounts host roots
+    under a ``/host`` prefix and rewrites the *manifest file's* path, but not the
+    paths written *inside* it — so QIIME can't find the fastqs. Here, inside the
+    container, we remap each interior path ``P`` to ``/host/P`` when only the
+    mounted copy exists, then import a rewritten copy. Outside a container the
+    original paths already resolve, so this is a no-op (returns ``path``).
+    """
+    if not input_format or "Manifest" not in input_format:
+        return path
+
+    from adagio.executors.container_support import HOST_MOUNT_POINT
+
+    try:
+        original = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        # If the manifest can't be read here, hand the original path to QIIME,
+        # which will raise the real, user-facing error.
+        return path
+    localized = _containerize_manifest_text(
+        text=original,
+        exists=os.path.exists,
+        mount_point=HOST_MOUNT_POINT,
+    )
+    if localized == original:
+        return path
+
+    fd, tmp = tempfile.mkstemp(
+        prefix="adagio-manifest-", suffix=Path(path).suffix or ".tsv"
+    )
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(localized)
+    return tmp
+
+
+def _containerize_manifest_text(*, text: str, exists, mount_point: str) -> str:
+    """Remap absolute-path tokens that resolve only under ``mount_point``.
+
+    A token is rewritten to ``mount_point + token`` only when the token itself
+    is absent but the mounted copy exists — so it is idempotent and a no-op on
+    the host (where the original paths exist).
+    """
+
+    def replace(match: "re.Match[str]") -> str:
+        token = match.group(0)
+        if exists(token):
+            return token
+        mapped = f"{mount_point}{token}"
+        return mapped if exists(mapped) else token
+
+    return _ABSOLUTE_PATH_TOKEN.sub(replace, text)
+
+
+def _archive_input_type(*, action: Any, input_name: str) -> str:
+    signature = getattr(action, "signature", None)
+    inputs = getattr(signature, "inputs", None)
+    if isinstance(inputs, Mapping) and input_name in inputs:
+        qiime_type = getattr(inputs[input_name], "qiime_type", None)
+        if qiime_type is not None:
+            return str(qiime_type)
+
+    raise KeyError(
+        f"Cannot determine QIIME semantic type for raw input {input_name!r}."
+    )
 
 
 def _materialize_default_parameters(*, action: Any, kwargs: dict[str, Any]) -> None:

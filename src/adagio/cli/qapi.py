@@ -7,7 +7,12 @@ from cyclopts import App, Parameter
 from rich.console import Console
 from rich.markup import escape
 
-from ..qapi import DEFAULT_SCHEMA_VERSION, generate_qapi_payload, submit_qapi_payload
+from ..qapi import (
+    DEFAULT_SCHEMA_VERSION,
+    generate_qapi_payload,
+    generate_qapi_plugin_index,
+    submit_qapi_payload,
+)
 
 console = Console()
 
@@ -18,6 +23,7 @@ def run_qapi(argv: list[str]) -> None:
         help="Generate and submit QAPI payloads from the active QIIME environment.",
     )
     app.command(build_qapi, name="build")
+    app.command(list_qapi_plugins, name="list")
     app(argv)
 
 
@@ -75,6 +81,29 @@ def _print_skipped_private_actions(skipped_actions: list[str]) -> None:
     )
 
 
+def _write_json_output(payload: object, output: Path | None) -> None:
+    if output is None:
+        console.print_json(json.dumps(payload))
+        return
+
+    output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    console.print(f"[green]Wrote JSON:[/green] {output}")
+
+
+def list_qapi_plugins(
+    *,
+    output: Annotated[
+        Path | None,
+        Parameter(
+            name=("--output",),
+            help="Optional path to write the registered plugin listing as JSON.",
+        ),
+    ] = None,
+) -> None:
+    """List plugins registered in the active QIIME environment."""
+    _write_json_output(generate_qapi_plugin_index(), output)
+
+
 def build_qapi(
     *,
     action_url: Annotated[
@@ -121,6 +150,14 @@ def build_qapi(
             help="Optional path to write the generated request JSON.",
         ),
     ] = None,
+    no_submit: Annotated[
+        bool,
+        Parameter(
+            name=("--no-submit",),
+            negative=(),
+            help="Generate QAPI locally without contacting Action Potential.",
+        ),
+    ] = False,
     submission_token: Annotated[
         str | None,
         Parameter(
@@ -173,8 +210,12 @@ def build_qapi(
     _print_skipped_private_actions(skipped_private_actions)
 
     if output is not None:
-        output.write_text(json.dumps(request_body, indent=2), encoding="utf-8")
-        console.print(f"[green]Wrote QAPI payload:[/green] {output}")
+        _write_json_output(request_body, output)
+
+    if no_submit:
+        if output is None:
+            _write_json_output(request_body, None)
+        return
 
     resolved_action_url = action_url or os.getenv("ACTION_URL")
     if dry_run and not resolved_action_url:

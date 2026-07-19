@@ -8,9 +8,9 @@ from typing import Any
 
 from rich.console import Console
 
-from ..executors.base import TaskEnvironmentOverride
 from ..executors.cache_support import (
     CACHE_DIR_HELP,
+    RECYCLE_POOL_HELP,
     REUSE_HELP,
     resolve_cache_config,
 )
@@ -19,7 +19,11 @@ from ..model.pipeline import AdagioPipeline
 from ..monitor.composite import CompositeMonitor
 from ..monitor.connected import ConnectedMonitor
 from ..monitor.log import LogMonitor
-from .config import load_run_config
+from .config import (
+    default_environment_override,
+    load_run_config,
+    named_environment_overrides,
+)
 
 
 def run_runtime(argv: list[str], *, console: Console) -> None:
@@ -59,6 +63,39 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         help=REUSE_HELP,
     )
     parser.add_argument(
+        "--recycle-pool",
+        required=False,
+        default=None,
+        help=RECYCLE_POOL_HELP,
+    )
+    parser.add_argument(
+        "--no-reuse-nodes",
+        required=False,
+        default=None,
+        help=(
+            "Comma-separated node ids that must execute fresh. Other nodes keep "
+            "ordinary cache eligibility unless --no-reuse disables it run-wide."
+        ),
+    )
+    parser.add_argument(
+        "--log-dir",
+        required=False,
+        default=None,
+        help=(
+            "Directory to copy each task's container log into before the temp "
+            "work dir is torn down. Enables live tail + past-run log fetch."
+        ),
+    )
+    parser.add_argument(
+        "--targets",
+        required=False,
+        default=None,
+        help=(
+            "Comma-separated node ids to produce. The plan is pruned to the "
+            "upstream closure needed for these nodes. Defaults to all nodes."
+        ),
+    )
+    parser.add_argument(
         "--connected",
         action="store_true",
         help="Emit execution status updates to the runtime-adapter.",
@@ -81,11 +118,14 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         runtime_arguments=runtime_arguments,
         output_dir=output_dir,
     )
-    _validate_required_arguments(pipeline, arguments)
+    target_ids = _parse_targets(opts.targets)
+    _validate_required_arguments(pipeline, arguments, target_ids=target_ids)
     cache_config = resolve_cache_config(
         cwd=Path.cwd().resolve(),
         cache_dir=opts.cache_dir,
         reuse=opts.reuse,
+        recycle_pool=opts.recycle_pool,
+        no_reuse_nodes=_parse_node_ids(opts.no_reuse_nodes),
     )
 
     connected = bool(
@@ -103,21 +143,35 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
             ConnectedMonitor(runtime_url=runtime_url, job_id=opts.job_id or ""),
         )
 
+    # Run-level reproducibility header (design §5.1). adagio_version is cheap;
+    # qiime/plugin versions are intentionally left empty (never import qiime2 in
+    # the host process) and image digests are filled per-task on node events.
+    reproducibility = _build_reproducibility()
+
     if connected and runtime_url and opts.job_id:
+        # The adapter captures the reproducibility header from ``job_status``
+        # events (its relay ignores unknown event types), so it rides on the
+        # initial "running" post rather than only on the monitor event below.
         _post_job_event(
             runtime_url=runtime_url,
             job_id=opts.job_id,
-            payload={"event": "job_status", "status": "running"},
+            payload={
+                "event": "job_status",
+                "status": "running",
+                "reproducibility": reproducibility,
+            },
         )
+
+    monitor.report_reproducibility(reproducibility=reproducibility)
 
     from ..executors import select_default_executor
 
     executor = select_default_executor(
-        default_override=_default_override(run_config),
-        plugin_overrides=_named_overrides(
+        default_override=default_environment_override(run_config),
+        plugin_overrides=named_environment_overrides(
             run_config.plugins if run_config is not None else {}
         ),
-        task_overrides=_named_overrides(
+        task_overrides=named_environment_overrides(
             run_config.tasks if run_config is not None else {}
         ),
     )
@@ -129,6 +183,8 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
             console=console,
             monitor=monitor,
             cache_config=cache_config,
+            target_ids=target_ids,
+            log_dir=opts.log_dir,
         )
     except Exception as exc:  # noqa: BLE001
         if connected and runtime_url and opts.job_id:
@@ -145,6 +201,37 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
                 job_id=opts.job_id,
                 payload={"event": "job_status", "status": "succeeded"},
             )
+
+
+def _parse_node_ids(raw: str | None) -> set[str]:
+    """Parse a comma-separated node-id argument."""
+    if not raw:
+        return set()
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _parse_targets(raw: str | None) -> set[str] | None:
+    """Parse ``--targets id[,id...]`` into a set of node ids (None => all)."""
+    ids = _parse_node_ids(raw)
+    return ids or None
+
+
+def _build_reproducibility() -> dict[str, Any]:
+    """Assemble the run-level reproducibility header (design §5.1).
+
+    ``adagio_version`` comes from installed metadata. QIIME / plugin versions are
+    deliberately omitted here — importing ``qiime2`` in the host process is
+    forbidden; those live inside the containers. Image digests are resolved
+    per-task and surfaced on node events, so ``image_digests`` starts empty.
+    """
+    from .. import __version__
+
+    return {
+        "adagio_version": __version__,
+        "qiime_version": None,
+        "plugin_versions": {},
+        "image_digests": {},
+    }
 
 
 def _load_json(path: Path) -> Any:
@@ -165,37 +252,6 @@ def _resolve_output_dir(raw_output_dir: str | None, job_id: str | None) -> str:
         output_dir = "/storage/runtime_outputs"
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
-
-
-def _default_override(run_config: Any) -> TaskEnvironmentOverride | None:
-    if run_config is None:
-        return None
-    defaults = run_config.defaults
-    if defaults.kind is None and defaults.image is None and defaults.platform is None:
-        return None
-    return TaskEnvironmentOverride(
-        kind=defaults.kind,
-        reference=defaults.image,
-        platform=defaults.platform,
-    )
-
-
-def _named_overrides(
-    raw_overrides: dict[str, Any],
-) -> dict[str, TaskEnvironmentOverride] | None:
-    resolved = {
-        name: TaskEnvironmentOverride(
-            kind=override.kind,
-            reference=override.image,
-            platform=override.platform,
-        )
-        for name, override in raw_overrides.items()
-        if override.kind is not None
-        or override.image is not None
-        or override.platform is not None
-    }
-    return resolved or None
-
 
 def _build_arguments(
     *,
@@ -226,6 +282,18 @@ def _build_arguments(
         )
         if resolved_outputs is not None:
             arguments.outputs = resolved_outputs
+
+        resolved_publish = _resolve_outputs(
+            runtime_arguments.get("publish"), storage_root=storage_root
+        )
+        if isinstance(resolved_publish, dict):
+            output_names = {output.name for output in pipeline.signature.outputs}
+            unknown = sorted(set(resolved_publish) - output_names)
+            if unknown:
+                raise SystemExit(
+                    "Unknown publish outputs in arguments file: " + ", ".join(unknown)
+                )
+            arguments.publish = resolved_publish
 
     if _outputs_need_default(arguments.outputs):
         arguments.outputs = output_dir
@@ -357,7 +425,10 @@ def _normalize_path(path: str, *, storage_root: str) -> str:
 def _outputs_need_default(outputs: str | dict[str, str]) -> bool:
     if isinstance(outputs, str):
         return outputs == "" or outputs == "<fill me>"
-    return any(value in {"", "<fill me>"} for value in outputs.values())
+    # An empty map means no destinations were provided (the run UI sends
+    # ``outputs: {}``) → fall back to --output-dir, which yields one file per
+    # pipeline output. A non-empty map still defaults only if it has holes.
+    return not outputs or any(value in {"", "<fill me>"} for value in outputs.values())
 
 
 def _is_missing(value: Any) -> bool:
@@ -365,18 +436,31 @@ def _is_missing(value: Any) -> bool:
 
 
 def _validate_required_arguments(
-    pipeline: AdagioPipeline, arguments: AdagioArguments
+    pipeline: AdagioPipeline,
+    arguments: AdagioArguments,
+    target_ids: set[str] | None = None,
 ) -> None:
+    sig = pipeline.signature
+
+    # For a partial run, only require the inputs/params the target closure
+    # actually consumes — a downstream target must not demand root inputs that
+    # feed unrelated branches (that SystemExit'd valid partial runs before any
+    # node reported, leaving the editor stuck on yellow). None => require all.
+    needed_input_ids, needed_param_ids = _closure_argument_ids(pipeline, target_ids)
+
     missing_inputs = [
         input_def.name
-        for input_def in pipeline.signature.inputs
-        if input_def.required and _is_missing(arguments.inputs.get(input_def.name))
+        for input_def in sig.inputs
+        if input_def.required
+        and (needed_input_ids is None or input_def.id in needed_input_ids)
+        and _is_missing(arguments.inputs.get(input_def.name))
     ]
     missing_params = [
         param.name
-        for param in pipeline.signature.parameters
+        for param in sig.parameters
         if param.required
         and param.default is None
+        and (needed_param_ids is None or param.id in needed_param_ids)
         and _is_missing(arguments.parameters.get(param.name))
     ]
 
@@ -387,15 +471,57 @@ def _validate_required_arguments(
         raise SystemExit("Missing required runtime arguments: " + ", ".join(missing))
 
 
+def _closure_argument_ids(
+    pipeline: AdagioPipeline, target_ids: set[str] | None
+) -> tuple[set[str] | None, set[str] | None]:
+    """Pipeline input ids + param ids the ``target_ids`` closure consumes.
+
+    Returns ``(None, None)`` for a full run (require everything). For a partial
+    run, walks the same target closure the executor runs (``prune_to_targets``)
+    and collects the signature input ids (a RootInputTask's input src.id equals
+    the pipeline input id) and promoted param ids those tasks reference.
+    """
+    if not target_ids:
+        return None, None
+
+    from ..executors.common import prune_to_targets
+    from ..model.task import input_source_ids
+
+    closure = prune_to_targets(
+        execution_plan=list(pipeline.iter_tasks()), target_ids=target_ids
+    )
+    input_ids: set[str] = set()
+    param_ids: set[str] = set()
+    for task in closure:
+        for src in task.inputs.values():
+            for source_id in input_source_ids(src):
+                input_ids.add(source_id)
+        for param in task.parameters.values():
+            kind = getattr(param, "kind", None)
+            if kind == "promoted":
+                param_ids.add(param.id)
+            elif kind == "metadata":
+                column = getattr(param, "column", None)
+                if getattr(column, "kind", None) == "promoted":
+                    param_ids.add(column.id)
+    return input_ids, param_ids
+
+
 def _post_job_event(*, runtime_url: str, job_id: str, payload: dict[str, Any]) -> None:
     base = runtime_url.rstrip("/")
     url = f"{base}/jobs/{job_id}/events"
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    # Connected posts gain optional Authorization from RUNTIME_TOKEN (design
+    # §5.2), matching ConnectedMonitor's transport.
+    token = os.getenv("RUNTIME_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         url,
         data=data,
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=5):
