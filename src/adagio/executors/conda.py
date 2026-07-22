@@ -258,12 +258,14 @@ def _conda_executable_near_prefix(prefix: str) -> str | None:
 def _conda_candidates_near_root(root: Path, *, platform: str) -> tuple[Path, ...]:
     """Per-platform conda binary locations inside an install root.
 
-    Windows installs expose ``condabin/conda.bat`` and ``Scripts/conda.exe``;
-    there is no ``bin/conda``. Kept as a pure function so both layouts are
+    Windows candidates are ``.exe`` only: the result is passed to
+    ``subprocess.run`` without a shell, which cannot launch ``.bat`` files,
+    so ``condabin/conda.bat`` must never be returned (mirrors the desktop's
+    execFile constraint). Kept as a pure function so both layouts are
     testable regardless of the host platform.
     """
     if platform == "nt":
-        return (root / "condabin" / "conda.bat", root / "Scripts" / "conda.exe")
+        return (root / "Scripts" / "conda.exe", root / "condabin" / "conda.exe")
     return (root / "condabin" / "conda", root / "bin" / "conda")
 
 

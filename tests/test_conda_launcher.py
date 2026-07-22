@@ -333,8 +333,9 @@ class CondaExecutableResolutionTests(unittest.TestCase):
                     _resolve_conda_executable(options={}, prefix=str(prefix))
 
     def test_candidate_layouts_cover_both_platforms(self) -> None:
-        # Pure-function check so the Windows layout is exercised on any host:
-        # Windows has no bin/conda - condabin/conda.bat and Scripts/conda.exe.
+        # Pure-function check so the Windows layout is exercised on any host.
+        # Windows candidates must be .exe only: the launcher execs the result
+        # without a shell, which cannot start .bat files.
         root = Path("/opt/miniforge3")
         self.assertEqual(
             _conda_candidates_near_root(root, platform="posix"),
@@ -342,8 +343,10 @@ class CondaExecutableResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             _conda_candidates_near_root(root, platform="nt"),
-            (root / "condabin" / "conda.bat", root / "Scripts" / "conda.exe"),
+            (root / "Scripts" / "conda.exe", root / "condabin" / "conda.exe"),
         )
+        for candidate in _conda_candidates_near_root(root, platform="nt"):
+            self.assertNotEqual(candidate.suffix, ".bat")
 
 
 class CondaPrefixInvariantTests(unittest.TestCase):

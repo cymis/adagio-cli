@@ -166,6 +166,21 @@ class RunConfigTests(unittest.TestCase):
         ):
             EnvironmentOverride(kind="conda", prefix="relative/env")
 
+    def test_conda_prefix_whitespace_is_stripped_before_validation(self) -> None:
+        # Matches the UI's trimmed validation and the backend validator:
+        # " /opt/env" must not be rejected, and "/opt/env " must not name a
+        # different directory with a trailing space.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_prefix = Path(tmpdir).resolve() / "envs" / "qiime2"
+            real_prefix.mkdir(parents=True)
+
+            override = EnvironmentOverride(
+                kind="conda", prefix=f"  {real_prefix}  "
+            ).to_task_environment_override()
+
+            assert override is not None
+            self.assertEqual(override.reference, str(real_prefix))
+
 
 class ConfigurableResolverTests(unittest.TestCase):
     def test_plugin_override_inherits_default_apptainer_kind(self) -> None:

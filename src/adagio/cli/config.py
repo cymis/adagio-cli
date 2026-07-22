@@ -56,13 +56,19 @@ class EnvironmentOverride(BaseModel):
             raise ValueError(
                 'Conda environments use prefix = "/path/to/env", not reference.'
             )
+        # Stripped BEFORE the absoluteness check and stored stripped, matching
+        # the UI's trimmed validation and the backend validator - otherwise
+        # " /opt/env" is rejected after the UI called it valid, and
+        # "/opt/env " names a different directory with a trailing space.
         # Absoluteness is checked before ``.resolve()`` so a relative spelling
         # fails loudly instead of silently binding to the CLI's working
         # directory. ``~`` is fine - expanduser() yields an absolute path.
-        if self.prefix is not None and not Path(self.prefix).expanduser().is_absolute():
-            raise ValueError(
-                f'Conda prefix must be an absolute path; got "{self.prefix}".'
-            )
+        if self.prefix is not None:
+            self.prefix = self.prefix.strip()
+            if not Path(self.prefix).expanduser().is_absolute():
+                raise ValueError(
+                    f'Conda prefix must be an absolute path; got "{self.prefix}".'
+                )
         return self
 
     def to_task_environment_override(self) -> TaskEnvironmentOverride | None:
