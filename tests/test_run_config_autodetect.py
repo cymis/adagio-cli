@@ -18,14 +18,14 @@ class RunConfigAutodetectTests(unittest.TestCase):
             path = _write(
                 Path(tmp),
                 "config.toml",
-                'version = 1\n[defaults]\nkind = "conda"\nenvironment = "q2-2026"\n'
+                'version = 1\n[defaults]\nkind = "conda"\nprefix = "/opt/envs/q2-2026"\n'
                 '[plugins]\ndada2 = { kind = "conda", prefix = "/opt/envs/dada2" }\n',
             )
             config = load_run_config(path)
         assert config is not None
         self.assertEqual(config.version, 1)
         self.assertEqual(config.defaults.kind, "conda")
-        self.assertEqual(config.defaults.environment, "q2-2026")
+        self.assertEqual(config.defaults.prefix, "/opt/envs/q2-2026")
         self.assertIn("dada2", config.plugins)
         self.assertEqual(config.plugins["dada2"].prefix, "/opt/envs/dada2")
 

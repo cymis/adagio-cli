@@ -16,11 +16,24 @@ class EnvironmentOverride(BaseModel):
     kind: str | None = None
     image: str | None = None
     reference: str | None = None
-    environment: str | None = None
     prefix: str | None = None
     platform: str | None = None
     conda_executable: str | None = None
     options: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_environment_key(cls, data: Any) -> Any:
+        # The name-based ``environment`` field is gone. Without this check
+        # pydantic's default extra-ignore would silently drop a legacy env
+        # selection and fall back to the default environment.
+        if isinstance(data, dict) and "environment" in data:
+            raise ValueError(
+                "Conda environments are referenced by absolute path now. "
+                'Replace environment = "<name>" with prefix = "/path/to/env" '
+                "(conda env list shows each environment's path)."
+            )
+        return data
 
     @model_validator(mode="after")
     def _validate_reference_fields(self) -> "EnvironmentOverride":
@@ -29,7 +42,6 @@ class EnvironmentOverride(BaseModel):
             for name, value in (
                 ("image", self.image),
                 ("reference", self.reference),
-                ("environment", self.environment),
                 ("prefix", self.prefix),
             )
             if value is not None
@@ -42,12 +54,8 @@ class EnvironmentOverride(BaseModel):
     def to_task_environment_override(self) -> TaskEnvironmentOverride | None:
         options = dict(self.options)
         reference = self.reference if self.reference is not None else self.image
-        if self.environment is not None:
-            reference = self.environment
-            options["conda_reference_type"] = "environment"
         if self.prefix is not None:
-            reference = self.prefix
-            options["conda_reference_type"] = "prefix"
+            reference = str(Path(self.prefix).expanduser().resolve())
         if self.conda_executable is not None:
             options["conda_executable"] = self.conda_executable
 

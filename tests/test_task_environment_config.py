@@ -1,8 +1,10 @@
+import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
-from adagio.cli.config import load_run_config
+from adagio.cli.config import EnvironmentOverride, load_run_config
 from adagio.executors.base import TaskEnvironmentOverride
 from adagio.executors.defaults import (
     ConfigurableTaskEnvironmentResolver,
@@ -59,6 +61,50 @@ class RunConfigTests(unittest.TestCase):
 
     def test_load_run_config_accepts_conda_kind(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            default_prefix = root / "envs" / "qiime2-2026.1"
+            task_prefix = root / "envs" / "q2-dada2"
+            default_prefix.mkdir(parents=True)
+            task_prefix.mkdir(parents=True)
+            config_path = Path(tmpdir) / "runtime.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        "",
+                        "[defaults]",
+                        'kind = "conda"',
+                        f'prefix = "{default_prefix}"',
+                        'conda_executable = "/opt/conda/bin/conda"',
+                        "",
+                        "[tasks]",
+                        f'"dada2.denoise_single" = {{ prefix = "{task_prefix}" }}',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_run_config(config_path)
+
+            assert config is not None
+            default_override = config.defaults.to_task_environment_override()
+            task_override = config.tasks[
+                "dada2.denoise_single"
+            ].to_task_environment_override()
+
+            assert default_override is not None
+            assert task_override is not None
+            self.assertEqual(default_override.kind, "conda")
+            self.assertEqual(default_override.reference, str(default_prefix))
+            self.assertEqual(
+                default_override.options,
+                {"conda_executable": "/opt/conda/bin/conda"},
+            )
+            self.assertEqual(task_override.reference, str(task_prefix))
+            self.assertIsNone(task_override.options)
+
+    def test_legacy_environment_key_is_a_hard_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "runtime.toml"
             config_path.write_text(
                 "\n".join(
@@ -68,43 +114,41 @@ class RunConfigTests(unittest.TestCase):
                         "[defaults]",
                         'kind = "conda"',
                         'environment = "qiime2-2026.1"',
-                        'conda_executable = "/opt/conda/bin/conda"',
-                        "",
-                        "[plugins]",
-                        'dada2 = { environment = "q2-dada2-dev" }',
-                        "",
-                        "[tasks]",
-                        '"dada2.denoise_single" = { prefix = "/envs/q2-dada2" }',
                     ]
                 ),
                 encoding="utf-8",
             )
 
-            config = load_run_config(config_path)
+            with self.assertRaisesRegex(
+                Exception,
+                r"Conda environments are referenced by absolute path now\. "
+                r'Replace environment = "<name>" with prefix = "/path/to/env" '
+                r"\(conda env list shows each environment's path\)\.",
+            ):
+                load_run_config(config_path)
 
-        assert config is not None
-        default_override = config.defaults.to_task_environment_override()
-        plugin_override = config.plugins["dada2"].to_task_environment_override()
-        task_override = config.tasks[
-            "dada2.denoise_single"
-        ].to_task_environment_override()
+    def test_conda_prefix_spellings_normalize_identically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir).resolve()
+            real_prefix = home / "envs" / "qiime2"
+            real_prefix.mkdir(parents=True)
+            link = home / "env-link"
+            link.symlink_to(real_prefix)
 
-        assert default_override is not None
-        assert plugin_override is not None
-        assert task_override is not None
-        self.assertEqual(default_override.kind, "conda")
-        self.assertEqual(default_override.reference, "qiime2-2026.1")
-        self.assertEqual(
-            default_override.options,
-            {
-                "conda_reference_type": "environment",
-                "conda_executable": "/opt/conda/bin/conda",
-            },
-        )
-        self.assertEqual(plugin_override.reference, "q2-dada2-dev")
-        self.assertEqual(plugin_override.options, {"conda_reference_type": "environment"})
-        self.assertEqual(task_override.reference, "/envs/q2-dada2")
-        self.assertEqual(task_override.options, {"conda_reference_type": "prefix"})
+            spellings = ["~/envs/qiime2", str(real_prefix), str(link)]
+            with unittest.mock.patch.dict(
+                os.environ, {"HOME": str(home), "USERPROFILE": str(home)}
+            ):
+                references = [
+                    EnvironmentOverride(
+                        kind="conda", prefix=spelling
+                    ).to_task_environment_override()
+                    for spelling in spellings
+                ]
+
+            assert all(override is not None for override in references)
+            resolved = {override.reference for override in references if override}
+            self.assertEqual(resolved, {str(real_prefix.resolve())})
 
 
 class ConfigurableResolverTests(unittest.TestCase):

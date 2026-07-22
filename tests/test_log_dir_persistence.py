@@ -45,6 +45,10 @@ class CondaContainerLogTests(unittest.TestCase):
             work_path = root / "work"
             cwd.mkdir()
             work_path.mkdir()
+            conda_executable = root / "bin" / "conda"
+            conda_executable.parent.mkdir()
+            conda_executable.write_text("stub", encoding="utf-8")
+            prefix = root / "envs" / "q2-2026"
             output_path = work_path / "summary.qzv"
             manifest_path = result_manifest_path(task_id=task.id, work_path=work_path)
 
@@ -77,8 +81,8 @@ class CondaContainerLogTests(unittest.TestCase):
                 result = launcher.launch(
                     environment=TaskEnvironmentSpec(
                         kind="conda",
-                        reference="q2-2026",
-                        options={"conda_reference_type": "environment"},
+                        reference=str(prefix),
+                        options={"conda_executable": str(conda_executable)},
                     ),
                     request=request,
                 )
@@ -91,7 +95,7 @@ class CondaContainerLogTests(unittest.TestCase):
             # Enrichment surfaces the log path + exit code.
             self.assertEqual(result.log_path, str(log_path))
             self.assertEqual(result.exit_code, 0)
-            self.assertEqual(result.image_ref, "q2-2026")
+            self.assertEqual(result.image_ref, str(prefix))
 
 
 # --- run_serial_pipeline --log-dir copy -------------------------------------
