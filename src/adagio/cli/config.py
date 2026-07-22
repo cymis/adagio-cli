@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..executors.base import TaskEnvironmentOverride
 
@@ -13,36 +13,14 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 class EnvironmentOverride(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     kind: str | None = None
     image: str | None = None
     prefix: str | None = None
     platform: str | None = None
     conda_executable: str | None = None
     options: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_removed_keys(cls, data: Any) -> Any:
-        # Pydantic's default extra-ignore would silently drop these keys and
-        # let the selection fall back elsewhere; removed spellings must fail
-        # loudly instead.
-        if isinstance(data, dict) and "environment" in data:
-            raise ValueError(
-                "Conda environments are referenced by absolute path now. "
-                'Replace environment = "<name>" with prefix = "/path/to/env" '
-                "(conda env list shows each environment's path)."
-            )
-        # A kind-less generic reference inherits its kind at resolve time, so
-        # a table could select a conda environment while bypassing prefix
-        # validation and normalization entirely. image/prefix say the same
-        # things without the ambiguity.
-        if isinstance(data, dict) and "reference" in data:
-            raise ValueError(
-                "The generic reference field was removed. Use "
-                'image = "<ref>" for docker/apptainer or '
-                'prefix = "/path/to/env" for conda.'
-            )
-        return data
 
     @model_validator(mode="after")
     def _validate_reference_fields(self) -> "EnvironmentOverride":
