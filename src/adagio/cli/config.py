@@ -15,7 +15,6 @@ except ModuleNotFoundError:  # pragma: no cover
 class EnvironmentOverride(BaseModel):
     kind: str | None = None
     image: str | None = None
-    reference: str | None = None
     prefix: str | None = None
     platform: str | None = None
     conda_executable: str | None = None
@@ -23,15 +22,25 @@ class EnvironmentOverride(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _reject_legacy_environment_key(cls, data: Any) -> Any:
-        # The name-based ``environment`` field is gone. Without this check
-        # pydantic's default extra-ignore would silently drop a legacy env
-        # selection and fall back to the default environment.
+    def _reject_removed_keys(cls, data: Any) -> Any:
+        # Pydantic's default extra-ignore would silently drop these keys and
+        # let the selection fall back elsewhere; removed spellings must fail
+        # loudly instead.
         if isinstance(data, dict) and "environment" in data:
             raise ValueError(
                 "Conda environments are referenced by absolute path now. "
                 'Replace environment = "<name>" with prefix = "/path/to/env" '
                 "(conda env list shows each environment's path)."
+            )
+        # A kind-less generic reference inherits its kind at resolve time, so
+        # a table could select a conda environment while bypassing prefix
+        # validation and normalization entirely. image/prefix say the same
+        # things without the ambiguity.
+        if isinstance(data, dict) and "reference" in data:
+            raise ValueError(
+                "The generic reference field was removed. Use "
+                'image = "<ref>" for docker/apptainer or '
+                'prefix = "/path/to/env" for conda.'
             )
         return data
 
@@ -41,7 +50,6 @@ class EnvironmentOverride(BaseModel):
             name
             for name, value in (
                 ("image", self.image),
-                ("reference", self.reference),
                 ("prefix", self.prefix),
             )
             if value is not None
@@ -49,13 +57,6 @@ class EnvironmentOverride(BaseModel):
         if len(configured) > 1:
             names = ", ".join(configured)
             raise ValueError(f"Only one environment reference field may be set: {names}")
-        # The generic ``reference`` field has no prefix semantics: paired with
-        # kind="conda" it would reach the launcher unvalidated and be handed to
-        # ``conda run -p`` as a working-directory-relative path.
-        if self.kind == "conda" and self.reference is not None:
-            raise ValueError(
-                'Conda environments use prefix = "/path/to/env", not reference.'
-            )
         # Stripped BEFORE the absoluteness check and stored stripped, matching
         # the UI's trimmed validation and the backend validator - otherwise
         # " /opt/env" is rejected after the UI called it valid, and
@@ -73,7 +74,7 @@ class EnvironmentOverride(BaseModel):
 
     def to_task_environment_override(self) -> TaskEnvironmentOverride | None:
         options = dict(self.options)
-        reference = self.reference if self.reference is not None else self.image
+        reference = self.image
         if self.prefix is not None:
             reference = str(Path(self.prefix).expanduser().resolve())
         if self.conda_executable is not None:

@@ -150,14 +150,44 @@ class RunConfigTests(unittest.TestCase):
             resolved = {override.reference for override in references if override}
             self.assertEqual(resolved, {str(real_prefix.resolve())})
 
-    def test_conda_kind_rejects_the_generic_reference_field(self) -> None:
-        # reference has no prefix semantics; paired with conda it would reach
-        # `conda run -p` as a working-directory-relative path.
+    def test_generic_reference_field_is_removed(self) -> None:
+        # A kind-less reference inherits its kind at resolve time, so it could
+        # select a conda environment while bypassing prefix validation and
+        # normalization. The field is gone; the removal must be loud.
         with self.assertRaisesRegex(
-            Exception,
-            r'Conda environments use prefix = "/path/to/env", not reference\.',
+            Exception, r"The generic reference field was removed\."
         ):
             EnvironmentOverride(kind="conda", reference="named-env")
+        with self.assertRaisesRegex(
+            Exception, r"The generic reference field was removed\."
+        ):
+            EnvironmentOverride(reference="/env/other")
+
+    def test_kind_inheriting_reference_cannot_reach_a_conda_launch(self) -> None:
+        # The exact bypass from review: defaults declare a conda prefix, a
+        # task table carries only `reference` and would inherit kind="conda"
+        # with an unvalidated path. The whole config parse must fail.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "runtime.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        "",
+                        "[defaults]",
+                        'kind = "conda"',
+                        'prefix = "/opt/envs/default"',
+                        "",
+                        "[tasks.x]",
+                        'reference = "/env/other"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                Exception, r"The generic reference field was removed\."
+            ):
+                load_run_config(config_path)
 
     def test_relative_conda_prefix_is_a_hard_error(self) -> None:
         with self.assertRaisesRegex(
