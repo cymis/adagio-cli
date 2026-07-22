@@ -49,6 +49,20 @@ class EnvironmentOverride(BaseModel):
         if len(configured) > 1:
             names = ", ".join(configured)
             raise ValueError(f"Only one environment reference field may be set: {names}")
+        # The generic ``reference`` field has no prefix semantics: paired with
+        # kind="conda" it would reach the launcher unvalidated and be handed to
+        # ``conda run -p`` as a working-directory-relative path.
+        if self.kind == "conda" and self.reference is not None:
+            raise ValueError(
+                'Conda environments use prefix = "/path/to/env", not reference.'
+            )
+        # Absoluteness is checked before ``.resolve()`` so a relative spelling
+        # fails loudly instead of silently binding to the CLI's working
+        # directory. ``~`` is fine - expanduser() yields an absolute path.
+        if self.prefix is not None and not Path(self.prefix).expanduser().is_absolute():
+            raise ValueError(
+                f'Conda prefix must be an absolute path; got "{self.prefix}".'
+            )
         return self
 
     def to_task_environment_override(self) -> TaskEnvironmentOverride | None:

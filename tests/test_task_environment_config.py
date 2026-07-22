@@ -150,6 +150,22 @@ class RunConfigTests(unittest.TestCase):
             resolved = {override.reference for override in references if override}
             self.assertEqual(resolved, {str(real_prefix.resolve())})
 
+    def test_conda_kind_rejects_the_generic_reference_field(self) -> None:
+        # reference has no prefix semantics; paired with conda it would reach
+        # `conda run -p` as a working-directory-relative path.
+        with self.assertRaisesRegex(
+            Exception,
+            r'Conda environments use prefix = "/path/to/env", not reference\.',
+        ):
+            EnvironmentOverride(kind="conda", reference="named-env")
+
+    def test_relative_conda_prefix_is_a_hard_error(self) -> None:
+        with self.assertRaisesRegex(
+            Exception,
+            r'Conda prefix must be an absolute path; got "relative/env"\.',
+        ):
+            EnvironmentOverride(kind="conda", prefix="relative/env")
+
 
 class ConfigurableResolverTests(unittest.TestCase):
     def test_plugin_override_inherits_default_apptainer_kind(self) -> None:

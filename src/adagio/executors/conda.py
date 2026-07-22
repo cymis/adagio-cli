@@ -187,7 +187,15 @@ def _conda_prefix(*, environment: TaskEnvironmentSpec) -> str:
             "Conda task environments require an environment path. "
             'Set prefix = "/path/to/env".'
         )
-    # Already normalized by EnvironmentOverride.to_task_environment_override().
+    # Config-built specs arrive normalized, but adapters can construct specs
+    # directly - a relative reference here would bind to the task's working
+    # directory, so the absolute-prefix invariant is enforced at the launcher
+    # boundary too.
+    if not Path(reference).is_absolute():
+        raise RuntimeError(
+            "Conda task environments require an absolute environment path; "
+            f'got "{reference}".'
+        )
     return reference
 
 
@@ -241,10 +249,22 @@ def _conda_executable_near_prefix(prefix: str) -> str | None:
         root = prefix_path.parent.parent
     else:
         root = prefix_path
-    for candidate in (root / "condabin" / "conda", root / "bin" / "conda"):
+    for candidate in _conda_candidates_near_root(root, platform=os.name):
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return None
+
+
+def _conda_candidates_near_root(root: Path, *, platform: str) -> tuple[Path, ...]:
+    """Per-platform conda binary locations inside an install root.
+
+    Windows installs expose ``condabin/conda.bat`` and ``Scripts/conda.exe``;
+    there is no ``bin/conda``. Kept as a pure function so both layouts are
+    testable regardless of the host platform.
+    """
+    if platform == "nt":
+        return (root / "condabin" / "conda.bat", root / "Scripts" / "conda.exe")
+    return (root / "condabin" / "conda", root / "bin" / "conda")
 
 
 def _resolve_executable(value: str) -> str | None:

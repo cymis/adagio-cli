@@ -8,6 +8,8 @@ from unittest.mock import patch
 from adagio.executors.base import TaskEnvironmentSpec, TaskExecutionRequest
 from adagio.executors.conda import (
     CondaTaskEnvironmentLauncher,
+    _conda_candidates_near_root,
+    _conda_prefix,
     _resolve_conda_executable,
 )
 from adagio.executors.container_support import container_python_root
@@ -329,3 +331,32 @@ class CondaExecutableResolutionTests(unittest.TestCase):
             with patch.dict(os.environ, {"PATH": str(root / "empty")}, clear=True):
                 with self.assertRaisesRegex(SystemExit, "ADAGIO_CONDA_EXE"):
                     _resolve_conda_executable(options={}, prefix=str(prefix))
+
+    def test_candidate_layouts_cover_both_platforms(self) -> None:
+        # Pure-function check so the Windows layout is exercised on any host:
+        # Windows has no bin/conda - condabin/conda.bat and Scripts/conda.exe.
+        root = Path("/opt/miniforge3")
+        self.assertEqual(
+            _conda_candidates_near_root(root, platform="posix"),
+            (root / "condabin" / "conda", root / "bin" / "conda"),
+        )
+        self.assertEqual(
+            _conda_candidates_near_root(root, platform="nt"),
+            (root / "condabin" / "conda.bat", root / "Scripts" / "conda.exe"),
+        )
+
+
+class CondaPrefixInvariantTests(unittest.TestCase):
+    """The launcher enforces the absolute-prefix invariant at its boundary."""
+
+    def test_relative_reference_is_rejected(self) -> None:
+        spec = TaskEnvironmentSpec(kind="conda", reference="relative/env")
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r'require an absolute environment path; got "relative/env"\.',
+        ):
+            _conda_prefix(environment=spec)
+
+    def test_absolute_reference_passes_through(self) -> None:
+        spec = TaskEnvironmentSpec(kind="conda", reference="/opt/envs/qiime2")
+        self.assertEqual(_conda_prefix(environment=spec), "/opt/envs/qiime2")
