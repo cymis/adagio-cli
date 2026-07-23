@@ -73,19 +73,19 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         write_json_file(spec_path, task_spec)
 
         options = dict(environment.options or {})
-        selector, reference = _conda_environment_selector(environment=environment)
-        conda_executable = _resolve_conda_executable(options=options)
-        python_executable = _conda_python_executable(
-            selector=selector,
-            reference=reference,
-        )
+        reference = _conda_prefix(environment=environment)
+        conda_executable = _resolve_conda_executable(options=options, prefix=reference)
+        python_executable = _conda_python_executable(reference=reference)
         python_root = container_python_root(work_path=request.work_path)
-        # Keep Conda in the launch path for both names and prefixes. Packages
-        # such as OpenJDK rely on activate.d hooks to configure their runtime.
+        # Keep Conda in the launch path even though the interpreter is invoked
+        # explicitly. Packages such as OpenJDK rely on activate.d hooks to
+        # configure their runtime. ``--no-capture-output`` keeps conda's
+        # capture layer from re-buffering output the CLI pipes itself.
         command = [
             conda_executable,
             "run",
-            selector,
+            "--no-capture-output",
+            "-p",
             reference,
             python_executable,
             "-m",
@@ -93,7 +93,7 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             "--task",
             str(spec_path),
         ]
-        label = f"conda run {selector} {reference}"
+        label = f"conda run -p {reference}"
 
         if console is not None:
             if not getattr(console, "_adagio_inline_monitor_active", False):
@@ -180,39 +180,34 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         )
 
 
-def _conda_environment_selector(*, environment: TaskEnvironmentSpec) -> tuple[str, str]:
+def _conda_prefix(*, environment: TaskEnvironmentSpec) -> str:
     reference = environment.reference.strip()
     if not reference:
         raise RuntimeError(
-            "Conda task environments require an environment name or prefix. "
-            'Set environment = "<name>" or prefix = "/path/to/env".'
+            "Conda task environments require an environment path. "
+            'Set prefix = "/path/to/env".'
         )
-
-    options = dict(environment.options or {})
-    reference_type = options.get("conda_reference_type")
-    if reference_type == "prefix":
-        return "-p", str(Path(reference).expanduser().resolve())
-    if reference_type not in (None, "environment"):
+    # Config-built specs arrive normalized, but adapters can construct specs
+    # directly - a relative reference here would bind to the task's working
+    # directory, so the absolute-prefix invariant is enforced at the launcher
+    # boundary too.
+    if not Path(reference).is_absolute():
         raise RuntimeError(
-            "Unsupported conda_reference_type option: "
-            f"{reference_type!r}. Expected 'environment' or 'prefix'."
+            "Conda task environments require an absolute environment path; "
+            f'got "{reference}".'
         )
-    if _looks_like_path(reference):
-        return "-p", str(Path(reference).expanduser().resolve())
-    return "-n", reference
+    return reference
 
 
-def _conda_python_executable(*, selector: str, reference: str) -> str:
-    """Use a prefix's interpreter explicitly while retaining ``conda run`` hooks."""
-    if selector != "-p":
-        return "python"
+def _conda_python_executable(*, reference: str) -> str:
+    """Use the prefix's interpreter explicitly while retaining ``conda run`` hooks."""
     prefix = Path(reference)
     if os.name == "nt":
         return str(prefix / "python.exe")
     return str(prefix / "bin" / "python")
 
 
-def _resolve_conda_executable(*, options: dict[str, Any]) -> str:
+def _resolve_conda_executable(*, options: dict[str, Any], prefix: str) -> str:
     configured = options.get("conda_executable")
     if isinstance(configured, str) and configured.strip():
         resolved = _resolve_executable(configured.strip())
@@ -227,14 +222,51 @@ def _resolve_conda_executable(*, options: dict[str, Any]) -> str:
             if resolved is not None:
                 return resolved
 
+    derived = _conda_executable_near_prefix(prefix)
+    if derived is not None:
+        return derived
+
     resolved = shutil.which("conda")
     if resolved is None:
         raise SystemExit(
             "Conda is required for conda task environment execution but was not "
-            "found in PATH. Set ADAGIO_CONDA_EXE or conda_executable in the "
-            "runtime config."
+            "found. Set ADAGIO_CONDA_EXE (or CONDA_EXE), set conda_executable "
+            "in the runtime config, or install conda so it is on PATH."
         )
     return resolved
+
+
+def _conda_executable_near_prefix(prefix: str) -> str | None:
+    """Locate the conda install that owns the target prefix.
+
+    Environments normally live under ``<root>/envs/<name>``; the base
+    environment is the root itself. Either way the owning install's binary is
+    derivable from the absolute prefix, so prefix-only references stay
+    self-locating even on GUI launches with a minimal PATH.
+    """
+    prefix_path = Path(prefix)
+    if prefix_path.parent.name == "envs":
+        root = prefix_path.parent.parent
+    else:
+        root = prefix_path
+    for candidate in _conda_candidates_near_root(root, platform=os.name):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _conda_candidates_near_root(root: Path, *, platform: str) -> tuple[Path, ...]:
+    """Per-platform conda binary locations inside an install root.
+
+    Windows candidates are ``.exe`` only: the result is passed to
+    ``subprocess.run`` without a shell, which cannot launch ``.bat`` files,
+    so ``condabin/conda.bat`` must never be returned (mirrors the desktop's
+    execFile constraint). Kept as a pure function so both layouts are
+    testable regardless of the host platform.
+    """
+    if platform == "nt":
+        return (root / "Scripts" / "conda.exe", root / "condabin" / "conda.exe")
+    return (root / "condabin" / "conda", root / "bin" / "conda")
 
 
 def _resolve_executable(value: str) -> str | None:

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..executors.base import TaskEnvironmentOverride
 
@@ -13,10 +13,10 @@ except ModuleNotFoundError:  # pragma: no cover
 
 
 class EnvironmentOverride(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     kind: str | None = None
     image: str | None = None
-    reference: str | None = None
-    environment: str | None = None
     prefix: str | None = None
     platform: str | None = None
     conda_executable: str | None = None
@@ -28,8 +28,6 @@ class EnvironmentOverride(BaseModel):
             name
             for name, value in (
                 ("image", self.image),
-                ("reference", self.reference),
-                ("environment", self.environment),
                 ("prefix", self.prefix),
             )
             if value is not None
@@ -37,17 +35,26 @@ class EnvironmentOverride(BaseModel):
         if len(configured) > 1:
             names = ", ".join(configured)
             raise ValueError(f"Only one environment reference field may be set: {names}")
+        # Stripped BEFORE the absoluteness check and stored stripped, matching
+        # the UI's trimmed validation and the backend validator - otherwise
+        # " /opt/env" is rejected after the UI called it valid, and
+        # "/opt/env " names a different directory with a trailing space.
+        # Absoluteness is checked before ``.resolve()`` so a relative spelling
+        # fails loudly instead of silently binding to the CLI's working
+        # directory. ``~`` is fine - expanduser() yields an absolute path.
+        if self.prefix is not None:
+            self.prefix = self.prefix.strip()
+            if not Path(self.prefix).expanduser().is_absolute():
+                raise ValueError(
+                    f'Conda prefix must be an absolute path; got "{self.prefix}".'
+                )
         return self
 
     def to_task_environment_override(self) -> TaskEnvironmentOverride | None:
         options = dict(self.options)
-        reference = self.reference if self.reference is not None else self.image
-        if self.environment is not None:
-            reference = self.environment
-            options["conda_reference_type"] = "environment"
+        reference = self.image
         if self.prefix is not None:
-            reference = self.prefix
-            options["conda_reference_type"] = "prefix"
+            reference = str(Path(self.prefix).expanduser().resolve())
         if self.conda_executable is not None:
             options["conda_executable"] = self.conda_executable
 
