@@ -90,6 +90,43 @@ def _write_json_output(payload: object, output: Path | None) -> None:
     console.print(f"[green]Wrote JSON:[/green] {output}")
 
 
+def _add_default_environment(
+    request_body: dict[str, object],
+    *,
+    default_docker_image: str | None,
+    default_conda_prefix: Path | None,
+) -> None:
+    """Attach one explicit execution default to every submitted plugin."""
+    if default_docker_image is not None and default_conda_prefix is not None:
+        raise SystemExit(
+            "Use either --default-docker-image or --default-conda-prefix, not both."
+        )
+
+    default_environment: dict[str, str] | None = None
+    if default_docker_image is not None:
+        image = default_docker_image.strip()
+        if not image:
+            raise SystemExit("--default-docker-image cannot be blank.")
+        default_environment = {"kind": "docker", "image": image}
+    elif default_conda_prefix is not None:
+        if not default_conda_prefix.is_absolute():
+            raise SystemExit("--default-conda-prefix must be an absolute path.")
+        default_environment = {
+            "kind": "conda",
+            "prefix": str(default_conda_prefix),
+        }
+
+    if default_environment is None:
+        return
+
+    plugin_data = request_body.get("data")
+    if not isinstance(plugin_data, dict):
+        raise SystemExit("Generated QAPI payload does not contain plugin data.")
+    for plugin in plugin_data.values():
+        if isinstance(plugin, dict):
+            plugin["default_environment"] = dict(default_environment)
+
+
 def list_qapi_plugins(
     *,
     output: Annotated[
@@ -192,6 +229,26 @@ def build_qapi(
             help="Overwrite existing plugins for the same QIIME version.",
         ),
     ] = False,
+    default_docker_image: Annotated[
+        str | None,
+        Parameter(
+            name=("--default-docker-image",),
+            help=(
+                "Persist this Docker image as the default execution environment "
+                "for every submitted plugin."
+            ),
+        ),
+    ] = None,
+    default_conda_prefix: Annotated[
+        Path | None,
+        Parameter(
+            name=("--default-conda-prefix",),
+            help=(
+                "Persist this absolute Conda environment path as the default "
+                "execution environment for every submitted plugin."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Generate QAPI from the active QIIME environment and submit it to Action Potential."""
     if all_plugins and plugin:
@@ -207,6 +264,11 @@ def build_qapi(
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    _add_default_environment(
+        request_body,
+        default_docker_image=default_docker_image,
+        default_conda_prefix=default_conda_prefix,
+    )
     _print_skipped_private_actions(skipped_private_actions)
 
     if output is not None:

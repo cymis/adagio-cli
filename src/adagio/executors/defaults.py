@@ -6,45 +6,12 @@ from .base import (
     TaskEnvironmentSpec,
 )
 
-DEFAULT_REGISTRY = "ghcr.io/cymis"
-DEFAULT_IMAGE_PREFIX = "qiime2-plugin-"
-DEFAULT_TAG = "2026.1"
-
-
-class DefaultTaskEnvironmentResolver(TaskEnvironmentResolver):
-    """Resolve plugin actions to default task environments.
-
-    The current default is a Docker image in GHCR derived from the plugin name.
-    The interface is task-scoped so future config can override individual tasks
-    with Docker, SIF/Apptainer, Conda, or cluster-specific environments.
-    """
-
-    def __init__(
-        self,
-        *,
-        registry: str = DEFAULT_REGISTRY,
-        image_prefix: str = DEFAULT_IMAGE_PREFIX,
-        tag: str = DEFAULT_TAG,
-    ) -> None:
-        self._registry = registry.rstrip("/")
-        self._image_prefix = image_prefix
-        self._tag = tag
-
-    def resolve(self, *, task: PluginActionTask) -> TaskEnvironmentSpec:
-        normalized = task.plugin.lower().replace("_", "-")
-        reference = f"{self._registry}/{self._image_prefix}{normalized}:{self._tag}"
-        return TaskEnvironmentSpec(
-            kind="docker",
-            reference=reference,
-            description=f"default plugin image for {task.plugin}",
-        )
-
 
 class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
     def __init__(
         self,
         *,
-        base: TaskEnvironmentResolver,
+        base: TaskEnvironmentResolver | None = None,
         default_override: TaskEnvironmentOverride | None = None,
         plugin_overrides: dict[str, TaskEnvironmentOverride] | None = None,
         task_overrides: dict[str, TaskEnvironmentOverride] | None = None,
@@ -55,10 +22,14 @@ class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
         self._task_overrides = task_overrides or {}
 
     def resolve(self, *, task: PluginActionTask) -> TaskEnvironmentSpec:
-        base_environment = self._base.resolve(task=task)
-        kind = base_environment.kind
-        reference = base_environment.reference
-        options = dict(base_environment.options or {})
+        base_environment = (
+            self._base.resolve(task=task) if self._base is not None else None
+        )
+        kind = base_environment.kind if base_environment is not None else ""
+        reference = base_environment.reference if base_environment is not None else ""
+        options = (
+            dict(base_environment.options or {}) if base_environment is not None else {}
+        )
         configured = False
 
         for override in (
@@ -83,6 +54,12 @@ class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
                 options.update(dict(override.options))
                 configured = True
 
+        if not kind or not reference:
+            raise ValueError(
+                f'No execution environment is configured for plugin "{task.plugin}". '
+                "Provide a plugin or task environment in the run configuration."
+            )
+
         return TaskEnvironmentSpec(
             kind=kind,
             reference=reference,
@@ -90,6 +67,8 @@ class ConfigurableTaskEnvironmentResolver(TaskEnvironmentResolver):
                 f"configured environment for {task.name or task.id}"
                 if configured
                 else base_environment.description
+                if base_environment is not None
+                else None
             ),
             options=options or None,
         )

@@ -6,10 +6,7 @@ from pathlib import Path
 
 from adagio.cli.config import EnvironmentOverride, load_run_config
 from adagio.executors.base import TaskEnvironmentOverride
-from adagio.executors.defaults import (
-    ConfigurableTaskEnvironmentResolver,
-    DefaultTaskEnvironmentResolver,
-)
+from adagio.executors.defaults import ConfigurableTaskEnvironmentResolver
 from adagio.model.task import PluginActionTask
 
 
@@ -158,7 +155,6 @@ class RunConfigTests(unittest.TestCase):
 class ConfigurableResolverTests(unittest.TestCase):
     def test_plugin_override_inherits_default_apptainer_kind(self) -> None:
         resolver = ConfigurableTaskEnvironmentResolver(
-            base=DefaultTaskEnvironmentResolver(),
             default_override=TaskEnvironmentOverride(
                 kind="apptainer",
                 reference="/images/default.sif",
@@ -175,7 +171,6 @@ class ConfigurableResolverTests(unittest.TestCase):
 
     def test_task_override_can_switch_back_to_docker(self) -> None:
         resolver = ConfigurableTaskEnvironmentResolver(
-            base=DefaultTaskEnvironmentResolver(),
             default_override=TaskEnvironmentOverride(
                 kind="apptainer",
                 reference="/images/default.sif",
@@ -197,11 +192,18 @@ class ConfigurableResolverTests(unittest.TestCase):
 
     def test_kind_override_without_reference_clears_inherited_reference(self) -> None:
         resolver = ConfigurableTaskEnvironmentResolver(
-            base=DefaultTaskEnvironmentResolver(),
             default_override=TaskEnvironmentOverride(kind="conda"),
         )
 
-        environment = resolver.resolve(task=_task())
+        with self.assertRaisesRegex(
+            ValueError, 'No execution environment is configured for plugin "dada2"'
+        ):
+            resolver.resolve(task=_task())
 
-        self.assertEqual(environment.kind, "conda")
-        self.assertEqual(environment.reference, "")
+    def test_missing_environment_does_not_infer_an_image_from_plugin_name(self) -> None:
+        resolver = ConfigurableTaskEnvironmentResolver()
+
+        with self.assertRaisesRegex(
+            ValueError, 'No execution environment is configured for plugin "dada2"'
+        ):
+            resolver.resolve(task=_task())

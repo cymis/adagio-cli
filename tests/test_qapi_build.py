@@ -84,6 +84,52 @@ class QapiBuildTests(unittest.TestCase):
             self.assertEqual(json.loads(output.read_text()), payload)
             submit_mock.assert_not_called()
 
+    def test_build_qapi_persists_an_explicit_conda_default(self) -> None:
+        payload = {
+            "qiime_version": "2026.1.0",
+            "schema_version": "0.1.0",
+            "data": {
+                "example": {"methods": {}},
+                "second": {"methods": {}},
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "qapi.json"
+            with patch(
+                "adagio.cli.qapi.generate_qapi_payload",
+                return_value=payload,
+            ):
+                qapi_cli.build_qapi(
+                    output=output,
+                    no_submit=True,
+                    default_conda_prefix=Path("/opt/conda/envs/q2-example"),
+                )
+
+            generated = json.loads(output.read_text())
+            for plugin in generated["data"].values():
+                self.assertEqual(
+                    plugin["default_environment"],
+                    {
+                        "kind": "conda",
+                        "prefix": "/opt/conda/envs/q2-example",
+                    },
+                )
+
+    def test_build_qapi_rejects_ambiguous_or_relative_defaults(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "either"):
+            qapi_cli._add_default_environment(
+                {"data": {"example": {"methods": {}}}},
+                default_docker_image="example:latest",
+                default_conda_prefix=Path("/opt/conda/envs/example"),
+            )
+
+        with self.assertRaisesRegex(SystemExit, "absolute path"):
+            qapi_cli._add_default_environment(
+                {"data": {"example": {"methods": {}}}},
+                default_docker_image=None,
+                default_conda_prefix=Path("relative/env"),
+            )
+
     def test_iter_public_qiime_actions_skips_private_action_names(self) -> None:
         public_action = SimpleNamespace(id="public_action")
         skipped_actions: list[str] = []

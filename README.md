@@ -22,8 +22,9 @@ uv run pytest
 
 ## Runtime environments
 
-By default, `adagio run` resolves plugin actions to Docker images. A runtime
-config passed with `--config` can override that per default, plugin, or task.
+Every plugin action requires an explicit execution environment. A runtime config
+passed with `--config` can define one default and override it per plugin or task;
+the CLI never guesses an image from a plugin name.
 
 Conda environments are supported with `kind = "conda"`:
 
@@ -32,7 +33,7 @@ version = 1
 
 [defaults]
 kind = "conda"
-environment = "qiime2-2026.1"
+prefix = "/opt/conda/envs/qiime2-2026.1"
 
 [plugins]
 dada2 = { kind = "conda", prefix = "/opt/conda/envs/q2-dada2" }
@@ -41,6 +42,23 @@ dada2 = { kind = "conda", prefix = "/opt/conda/envs/q2-dada2" }
 The environment must already exist and contain QIIME 2 plus the plugins needed
 by the pipeline. Adagio enters it with `conda run`; it does not create or manage
 the environment.
+
+## Plugin submission defaults
+
+QAPI submissions can persist the environment that Adagio should use for the
+submitted plugins:
+
+```bash
+adagio qapi build --plugin my-plugin \
+  --default-conda-prefix /opt/conda/envs/my-plugin
+
+adagio qapi build --plugin my-plugin \
+  --default-docker-image registry.example.org/my-plugin:2026.1
+```
+
+These options are explicit and mutually exclusive. Omitting both leaves the
+plugin without a default; the Adagio app will flag that plugin until an
+environment is selected for a run.
 
 ## Catalog pipelines
 
