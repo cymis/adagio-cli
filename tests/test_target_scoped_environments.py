@@ -157,8 +157,10 @@ class TargetScopedEnvironmentTests(unittest.TestCase):
         target_ids: set[str] | None = None,
         outputs_arg: object = None,
     ) -> tuple[RecordingLauncher, ConfiguredPluginResolver, Path]:
-        launcher = RecordingLauncher()
-        resolver = ConfiguredPluginResolver(images)
+        # Exposed on self so a test that expects execute() to raise can still
+        # assert on what was (not) launched.
+        launcher = self.launcher = RecordingLauncher()
+        resolver = self.resolver = ConfiguredPluginResolver(images)
         executor = TaskEnvironmentExecutor(
             environment_resolver=resolver,
             launchers={"docker": launcher},
@@ -341,6 +343,57 @@ class TargetScopedEnvironmentTests(unittest.TestCase):
 
         self.assertTrue((results / "artifact.qza").exists())
 
+    def test_unconfigured_upstream_of_target_fails_before_wasting_work(self) -> None:
+        """The other half of the contract: the closure must still be validated.
+
+        Scoping the preflight to the *literal* target ids instead of the target
+        closure would leave every other test in this file green, so this pins
+        the ``prune_to_targets`` call itself. The chain puts a configured,
+        expensive action in front of the unconfigured one: fail-fast means that
+        action never launches, which a run that merely dies mid-flight would.
+        """
+        pipeline = _pipeline(
+            outputs=[],
+            graph=[
+                _import_node(
+                    node_id="import-1", source_id="input-1", output_id="import-out"
+                ),
+                _action_node(
+                    node_id="expensive-1",
+                    plugin="dada2",
+                    action="denoise",
+                    input_id="import-out",
+                    output_id="exp-out",
+                ),
+                _action_node(
+                    node_id="upstream-1",
+                    plugin="demux",
+                    action="emp_single",
+                    input_id="exp-out",
+                    output_id="up-out",
+                ),
+                _action_node(
+                    node_id="target-1",
+                    plugin="feature_table",
+                    action="summarize",
+                    input_id="up-out",
+                    output_id="ft-out",
+                ),
+            ],
+        )
+
+        # The target itself is configured; an action in its upstream closure is not.
+        with self.assertRaises(RuntimeError) as caught:
+            self._run(
+                pipeline=pipeline,
+                images={"dada2": "q2-dada2:test", "feature_table": "q2-ft:test"},
+                target_ids={"target-1"},
+            )
+
+        self.assertIn("upstream-1", str(caught.exception))
+        # Nothing ran -- not even the configured action ahead of the bad one.
+        self.assertEqual(self.launcher.launched_task_ids, [])
+
     def test_full_run_fails_fast_before_launching_anything(self) -> None:
         """A full run still refuses to start when a node is unconfigured."""
         pipeline = _pipeline(
@@ -376,8 +429,8 @@ class TargetScopedEnvironmentTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("feature-table-1", message)
         self.assertIn("feature_table", message)
-        # Fail-fast: the configured upstream node must not have run first.
-        self.assertNotIn("q2-demux", message)
+        # Fail-fast: the configured upstream demux node must not have run first.
+        self.assertEqual(self.launcher.launched_task_ids, [])
 
     def test_preflight_reports_every_unconfigured_node_at_once(self) -> None:
         pipeline = _pipeline(
