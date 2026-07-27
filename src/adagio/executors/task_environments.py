@@ -23,6 +23,7 @@ from .base import (
     TaskExecutionRequest,
 )
 from .cache_support import ExecutionCacheConfig
+from .common import prune_to_targets, task_label
 from .path_utils import resolve_output_destination
 from .serial_runner import SerialExecutionState, TaskOutcome, run_serial_pipeline
 from .signature import compute_input_signature, environment_reference
@@ -52,7 +53,8 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         target_ids: set[str] | None = None,
         log_dir: str | None = None,
     ) -> None:
-        consumer_environments = self._build_consumer_environments(pipeline)
+        self._validate_closure_environments(pipeline=pipeline, target_ids=target_ids)
+        consumer_tasks = _build_consumer_tasks(pipeline)
 
         def finish_outputs(
             *,
@@ -66,7 +68,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                 sig=sig,
                 state=state,
                 console=console,
-                consumer_environments=consumer_environments,
+                consumer_tasks=consumer_tasks,
             )
             _save_outputs(
                 sig=sig,
@@ -88,29 +90,42 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             log_dir=log_dir,
         )
 
-    def _build_consumer_environments(self, pipeline) -> dict[str, TaskEnvironmentSpec]:
-        """Map each consumed archive id to an environment that can materialize it.
+    def _validate_closure_environments(
+        self,
+        *,
+        pipeline,
+        target_ids: set[str] | None,
+    ) -> None:
+        """Resolve the environment of every action that will run, before launching.
 
-        A data-import artifact has no plugin of its own, so when it must be
-        written as a pipeline output the import runs inside the environment of an
-        action that consumes it (which already has the QIIME type registered).
+        Scoped to the same closure the runner executes (``prune_to_targets``), so
+        a selected-node run is never failed by a node it will not run. A full run
+        keeps the fail-fast it has always had: every unconfigured action is
+        reported here rather than after hours of upstream work.
+
+        Resolution is expected to be pure and cheap, so the executed tasks
+        resolve again at launch rather than threading a cache through the run.
         """
-        environments: dict[str, TaskEnvironmentSpec] = {}
-        for task in pipeline.iter_tasks():
+        tasks = list(pipeline.iter_tasks())
+        if target_ids:
+            tasks = prune_to_targets(
+                execution_plan=tasks, target_ids=set(target_ids)
+            )
+
+        failures: list[str] = []
+        for task in tasks:
             if not isinstance(task, PluginActionTask):
                 continue
-            source_ids: list[str] = []
-            for src in task.inputs.values():
-                if src.kind == "archive":
-                    source_ids.append(src.id)
-                elif src.kind == "archive-collection":
-                    source_ids.extend(item.id for item in src.items)
-            if not source_ids:
-                continue
-            environment = self._environment_resolver.resolve(task=task)
-            for source_id in source_ids:
-                environments.setdefault(source_id, environment)
-        return environments
+            try:
+                self._environment_resolver.resolve(task=task)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"  - {task_label(task)}: {exc}")
+
+        if failures:
+            raise RuntimeError(
+                "Cannot start the run: the following nodes have no usable "
+                "execution environment:\n" + "\n".join(failures)
+            )
 
     def _materialize_pending_outputs(
         self,
@@ -118,7 +133,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         sig,
         state: SerialExecutionState,
         console: Console | None,
-        consumer_environments: dict[str, TaskEnvironmentSpec],
+        consumer_tasks: dict[str, list[PluginActionTask]],
     ) -> None:
         for output in sig.outputs:
             if output.id in state.saved_output_ids:
@@ -131,7 +146,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                 output=output,
                 state=state,
                 console=console,
-                consumer_environments=consumer_environments,
+                consumer_tasks=consumer_tasks,
             )
 
     def _materialize_output(
@@ -140,16 +155,12 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         output,
         state: SerialExecutionState,
         console: Console | None,
-        consumer_environments: dict[str, TaskEnvironmentSpec],
+        consumer_tasks: dict[str, list[PluginActionTask]],
     ) -> None:
-        environment = consumer_environments.get(output.id)
-        if environment is None:
-            raise RuntimeError(
-                f"Cannot write data-import output {output.name!r} ({output.id}): "
-                "raw imports are materialized inside a consuming action's "
-                "environment, but no action in this pipeline consumes it. Connect "
-                "the artifact to an action, or remove it from the pipeline outputs."
-            )
+        environment = self._resolve_materialization_environment(
+            output=output,
+            consumer_tasks=consumer_tasks,
+        )
         launcher = self._launchers.get(environment.kind)
         if launcher is None:
             raise RuntimeError(
@@ -193,6 +204,44 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         # real .qza and any downstream consumers load it directly.
         state.scope[output.id] = artifact_path
         del state.materializations[output.id]
+
+    def _resolve_materialization_environment(
+        self,
+        *,
+        output,
+        consumer_tasks: dict[str, list[PluginActionTask]],
+    ) -> TaskEnvironmentSpec:
+        """Pick an environment able to import a raw data-import output.
+
+        Any consuming action will do — it has the QIIME type registered — so try
+        them in turn and take the first that resolves. A consumer outside the
+        executed closure is still a valid host for the import, which is why the
+        candidates are collected pipeline-wide but resolved only here, at the one
+        moment an environment is actually needed.
+        """
+        candidates = consumer_tasks.get(output.id, [])
+        if not candidates:
+            raise RuntimeError(
+                f"Cannot write data-import output {output.name!r} ({output.id}): "
+                "raw imports are materialized inside a consuming action's "
+                "environment, but no action in this pipeline consumes it. Connect "
+                "the artifact to an action, or remove it from the pipeline outputs."
+            )
+
+        failures: list[str] = []
+        for consumer in candidates:
+            try:
+                return self._environment_resolver.resolve(task=consumer)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{task_label(consumer)}: {exc}")
+
+        raise RuntimeError(
+            f"Cannot write data-import output {output.name!r} ({output.id}): "
+            "raw imports are materialized inside a consuming action's "
+            "environment, but no consuming action has a usable execution "
+            "environment. Configure an environment for one of: "
+            + "; ".join(failures)
+        )
 
     def _resolve_task(
         self,
@@ -454,6 +503,30 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         enrichment["reused"] = result.reused
 
         return TaskOutcome(reused=result.reused, enrichment=enrichment)
+
+
+def _build_consumer_tasks(pipeline) -> dict[str, list[PluginActionTask]]:  # noqa: ANN001
+    """Map each consumed archive id to the actions that consume it.
+
+    A data-import artifact has no plugin of its own, so when it must be written
+    as a pipeline output the import runs inside the environment of an action
+    that consumes it (which already has the QIIME type registered).
+
+    This records consumers without resolving them: the scan is pipeline-wide,
+    but an action outside the executed closure may never run, and resolving its
+    environment here would fail runs that never needed it.
+    """
+    consumers: dict[str, list[PluginActionTask]] = {}
+    for task in pipeline.iter_tasks():
+        if not isinstance(task, PluginActionTask):
+            continue
+        for src in task.inputs.values():
+            if src.kind == "archive":
+                consumers.setdefault(src.id, []).append(task)
+            elif src.kind == "archive-collection":
+                for item in src.items:
+                    consumers.setdefault(item.id, []).append(task)
+    return consumers
 
 
 def _launch(launcher, **kwargs):  # noqa: ANN001, ANN003
