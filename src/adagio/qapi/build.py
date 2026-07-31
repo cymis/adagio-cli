@@ -26,6 +26,9 @@ def build_plugin_metadata(plugin: Any, plugin_name: str) -> dict[str, str]:
     return {
         "display_name": _plugin_display_name(plugin, plugin_name),
         "description": description,
+        # The plugin already declares where it lives in plugin_setup.py, so
+        # publishing should not ask its author to type it again.
+        "website": str(getattr(plugin, "website", "") or "").strip(),
         "version": str(getattr(plugin, "version", "") or "").strip(),
     }
 
