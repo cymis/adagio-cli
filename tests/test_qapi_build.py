@@ -28,6 +28,7 @@ class QapiBuildTests(unittest.TestCase):
                 version="0.8.0.dev12",
                 short_description="Experimental actions.",
                 description="Long description.",
+                website="https://example.org/mystery-stew",
             ),
             "mystery_stew",
         )
@@ -37,9 +38,18 @@ class QapiBuildTests(unittest.TestCase):
             {
                 "display_name": "Mystery Stew",
                 "description": "Experimental actions.",
+                "website": "https://example.org/mystery-stew",
                 "version": "0.8.0.dev12",
             },
         )
+
+    def test_plugin_metadata_tolerates_a_plugin_without_a_website(self) -> None:
+        metadata = build_plugin_metadata(
+            SimpleNamespace(name="bare", version="1.0", short_description="Bare."),
+            "bare",
+        )
+
+        self.assertEqual(metadata["website"], "")
 
     def test_list_qapi_plugins_writes_json_listing(self) -> None:
         payload = {
