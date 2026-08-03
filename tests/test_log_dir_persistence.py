@@ -8,6 +8,7 @@ from unittest.mock import patch
 from adagio.executors.base import TaskEnvironmentSpec, TaskExecutionRequest
 from adagio.executors.conda import CondaTaskEnvironmentLauncher
 from adagio.executors.serial_runner import (
+    REUSED_LOG_NOTE,
     TaskOutcome,
     run_serial_pipeline,
 )
@@ -19,6 +20,7 @@ from adagio.executors.task_contract import (
 )
 from adagio.model.arguments import AdagioArguments
 from adagio.model.task import PluginActionTask
+from adagio.monitor.api import Monitor
 
 
 def _task() -> PluginActionTask:
@@ -196,6 +198,166 @@ class LogDirCopyTests(unittest.TestCase):
             resolve_task=resolve_task,
             finish_outputs=finish_outputs,
         )
+
+
+class _RecordingMonitor(Monitor):
+    """Capture ``finish_task`` calls so tests can assert on relayed details."""
+
+    def __init__(self) -> None:
+        self.finished: list[dict] = []
+
+    def finish_task(self, *, task_id, status="completed", error=None, **details):  # noqa: ANN001
+        self.finished.append(
+            {"task_id": task_id, "status": status, "error": error, **details}
+        )
+
+
+def _noop_finish_outputs(*, sig, arguments, state, monitor, require_all):  # noqa: ANN001
+    del sig, arguments, state, monitor, require_all
+
+
+class FailedTaskLogTests(unittest.TestCase):
+    """A failed task's log is the one users most need — it must survive."""
+
+    def test_failed_task_persists_container_log(self) -> None:
+        pipeline = _Pipeline([_Task(id="task-1", outputs={})])
+        monitor = _RecordingMonitor()
+
+        def resolve_task(task, state, console):  # noqa: ANN001
+            del console
+            # The launcher writes the log, *then* the task raises - which is
+            # exactly the ordering that used to lose it.
+            container_log_path(
+                task_id=task.id, work_path=state.work_path
+            ).write_text("boom traceback\n", encoding="utf-8")
+            raise RuntimeError("task blew up")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "persisted-logs"
+
+            with self.assertRaises(RuntimeError):
+                run_serial_pipeline(
+                    pipeline=pipeline,
+                    arguments=AdagioArguments(inputs={}, parameters={}, outputs={}),
+                    resolve_task=resolve_task,
+                    finish_outputs=_noop_finish_outputs,
+                    monitor=monitor,
+                    log_dir=str(log_dir),
+                )
+
+            persisted = log_dir / "task-1_container.log"
+            self.assertTrue(persisted.exists())
+            self.assertEqual(
+                persisted.read_text(encoding="utf-8"), "boom traceback\n"
+            )
+
+        # The adapter only relays logs when the event carries log_path.
+        failed = [f for f in monitor.finished if f["status"] == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["log_path"], str(persisted))
+
+    def test_failed_task_without_log_still_reports_failure(self) -> None:
+        """No container log (e.g. the launcher never started) must not break."""
+        pipeline = _Pipeline([_Task(id="task-1", outputs={})])
+        monitor = _RecordingMonitor()
+
+        def resolve_task(task, state, console):  # noqa: ANN001
+            del task, state, console
+            raise RuntimeError("died before launching")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError):
+                run_serial_pipeline(
+                    pipeline=pipeline,
+                    arguments=AdagioArguments(inputs={}, parameters={}, outputs={}),
+                    resolve_task=resolve_task,
+                    finish_outputs=_noop_finish_outputs,
+                    monitor=monitor,
+                    log_dir=str(Path(tmp) / "persisted-logs"),
+                )
+
+        failed = [f for f in monitor.finished if f["status"] == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertNotIn("log_path", failed[0])
+        self.assertEqual(failed[0]["error"], "died before launching")
+
+
+class ReusedTaskLogTests(unittest.TestCase):
+    """A cache hit launches no container, so it needs to say so itself."""
+
+    def test_reused_task_persists_explanatory_note(self) -> None:
+        pipeline = _Pipeline([_Task(id="task-1", outputs={})])
+        monitor = _RecordingMonitor()
+
+        def resolve_task(task, state, console):  # noqa: ANN001
+            del task, state, console
+            return TaskOutcome(reused=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "persisted-logs"
+
+            run_serial_pipeline(
+                pipeline=pipeline,
+                arguments=AdagioArguments(inputs={}, parameters={}, outputs={}),
+                resolve_task=resolve_task,
+                finish_outputs=_noop_finish_outputs,
+                monitor=monitor,
+                log_dir=str(log_dir),
+            )
+
+            persisted = log_dir / "task-1_container.log"
+            self.assertTrue(persisted.exists())
+            self.assertEqual(persisted.read_text(encoding="utf-8"), REUSED_LOG_NOTE)
+
+        cached = [f for f in monitor.finished if f["status"] == "cached"]
+        self.assertEqual(len(cached), 1)
+        self.assertEqual(cached[0]["log_path"], str(persisted))
+
+    def test_real_container_log_wins_over_the_note(self) -> None:
+        """A task that did run keeps its own output even if flagged reused."""
+        pipeline = _Pipeline([_Task(id="task-1", outputs={})])
+
+        def resolve_task(task, state, console):  # noqa: ANN001
+            del console
+            container_log_path(
+                task_id=task.id, work_path=state.work_path
+            ).write_text("real output\n", encoding="utf-8")
+            return TaskOutcome(reused=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "persisted-logs"
+
+            run_serial_pipeline(
+                pipeline=pipeline,
+                arguments=AdagioArguments(inputs={}, parameters={}, outputs={}),
+                resolve_task=resolve_task,
+                finish_outputs=_noop_finish_outputs,
+                log_dir=str(log_dir),
+            )
+
+            persisted = log_dir / "task-1_container.log"
+            self.assertEqual(persisted.read_text(encoding="utf-8"), "real output\n")
+
+    def test_non_reused_task_without_log_writes_nothing(self) -> None:
+        """The note is scoped to cache hits; it must not appear generally."""
+        pipeline = _Pipeline([_Task(id="task-1", outputs={})])
+
+        def resolve_task(task, state, console):  # noqa: ANN001
+            del task, state, console
+            return TaskOutcome(reused=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "persisted-logs"
+
+            run_serial_pipeline(
+                pipeline=pipeline,
+                arguments=AdagioArguments(inputs={}, parameters={}, outputs={}),
+                resolve_task=resolve_task,
+                finish_outputs=_noop_finish_outputs,
+                log_dir=str(log_dir),
+            )
+
+            self.assertFalse((log_dir / "task-1_container.log").exists())
 
 
 if __name__ == "__main__":
