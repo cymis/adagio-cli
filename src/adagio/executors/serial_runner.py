@@ -21,6 +21,14 @@ from .task_contract import container_log_path
 
 CONTAINER_SUBTASK_COUNT = 1
 
+#: Stands in for the container log of a reused task. The ``[adagio]`` prefix
+#: marks it as the runner speaking rather than tool output, since a cache hit
+#: produces none.
+REUSED_LOG_NOTE = (
+    "[adagio] Reused a cached result for this step. No container was launched, "
+    "so there is no tool output to show.\n"
+)
+
 
 @dataclass
 class TaskOutcome:
@@ -157,7 +165,13 @@ def run_serial_pipeline(
                 active_monitor.start_task(task_id=task.id)
                 try:
                     outcome = _coerce_outcome(resolve_task(task, state, console))
-                    _persist_task_log(state=state, task_id=task.id, outcome=outcome)
+                    persisted_log = _persist_task_log(
+                        state=state,
+                        task_id=task.id,
+                        fallback_text=REUSED_LOG_NOTE if outcome.reused else None,
+                    )
+                    if persisted_log is not None:
+                        outcome.enrichment["log_path"] = persisted_log
                     finish_outputs(
                         sig=sig,
                         arguments=arguments,
@@ -173,11 +187,18 @@ def run_serial_pipeline(
                     )
                     completed_task_ids.add(task.id)
                 except Exception as exc:  # noqa: BLE001
+                    # The work dir is deleted on teardown, so a failed task's
+                    # log has to be copied out here or it is lost for good.
+                    failure_details: dict[str, t.Any] = {}
+                    failed_log = _persist_task_log(state=state, task_id=task.id)
+                    if failed_log is not None:
+                        failure_details["log_path"] = failed_log
                     active_monitor.finish_task(
                         task_id=task.id,
                         status="failed",
                         error=str(exc),
                         traceback=traceback.format_exc(),
+                        **failure_details,
                     )
                     for skipped_task in execution_plan:
                         if (
@@ -221,29 +242,42 @@ def _coerce_outcome(value: t.Any) -> TaskOutcome:
 
 
 def _persist_task_log(
-    *, state: SerialExecutionState, task_id: str, outcome: TaskOutcome
-) -> None:
+    *,
+    state: SerialExecutionState,
+    task_id: str,
+    fallback_text: str | None = None,
+) -> str | None:
     """Copy a task's container log into ``--log-dir`` before teardown (§5.5).
 
     The work dir (and every ``*_container.log``) is deleted when the run's
     ``TemporaryDirectory`` context exits, so persisting must happen here, per
-    task. On success the persisted path is recorded on ``state`` and folded into
-    the task's enrichment so the adapter can find it via ``node_finished`` /
-    ``output_saved``. Best-effort: a copy failure never fails the task.
+    task. The persisted path is recorded on ``state`` and returned so the caller
+    can fold it into the event the adapter reads (``node_finished`` /
+    ``output_saved``).
+
+    ``fallback_text`` is written when the task never launched a container, which
+    is the normal case for a cache hit — it gives a reused step something to say
+    for itself instead of an unexplained empty pane.
+
+    Best-effort throughout: this also runs on the failure path, so it must never
+    raise and mask the error that got us there.
     """
     if state.log_dir is None:
-        return
-    source = container_log_path(task_id=task_id, work_path=state.work_path)
-    if not source.exists():
-        return
-    destination = state.log_dir / source.name
+        return None
     try:
-        shutil.copy2(source, destination)
+        source = container_log_path(task_id=task_id, work_path=state.work_path)
+        destination = state.log_dir / source.name
+        if source.exists():
+            shutil.copy2(source, destination)
+        elif fallback_text is not None:
+            destination.write_text(fallback_text, encoding="utf-8")
+        else:
+            return None
     except OSError:
-        return
+        return None
     persisted = str(destination)
     state.persisted_logs[task_id] = persisted
-    outcome.enrichment["log_path"] = persisted
+    return persisted
 
 
 def resolve_monitor(*, console: Console | None, monitor: Monitor | None) -> Monitor:
