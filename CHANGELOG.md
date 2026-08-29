@@ -8,6 +8,12 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+### Added
+
+- Accepts and validates optional per-task CPU and memory requests in runtime
+  configuration. The current serial executor retains but does not yet apply
+  these requests.
+
 ## 0.1.0a6 - 2026-07-18
 
 ### Added
