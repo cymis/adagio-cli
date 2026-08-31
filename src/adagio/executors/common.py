@@ -62,6 +62,8 @@ def prune_to_targets(
     a retained task's inputs. Serial engine only; input order is preserved, so
     callers can calculate dependency order after pruning.
 
+    Every requested target must match a task or output element id.
+
     v1 callers pass *all* node ids, so this is a no-op then; it must be correct
     when a strict subset is given.
     """
@@ -74,6 +76,13 @@ def prune_to_targets(
         for output in task.outputs.values():
             producer_of[output.id] = task
 
+    task_by_id = {task.id: task for task in execution_plan}
+    known_target_ids = set(task_by_id) | set(producer_of)
+    unknown_target_ids = target_ids - known_target_ids
+    if unknown_target_ids:
+        unknown = ", ".join(sorted(unknown_target_ids))
+        raise ValueError(f"Unknown target id(s): {unknown}")
+
     needed_task_ids: set[str] = set()
     frontier: list[str] = []
 
@@ -81,8 +90,6 @@ def prune_to_targets(
         if task.id not in needed_task_ids:
             needed_task_ids.add(task.id)
             frontier.append(task.id)
-
-    task_by_id = {task.id: task for task in execution_plan}
 
     # Seed from targets: a target may be a task id or an output element id.
     for target in target_ids:

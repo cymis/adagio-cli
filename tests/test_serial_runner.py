@@ -407,13 +407,21 @@ class SerialRunnerOutputTests(unittest.TestCase):
             self.assertFalse((output_dir / "other.qza").exists())
 
     def test_partial_run_ignores_unrelated_task_with_missing_dependency(self) -> None:
-        selected = FakeTask(id="get-gut-to-soil-metadata-1", outputs={})
+        upstream = FakeTask(
+            id="get-gut-to-soil-input-1",
+            outputs={"result": FakeEndpoint("metadata-input")},
+        )
+        selected = FakeTask(
+            id="get-gut-to-soil-metadata-1",
+            inputs={"input": InputVal(kind="archive", id="metadata-input")},
+            outputs={},
+        )
         unrelated = FakeTask(
             id="tabulate-1",
             inputs={"input": InputVal(kind="archive", id="unresolved-input")},
             outputs={},
         )
-        pipeline = FakePipeline(tasks=[selected, unrelated], outputs=[])
+        pipeline = FakePipeline(tasks=[selected, unrelated, upstream], outputs=[])
         arguments = AdagioArguments(inputs={}, parameters={}, outputs={})
         monitor = RecordingMonitor()
         ran: list[str] = []
@@ -437,9 +445,11 @@ class SerialRunnerOutputTests(unittest.TestCase):
             )
 
         planned_tasks = planner.call_args.kwargs["tasks"]
-        self.assertEqual([task.id for task in planned_tasks], [selected.id])
-        self.assertEqual(ran, [selected.id])
-        self.assertEqual(monitor.total_tasks, [1])
+        self.assertEqual(
+            [task.id for task in planned_tasks], [selected.id, upstream.id]
+        )
+        self.assertEqual(ran, [upstream.id, selected.id])
+        self.assertEqual(monitor.total_tasks, [2])
 
     def test_full_run_reports_unrelated_task_missing_dependency(self) -> None:
         selected = FakeTask(id="get-gut-to-soil-metadata-1", outputs={})

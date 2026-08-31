@@ -64,6 +64,16 @@ class TargetsPruningTests(unittest.TestCase):
         pruned = prune_to_targets(execution_plan=plan, target_ids={"D"})
         self.assertEqual({t.id for t in pruned}, {"A", "B", "C", "D"})
 
+    def test_unknown_target_raises(self) -> None:
+        plan = self._plan()
+        with self.assertRaisesRegex(ValueError, "Unknown target id\\(s\\): missing"):
+            prune_to_targets(execution_plan=plan, target_ids={"missing"})
+
+    def test_mixed_valid_and_unknown_targets_raise(self) -> None:
+        plan = self._plan()
+        with self.assertRaisesRegex(ValueError, "Unknown target id\\(s\\): missing"):
+            prune_to_targets(execution_plan=plan, target_ids={"B", "missing"})
+
 
 if __name__ == "__main__":
     unittest.main()
