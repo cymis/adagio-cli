@@ -54,13 +54,13 @@ def prune_to_targets(
     execution_plan: list[t.Any],
     target_ids: set[str],
 ) -> list[t.Any]:
-    """Prune a topologically ordered plan to the closure needed for ``target_ids``.
+    """Prune tasks to the upstream closure needed for ``target_ids``.
 
     ``target_ids`` are node ids the caller wants produced (design §5.6). A task
     is retained when it (a) produces one of the target ids via an ``outputs``
     entry, (b) *is* one of the target ids, or (c) is required upstream to produce
-    a retained task's inputs. Serial engine only; input order (already
-    dependency-respecting) is preserved.
+    a retained task's inputs. Serial engine only; input order is preserved, so
+    callers can calculate dependency order after pruning.
 
     v1 callers pass *all* node ids, so this is a no-op then; it must be correct
     when a strict subset is given.
