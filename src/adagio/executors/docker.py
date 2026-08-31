@@ -85,6 +85,10 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             name: containerize_path(Path(path))
             for name, path in request.outputs.items()
         }
+        metadata_outputs = {
+            name: containerize_path(Path(path))
+            for name, path in (request.metadata_outputs or {}).items()
+        }
 
         manifest_path = result_manifest_path(task_id=task.id, work_path=request.work_path)
         spec_path = task_spec_path(task_id=task.id, work_path=request.work_path)
@@ -100,6 +104,7 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             params=dict(request.params),
             metadata_column_kwargs=dict(request.metadata_column_kwargs),
             outputs=outputs,
+            metadata_outputs=metadata_outputs,
             result_manifest=containerize_path(manifest_path),
             cache_path=(
                 containerize_path(Path(request.cache_path))
@@ -257,7 +262,9 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             )
 
         output_manifest = read_json_file(manifest_path)
-        reported_outputs, reused = parse_result_manifest(output_manifest)
+        reported_outputs, reported_metadata_outputs, reused = parse_result_manifest(
+            output_manifest
+        )
         outputs = {}
         for output_name in request.outputs:
             actual_path = reported_outputs.get(output_name)
@@ -267,9 +274,20 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 )
             outputs[output_name] = str(host_path_from_container(actual_path))
 
+        metadata_outputs = {}
+        for output_name in request.metadata_outputs or {}:
+            actual_path = reported_metadata_outputs.get(output_name)
+            if not isinstance(actual_path, str):
+                raise RuntimeError(
+                    f"Task {task.id!r} did not report metadata view "
+                    f"{output_name!r}."
+                )
+            metadata_outputs[output_name] = str(host_path_from_container(actual_path))
+
         return TaskExecutionResult(
             outputs=outputs,
             reused=reused,
+            metadata_outputs=metadata_outputs,
             command=list(command),
             exit_code=result.returncode,
             image_ref=environment.reference,

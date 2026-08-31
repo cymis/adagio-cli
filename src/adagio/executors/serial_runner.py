@@ -44,6 +44,7 @@ class SerialExecutionState:
     scope: dict[str, InputSource]
     cache_config: ExecutionCacheConfig | None
     materializations: dict[str, t.Any] = field(default_factory=dict)
+    metadata_views: dict[str, str] = field(default_factory=dict)
     missing_optional_ids: set[str] = field(default_factory=set)
     saved_output_ids: set[str] = field(default_factory=set)
     save_output_started: bool = False

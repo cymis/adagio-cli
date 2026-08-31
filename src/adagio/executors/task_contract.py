@@ -27,6 +27,19 @@ def build_task_outputs(
     }
 
 
+def build_task_metadata_outputs(
+    *,
+    task_id: str,
+    output_names: Iterable[str],
+    work_path: Path,
+) -> dict[str, str]:
+    stem = task_file_stem(task_id)
+    return {
+        name: str((work_path / f"{stem}_{name}_metadata.tsv").resolve())
+        for name in output_names
+    }
+
+
 def task_spec_path(*, task_id: str, work_path: Path) -> Path:
     return (work_path / f"{task_file_stem(task_id)}_spec.json").resolve()
 
@@ -54,6 +67,7 @@ def build_task_spec(
     result_manifest: str | None,
     cache_path: str | None,
     recycle_pool: str | None,
+    metadata_outputs: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return {
         "plugin": plugin,
@@ -65,6 +79,7 @@ def build_task_spec(
         "params": params,
         "metadata_column_kwargs": metadata_column_kwargs,
         "outputs": outputs,
+        "metadata_outputs": metadata_outputs or {},
         "result_manifest": result_manifest,
         "cache_path": cache_path,
         "recycle_pool": recycle_pool,
@@ -75,22 +90,31 @@ def build_result_manifest(
     *,
     outputs: Mapping[str, str],
     reused: bool,
+    metadata_outputs: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     return {
         "outputs": dict(outputs),
+        "metadata_outputs": dict(metadata_outputs or {}),
         "reused": reused,
     }
 
 
-def parse_result_manifest(payload: dict[str, Any]) -> tuple[dict[str, str], bool]:
+def parse_result_manifest(
+    payload: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, str], bool]:
     if "outputs" in payload:
         outputs = payload.get("outputs", {})
+        metadata_outputs = payload.get("metadata_outputs", {})
         reused = bool(payload.get("reused", False))
         if not isinstance(outputs, dict):
             raise TypeError("Invalid task result manifest: 'outputs' must be an object.")
-        return dict(outputs), reused
+        if not isinstance(metadata_outputs, dict):
+            raise TypeError(
+                "Invalid task result manifest: 'metadata_outputs' must be an object."
+            )
+        return dict(outputs), dict(metadata_outputs), reused
 
-    return dict(payload), False
+    return dict(payload), {}, False
 
 
 def read_json_file(path: Path) -> dict[str, Any]:
