@@ -81,6 +81,9 @@ def run_serial_pipeline(
 ) -> None:
     sig = pipeline.signature
     tasks = list(pipeline.iter_tasks())
+    selected_target_ids = set(target_ids) if target_ids else None
+    if selected_target_ids:
+        tasks = prune_to_targets(execution_plan=tasks, target_ids=selected_target_ids)
     active_monitor = resolve_monitor(console=console, monitor=monitor)
 
     pipeline.validate_graph()
@@ -101,7 +104,7 @@ def run_serial_pipeline(
             scope={},
             cache_config=cache_config,
             log_dir=resolved_log_dir,
-            target_ids=set(target_ids) if target_ids else None,
+            target_ids=selected_target_ids,
             monitor=active_monitor,
         )
         completed_task_ids: set[str] = set()
@@ -123,10 +126,6 @@ def run_serial_pipeline(
             scope=state.scope,
             optional_missing_ids=state.missing_optional_ids,
         )
-        if state.target_ids:
-            execution_plan = prune_to_targets(
-                execution_plan=execution_plan, target_ids=state.target_ids
-            )
         planned_task_ids = {task.id for task in execution_plan}
 
         # A partial run only produces the outputs of its pruned plan, so the
