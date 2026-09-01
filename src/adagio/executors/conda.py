@@ -66,6 +66,7 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             params=dict(request.params),
             metadata_column_kwargs=dict(request.metadata_column_kwargs),
             outputs=dict(request.outputs),
+            metadata_outputs=dict(request.metadata_outputs or {}),
             result_manifest=str(manifest_path),
             cache_path=request.cache_path,
             recycle_pool=request.recycle_pool,
@@ -159,7 +160,9 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             )
 
         output_manifest = read_json_file(manifest_path)
-        reported_outputs, reused = parse_result_manifest(output_manifest)
+        reported_outputs, reported_metadata_outputs, reused = parse_result_manifest(
+            output_manifest
+        )
         outputs = {}
         for output_name in request.outputs:
             actual_path = reported_outputs.get(output_name)
@@ -169,9 +172,20 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 )
             outputs[output_name] = actual_path
 
+        metadata_outputs = {}
+        for output_name in request.metadata_outputs or {}:
+            actual_path = reported_metadata_outputs.get(output_name)
+            if not isinstance(actual_path, str):
+                raise RuntimeError(
+                    f"Task {task.id!r} did not report metadata view "
+                    f"{output_name!r}."
+                )
+            metadata_outputs[output_name] = actual_path
+
         return TaskExecutionResult(
             outputs=outputs,
             reused=reused,
+            metadata_outputs=metadata_outputs,
             command=list(command),
             exit_code=result.returncode,
             image_ref=reference,
