@@ -7,22 +7,6 @@ from pathlib import Path
 from rich.console import Console
 
 from adagio.monitor.api import Monitor
-
-
-def _host_platform_default() -> str | None:
-    """Return a default ``--platform`` for the host, or None to run natively.
-
-    The default plugin images are ``linux/amd64``. On a non-amd64 host (e.g.
-    Apple Silicon ``arm64``) we request ``linux/amd64`` so Docker runs the image
-    under emulation deterministically rather than emitting a platform-mismatch
-    warning. amd64 hosts get None (native). Users can override per-node via the
-    env config ``platform`` field for genuinely multi-arch images.
-    """
-    machine = _platform.machine().lower()
-    if machine in ("x86_64", "amd64"):
-        return None
-    return "linux/amd64"
-
 from .base import (
     TaskEnvironmentLauncher,
     TaskEnvironmentSpec,
@@ -55,6 +39,21 @@ from .task_contract import (
 )
 
 
+def _host_platform_default() -> str | None:
+    """Return a default ``--platform`` for the host, or None to run natively.
+
+    The default plugin images are ``linux/amd64``. On a non-amd64 host (e.g.
+    Apple Silicon ``arm64``) we request ``linux/amd64`` so Docker runs the image
+    under emulation deterministically rather than emitting a platform-mismatch
+    warning. amd64 hosts get None (native). Users can override per-node via the
+    env config ``platform`` field for genuinely multi-arch images.
+    """
+    machine = _platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return None
+    return "linux/amd64"
+
+
 class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
     kind = "docker"
 
@@ -85,6 +84,10 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             name: containerize_path(Path(path))
             for name, path in request.outputs.items()
         }
+        metadata_outputs = {
+            name: containerize_path(Path(path))
+            for name, path in (request.metadata_outputs or {}).items()
+        }
 
         manifest_path = result_manifest_path(task_id=task.id, work_path=request.work_path)
         spec_path = task_spec_path(task_id=task.id, work_path=request.work_path)
@@ -100,6 +103,7 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             params=dict(request.params),
             metadata_column_kwargs=dict(request.metadata_column_kwargs),
             outputs=outputs,
+            metadata_outputs=metadata_outputs,
             result_manifest=containerize_path(manifest_path),
             cache_path=(
                 containerize_path(Path(request.cache_path))
@@ -137,6 +141,29 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             "-w",
             containerize_path(request.cwd),
         ]
+        if os.getenv("ADAGIO_ENFORCE_HOST_USER") == "1":
+            # A self-hosted runtime is one Unix execution identity. Rootful
+            # image defaults must not bypass that identity or leave root-owned
+            # outputs on the host. Desktop does not set this flag and retains
+            # its existing local behavior.
+            command.extend(
+                [
+                    "--user",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--cap-drop",
+                    "ALL",
+                    "-e",
+                    f"HOME={containerize_path(request.work_path)}",
+                ]
+            )
+            # Shared scientific data is commonly protected by supplementary
+            # Unix groups. Preserve the groups the server process already has;
+            # otherwise a container running as the correct UID can still lose
+            # access to group-readable inputs and output directories.
+            for group_id in sorted(set(os.getgroups()) - {os.getgid()}):
+                command.extend(["--group-add", str(group_id)])
         if platform:
             command.extend(["--platform", platform])
         # Label per-task containers with the runtime job id (design §8) so the
@@ -257,7 +284,9 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             )
 
         output_manifest = read_json_file(manifest_path)
-        reported_outputs, reused = parse_result_manifest(output_manifest)
+        reported_outputs, reported_metadata_outputs, reused = parse_result_manifest(
+            output_manifest
+        )
         outputs = {}
         for output_name in request.outputs:
             actual_path = reported_outputs.get(output_name)
@@ -267,9 +296,20 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 )
             outputs[output_name] = str(host_path_from_container(actual_path))
 
+        metadata_outputs = {}
+        for output_name in request.metadata_outputs or {}:
+            actual_path = reported_metadata_outputs.get(output_name)
+            if not isinstance(actual_path, str):
+                raise RuntimeError(
+                    f"Task {task.id!r} did not report metadata view "
+                    f"{output_name!r}."
+                )
+            metadata_outputs[output_name] = str(host_path_from_container(actual_path))
+
         return TaskExecutionResult(
             outputs=outputs,
             reused=reused,
+            metadata_outputs=metadata_outputs,
             command=list(command),
             exit_code=result.returncode,
             image_ref=environment.reference,

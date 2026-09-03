@@ -129,6 +129,70 @@ class DockerLauncherTests(unittest.TestCase):
             self.assertEqual(result.outputs, {"visualization": str(output_path)})
             self.assertFalse(result.reused)
 
+    def test_self_hosted_runtime_uses_the_server_unix_identity(self) -> None:
+        launcher = DockerTaskEnvironmentLauncher()
+        task = _task()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            cwd = root / "cwd"
+            work_path = root / "work"
+            cwd.mkdir()
+            work_path.mkdir()
+            output_path = work_path / "summary.qzv"
+            manifest_path = result_manifest_path(task_id=task.id, work_path=work_path)
+            request = TaskExecutionRequest(
+                task=task,
+                cwd=cwd,
+                work_path=work_path,
+                archive_inputs={},
+                archive_collection_inputs={},
+                metadata_inputs={},
+                params={},
+                metadata_column_kwargs={},
+                outputs={"visualization": str(output_path)},
+            )
+
+            def fake_run(cmd, check, stdout, stderr, text):  # noqa: ANN001
+                write_json_file(
+                    manifest_path,
+                    build_result_manifest(
+                        outputs={"visualization": containerize_path(output_path)},
+                        reused=False,
+                    ),
+                )
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with patch(
+                "adagio.executors.docker.subprocess.run", side_effect=fake_run
+            ) as run_mock, patch.dict(
+                "os.environ", {"ADAGIO_ENFORCE_HOST_USER": "1"}
+            ), patch(
+                "adagio.executors.docker.os.getuid", return_value=1234
+            ), patch(
+                "adagio.executors.docker.os.getgid", return_value=5678
+            ), patch(
+                "adagio.executors.docker.os.getgroups", return_value=[9002, 5678, 9001]
+            ):
+                launcher.launch(
+                    environment=TaskEnvironmentSpec(kind="docker", reference="img:test"),
+                    request=request,
+                )
+
+            command = run_mock.call_args.args[0]
+            self.assertEqual(command[command.index("--user") + 1], "1234:5678")
+            self.assertEqual(
+                command[command.index("--security-opt") + 1], "no-new-privileges"
+            )
+            self.assertEqual(command[command.index("--cap-drop") + 1], "ALL")
+            self.assertIn(f"HOME={containerize_path(work_path)}", command)
+            group_args = [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value == "--group-add"
+            ]
+            self.assertEqual(group_args, ["9001", "9002"])
+            self.assertLess(command.index("--user"), command.index("img:test"))
+
     def test_launch_labels_container_with_runtime_job_id(self) -> None:
         # Design §8: the adapter cancels a job's per-task containers via
         # `docker kill --filter label=adagio.job_id={id}`; the launcher must

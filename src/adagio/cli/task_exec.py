@@ -52,6 +52,7 @@ def _run_task(spec: dict[str, Any]) -> None:
     params: dict[str, Any] = spec.get("params", {})
     metadata_column_kwargs: dict[str, dict[str, str]] = spec.get("metadata_column_kwargs", {})
     outputs: dict[str, str] = spec["outputs"]
+    metadata_outputs: dict[str, str] = spec.get("metadata_outputs", {})
     result_manifest: str | None = spec.get("result_manifest")
     cache_path: str | None = spec.get("cache_path")
     recycle_pool: str | None = spec.get("recycle_pool")
@@ -139,10 +140,19 @@ def _run_task(spec: dict[str, Any]) -> None:
         artifact = getattr(results, name)
         saved_outputs[name] = artifact.save(dest_path)
 
+    saved_metadata_outputs: dict[str, str] = {}
+    for name, dest_path in metadata_outputs.items():
+        artifact = getattr(results, name)
+        saved_metadata_outputs[name] = artifact.view(Metadata).save(dest_path)
+
     if result_manifest:
         write_json_file(
             Path(result_manifest),
-            build_result_manifest(outputs=saved_outputs, reused=reused),
+            build_result_manifest(
+                outputs=saved_outputs,
+                metadata_outputs=saved_metadata_outputs,
+                reused=reused,
+            ),
         )
 
 

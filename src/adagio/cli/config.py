@@ -1,8 +1,10 @@
 import json
+import re
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..executors.base import TaskEnvironmentOverride
 
@@ -74,11 +76,59 @@ class EnvironmentOverride(BaseModel):
         )
 
 
+_MEMORY_REQUEST_PATTERN = re.compile(
+    r"^(?P<amount>(?:\d+(?:\.\d+)?|\.\d+))\s*"
+    r"(?:B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)$",
+    re.IGNORECASE,
+)
+
+
+class TaskResourceRequirements(BaseModel):
+    """Requested shape for one task execution.
+
+    These values are parsed and retained for forward compatibility. The serial
+    executor intentionally does not apply them yet.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    cpus: int | None = Field(default=None, ge=1, strict=True)
+    memory: str | None = None
+
+    @field_validator("memory")
+    @classmethod
+    def _validate_memory(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        match = _MEMORY_REQUEST_PATTERN.fullmatch(normalized)
+        if match is None:
+            raise ValueError(
+                'Memory must be a positive, unit-bearing quantity such as "8 GiB".'
+            )
+        try:
+            amount = Decimal(match.group("amount"))
+        except InvalidOperation as err:  # pragma: no cover - guarded by regex
+            raise ValueError("Memory amount is invalid.") from err
+        if amount <= 0:
+            raise ValueError("Memory must be greater than zero.")
+        return normalized
+
+
+class ResourceRequirementsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tasks: dict[str, TaskResourceRequirements] = Field(default_factory=dict)
+
+
 class AdagioRunConfig(BaseModel):
     version: int = 1
     defaults: EnvironmentOverride = Field(default_factory=EnvironmentOverride)
     plugins: dict[str, EnvironmentOverride] = Field(default_factory=dict)
     tasks: dict[str, EnvironmentOverride] = Field(default_factory=dict)
+    resources: ResourceRequirementsConfig = Field(
+        default_factory=ResourceRequirementsConfig
+    )
 
 
 def load_run_config(path: Path | None) -> AdagioRunConfig | None:

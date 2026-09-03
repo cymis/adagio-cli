@@ -36,6 +36,7 @@ class RunConfigAutodetectTests(unittest.TestCase):
             "plugins": {
                 "dada2": {"kind": "conda", "prefix": "/opt/envs/dada2"},
             },
+            "resources": {"tasks": {"node-dada2": {"cpus": 4, "memory": "8 GiB"}}},
         }
         with tempfile.TemporaryDirectory() as tmp:
             path = _write(Path(tmp), "config.json", json.dumps(payload))
@@ -44,6 +45,8 @@ class RunConfigAutodetectTests(unittest.TestCase):
         self.assertEqual(config.defaults.kind, "docker")
         self.assertEqual(config.defaults.image, "ghcr.io/x/y:1")
         self.assertEqual(config.plugins["dada2"].prefix, "/opt/envs/dada2")
+        self.assertEqual(config.resources.tasks["node-dada2"].cpus, 4)
+        self.assertEqual(config.resources.tasks["node-dada2"].memory, "8 GiB")
 
     def test_json_with_leading_whitespace_is_autodetected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

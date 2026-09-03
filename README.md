@@ -43,6 +43,26 @@ The environment must already exist and contain QIIME 2 plus the plugins needed
 by the pipeline. Adagio enters it with `conda run`; it does not create or manage
 the environment.
 
+## Task resource requests
+
+A runtime config can also declare the requested shape of each task execution:
+
+```toml
+[resources.tasks."denoise-node"]
+cpus = 4
+memory = "8 GiB"
+```
+
+`cpus` is a positive whole number and `memory` is a positive, unit-bearing
+quantity. Each entry describes one independently schedulable execution of that
+task, not an aggregate pipeline allocation. If a task is later expanded into
+parallel subtasks, each subtask requests this shape and the scheduler determines
+the total concurrent allocation.
+
+The current serial executor parses and validates these fields but intentionally
+does not apply them yet. Omitting either field leaves that resource at the
+executor's default.
+
 ## Plugin submission defaults
 
 QAPI submissions can persist the environment that Adagio should use for the
