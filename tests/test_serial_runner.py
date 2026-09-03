@@ -2,8 +2,10 @@ import tempfile
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
+from unittest.mock import patch
 
 from adagio.executors.base import TaskEnvironmentSpec, TaskExecutionResult
+from adagio.executors.common import plan_execution_order
 from adagio.executors.serial_runner import resolve_pipeline_input, run_serial_pipeline
 from adagio.executors.serial_runner import SerialExecutionState
 from adagio.executors.task_environments import TaskEnvironmentExecutor
@@ -39,7 +41,7 @@ class FakeTask:
     kind: str = "plugin-action"
     plugin: str = "dummy"
     action: str = "action"
-    inputs: dict[str, FakeEndpoint] = field(default_factory=dict)
+    inputs: dict[str, FakeEndpoint | InputVal] = field(default_factory=dict)
 
 
 class FakeSignature:
@@ -78,10 +80,14 @@ class FakePipeline:
 
 class RecordingMonitor(Monitor):
     def __init__(self) -> None:
+        self.total_tasks: list[int] = []
         self.save_start_count = 0
         self.save_finish_count = 0
         self.saved_outputs: list[tuple[str, str, str, str]] = []
         self.finished_tasks: list[dict[str, object]] = []
+
+    def start_pipeline(self, *, total_tasks: int = 0) -> None:
+        self.total_tasks.append(total_tasks)
 
     def finish_task(
         self,
@@ -399,6 +405,79 @@ class SerialRunnerOutputTests(unittest.TestCase):
             self.assertEqual(ran, ["task-1"])  # task-2 pruned
             self.assertTrue((output_dir / "result.qza").exists())
             self.assertFalse((output_dir / "other.qza").exists())
+
+    def test_partial_run_ignores_unrelated_task_with_missing_dependency(self) -> None:
+        upstream = FakeTask(
+            id="get-gut-to-soil-input-1",
+            outputs={"result": FakeEndpoint("metadata-input")},
+        )
+        selected = FakeTask(
+            id="get-gut-to-soil-metadata-1",
+            inputs={"input": InputVal(kind="archive", id="metadata-input")},
+            outputs={},
+        )
+        unrelated = FakeTask(
+            id="tabulate-1",
+            inputs={"input": InputVal(kind="archive", id="unresolved-input")},
+            outputs={},
+        )
+        pipeline = FakePipeline(tasks=[selected, unrelated, upstream], outputs=[])
+        arguments = AdagioArguments(inputs={}, parameters={}, outputs={})
+        monitor = RecordingMonitor()
+        ran: list[str] = []
+
+        def resolve_task(task, state, console):  # noqa: ANN001
+            del state, console
+            ran.append(task.id)
+            return False
+
+        with patch(
+            "adagio.executors.serial_runner.plan_execution_order",
+            wraps=plan_execution_order,
+        ) as planner:
+            run_serial_pipeline(
+                pipeline=pipeline,
+                arguments=arguments,
+                resolve_task=resolve_task,
+                finish_outputs=lambda **kwargs: None,
+                monitor=monitor,
+                target_ids={selected.id},
+            )
+
+        planned_tasks = planner.call_args.kwargs["tasks"]
+        self.assertEqual(
+            [task.id for task in planned_tasks], [selected.id, upstream.id]
+        )
+        self.assertEqual(ran, [upstream.id, selected.id])
+        self.assertEqual(monitor.total_tasks, [2])
+
+    def test_full_run_reports_unrelated_task_missing_dependency(self) -> None:
+        selected = FakeTask(id="get-gut-to-soil-metadata-1", outputs={})
+        unrelated = FakeTask(
+            id="tabulate-1",
+            inputs={"input": InputVal(kind="archive", id="unresolved-input")},
+            outputs={},
+        )
+        pipeline = FakePipeline(tasks=[selected, unrelated], outputs=[])
+        arguments = AdagioArguments(inputs={}, parameters={}, outputs={})
+        ran: list[str] = []
+
+        def resolve_task(task, state, console):  # noqa: ANN001
+            del state, console
+            ran.append(task.id)
+            return False
+
+        with self.assertRaisesRegex(
+            RuntimeError, r"tabulate-1: missing \[unresolved-input\]"
+        ):
+            run_serial_pipeline(
+                pipeline=pipeline,
+                arguments=arguments,
+                resolve_task=resolve_task,
+                finish_outputs=lambda **kwargs: None,
+            )
+
+        self.assertEqual(ran, [])
 
     def test_full_run_still_requires_every_output(self) -> None:
         # A full run where a task fails to produce its declared output must

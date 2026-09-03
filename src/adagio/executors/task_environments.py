@@ -27,7 +27,11 @@ from .common import prune_to_targets, task_label
 from .path_utils import resolve_output_destination
 from .serial_runner import SerialExecutionState, TaskOutcome, run_serial_pipeline
 from .signature import compute_input_signature, environment_reference
-from .task_contract import DATA_IMPORT_PLUGIN, build_task_outputs
+from .task_contract import (
+    DATA_IMPORT_PLUGIN,
+    build_task_metadata_outputs,
+    build_task_outputs,
+)
 
 
 class TaskEnvironmentExecutor(PipelineExecutor):
@@ -55,6 +59,15 @@ class TaskEnvironmentExecutor(PipelineExecutor):
     ) -> None:
         self._validate_closure_environments(pipeline=pipeline, target_ids=target_ids)
         consumer_tasks = _build_consumer_tasks(pipeline)
+        metadata_source_ids = _build_metadata_source_ids(pipeline)
+
+        def resolve_task(task, state, console):  # noqa: ANN001
+            return self._resolve_task(
+                task,
+                state,
+                console,
+                metadata_source_ids=metadata_source_ids,
+            )
 
         def finish_outputs(
             *,
@@ -81,7 +94,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         run_serial_pipeline(
             pipeline=pipeline,
             arguments=arguments,
-            resolve_task=self._resolve_task,
+            resolve_task=resolve_task,
             finish_outputs=finish_outputs,
             console=console,
             monitor=monitor,
@@ -248,6 +261,8 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         task,
         state: SerialExecutionState,
         console: Console | None,
+        *,
+        metadata_source_ids: set[str] | None = None,
     ) -> "bool | TaskOutcome":
         if isinstance(task, RootInputTask):
             for name, src in task.inputs.items():
@@ -265,6 +280,9 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             state.scope[task.outputs["metadata"].id] = state.scope[
                 task.inputs["data"].id
             ]
+            metadata_view = state.metadata_views.get(task.inputs["data"].id)
+            if metadata_view is not None:
+                state.metadata_views[task.outputs["metadata"].id] = metadata_view
             return False
 
         if isinstance(task, DataImportTask):
@@ -276,6 +294,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                 task=task,
                 state=state,
                 console=console,
+                metadata_source_ids=metadata_source_ids or set(),
             )
 
         raise TypeError(f"Unsupported task type: {type(task)}")
@@ -346,6 +365,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         task: PluginActionTask,
         state: SerialExecutionState,
         console: Console | None,
+        metadata_source_ids: set[str],
     ) -> TaskOutcome:
         environment = self._environment_resolver.resolve(task=task)
         launcher = self._launchers.get(environment.kind)
@@ -384,7 +404,9 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             elif src.kind == "metadata":
                 if src.id in state.missing_optional_ids:
                     continue
-                value = state.scope[src.id]
+                value = state.metadata_views.get(src.id)
+                if value is None:
+                    value = state.scope[src.id]
                 if not isinstance(value, str):
                     raise TypeError(
                         f"Metadata input {name!r} must resolve to a single path."
@@ -419,6 +441,16 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             output_names=task.outputs.keys(),
             work_path=state.work_path,
         )
+        requested_metadata_names = [
+            name
+            for name, output in task.outputs.items()
+            if output.id in metadata_source_ids
+        ]
+        metadata_outputs = build_task_metadata_outputs(
+            task_id=task.id,
+            output_names=requested_metadata_names,
+            work_path=state.work_path,
+        )
         request = TaskExecutionRequest(
             task=task,
             cwd=state.cwd,
@@ -430,6 +462,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             params=resolved_params,
             metadata_column_kwargs=metadata_column_kwargs,
             outputs=outputs,
+            metadata_outputs=metadata_outputs,
             cache_path=(
                 str(state.cache_config.cache_dir)
                 if state.cache_config is not None
@@ -478,6 +511,14 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                     f"Task {task.id!r} did not produce output {output_name!r}."
                 )
             state.scope[dest.id] = actual_path
+            if output_name in metadata_outputs:
+                metadata_path = (result.metadata_outputs or {}).get(output_name)
+                if not isinstance(metadata_path, str):
+                    raise RuntimeError(
+                        f"Task {task.id!r} did not produce the requested metadata "
+                        f"view for output {output_name!r}."
+                    )
+                state.metadata_views[dest.id] = metadata_path
 
         enrichment: dict[str, object] = {}
         if input_signature is not None:
@@ -527,6 +568,28 @@ def _build_consumer_tasks(pipeline) -> dict[str, list[PluginActionTask]]:  # noq
                 for item in src.items:
                     consumers.setdefault(item.id, []).append(task)
     return consumers
+
+
+def _build_metadata_source_ids(pipeline) -> set[str]:  # noqa: ANN001
+    """Find artifact values that must be viewed as Metadata by their producer.
+
+    QIIME transformers are plugin-registered. Per-task environments therefore
+    cannot safely defer an artifact-to-Metadata conversion to a downstream
+    consumer image, which may not contain the producing plugin. Legacy explicit
+    conversion nodes are aliases, so their artifact inputs need the same
+    producer-side materialization and the alias propagates the resulting path.
+    """
+    source_ids: set[str] = set()
+    for task in pipeline.iter_tasks():
+        if isinstance(task, ConvertToMetadataTask):
+            source_ids.add(task.inputs["data"].id)
+            continue
+        if not isinstance(task, PluginActionTask):
+            continue
+        source_ids.update(
+            src.id for src in task.inputs.values() if src.kind == "metadata"
+        )
+    return source_ids
 
 
 def _launch(launcher, **kwargs):  # noqa: ANN001, ANN003
