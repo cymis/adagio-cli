@@ -8,8 +8,11 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+## 0.1.0a10 - 2026-09-02
+
 ### Added
 
+- Materializes implicit artifact-to-metadata views across task environments.
 - Accepts and validates optional per-task CPU and memory requests in runtime
   configuration. The current serial executor retains but does not yet apply
   these requests.
@@ -17,6 +20,12 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
   with the server process's UID/GID and supplementary groups, drops Linux
   capabilities, and enables `no-new-privileges` when
   `ADAGIO_ENFORCE_HOST_USER=1`.
+
+### Fixed
+
+- Validates dependencies against the selected execution subgraph so unrelated
+  pipeline inputs do not block selected-node runs.
+- Rejects unknown execution targets rather than silently ignoring them.
 
 ## 0.1.0a6 - 2026-07-18
 
