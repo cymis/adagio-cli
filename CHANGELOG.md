@@ -8,6 +8,19 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+## 0.1.0 - 2026-09-10
+
+### Added
+
+- Publishes the first non-prerelease build of the Adagio command-line runner,
+  including the task-environment executor and connected Runtime Server support
+  validated during the alpha series.
+
+### Changed
+
+- Marks the package as beta while the command-line interface continues to
+  mature.
+
 ## 0.1.0a10 - 2026-09-02
 
 ### Added
