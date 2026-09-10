@@ -1,6 +1,6 @@
 [project]
 name = "adagio-cli"
-version = "0.1.0a10"
+version = "0.1.0"
 description = "Command-line runner for Adagio pipeline files."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,7 +16,7 @@ keywords = [
   "workflow",
 ]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
