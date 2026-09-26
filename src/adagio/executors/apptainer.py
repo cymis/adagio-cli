@@ -42,7 +42,18 @@ from .task_contract import (
 class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
     kind = "apptainer"
 
-    def prepare(self, *, environment, request, shared=False):
+    def prepare(
+        self,
+        *,
+        environment: TaskEnvironmentSpec,
+        request: TaskExecutionRequest,
+        shared: bool = False,
+    ) -> PreparedInvocation:
+        """Write the task spec and build the command, without running it.
+
+        ``shared`` stages the Adagio package into the work directory so the
+        command also runs on a host that cannot see this installation.
+        """
         image_path = _resolve_sif_image(environment.reference)
         runtime_executable = _resolve_runtime_executable()
 
@@ -110,11 +121,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         host_paths = [request.cwd, request.work_path, python_root]
         for value in (
             list(request.archive_inputs.values())
-            + [
-                item
-                for values in request.archive_collection_inputs.values()
-                for item in values
-            ]
+            + [item for values in request.archive_collection_inputs.values() for item in values]
             + list(request.metadata_inputs.values())
         ):
             if is_uri(value):
@@ -149,7 +156,6 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 containerize_path(spec_path),
             ]
         )
-
         return PreparedInvocation(
             command=command,
             env=None,
@@ -174,24 +180,27 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         prepared = self.prepare(environment=environment, request=request)
         task = request.task
         event_task_id = task_id if task_id is not None else task.id
-        manifest_path = prepared.manifest_path
         command = prepared.command
+        manifest_path = prepared.manifest_path
         image_path = Path(prepared.image_ref)
         runtime_executable = command[0]
+
         if console is not None:
             label = f"{Path(runtime_executable).name} {image_path}"
             if not getattr(console, "_adagio_inline_monitor_active", False):
                 console.print(f"[dim]Task environment:[/dim] {label}")
 
         if monitor is not None:
-            monitor.starting_container(task_id=event_task_id, image_ref=str(image_path))
+            monitor.starting_container(
+                task_id=event_task_id, image_ref=str(image_path)
+            )
         signal_task_running(monitor=monitor, event_task_id=event_task_id)
         run_started = time.monotonic()
         try:
-            result = subprocess.run(  # noqa: UP022
+            result = subprocess.run(
                 command,
                 check=False,
-                stdout=subprocess.PIPE,  # explicit streams preserve launcher test adapters
+                stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
@@ -242,7 +251,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         for output_name in request.outputs:
             actual_path = reported_outputs.get(output_name)
             if not isinstance(actual_path, str):
-                raise RuntimeError(  # noqa: TRY004 - remote result protocol failure
+                raise RuntimeError(
                     f"Task {task.id!r} did not report output {output_name!r}."
                 )
             resolved_outputs[output_name] = str(host_path_from_container(actual_path))
@@ -251,8 +260,9 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         for output_name in request.metadata_outputs or {}:
             actual_path = reported_metadata_outputs.get(output_name)
             if not isinstance(actual_path, str):
-                raise RuntimeError(  # noqa: TRY004 - remote result protocol failure
-                    f"Task {task.id!r} did not report metadata view {output_name!r}."
+                raise RuntimeError(
+                    f"Task {task.id!r} did not report metadata view "
+                    f"{output_name!r}."
                 )
             metadata_outputs[output_name] = str(host_path_from_container(actual_path))
 

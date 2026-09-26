@@ -1,4 +1,4 @@
-"""Path-based whole-action invocation; no scientific scheduling semantics."""
+"""A task invocation prepared to run elsewhere, and the checks on its result."""
 
 import uuid
 from dataclasses import dataclass, field
@@ -11,6 +11,13 @@ from .task_contract import parse_result_manifest, read_json_file
 
 @dataclass
 class PreparedInvocation:
+    """Everything needed to run one task without its launcher: a command and paths.
+
+    ``prepare(..., shared=True)`` builds one for execution on another host; the
+    result comes back only through the manifest, so ``collect`` trusts nothing
+    it cannot check.
+    """
+
     command: list[str]
     env: dict[str, str] | None
     cwd: Path
@@ -20,9 +27,7 @@ class PreparedInvocation:
     request: TaskExecutionRequest
     image_ref: str
     containerized: bool = False
-    node_id: str | None = None
     attempt_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    binding: dict = field(default_factory=dict)  # empty for whole actions
 
     def collect(self) -> TaskExecutionResult:
         if not self.manifest_path.is_file():
@@ -61,7 +66,7 @@ class PreparedInvocation:
             paths = {}
             for name, value in actual.items():
                 if not isinstance(value, str):
-                    raise RuntimeError(  # noqa: TRY004 - remote result protocol failure
+                    raise RuntimeError(
                         f"Task {self.request.task.id!r} returned an invalid path for {name!r}."
                     )
                 path = (

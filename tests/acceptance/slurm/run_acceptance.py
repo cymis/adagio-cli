@@ -1,7 +1,9 @@
 """Actual Slurm + unchanged feature-table acceptance; run inside test submit host.
 
 Requires make_fixture.py first. Saves scheduler identities, statuses and output
-validation separately from deterministic mocked scheduler unit tests.
+validation separately from deterministic mocked scheduler unit tests. A run
+that succeeds removes its shared work directory, so jobs are counted from
+Slurm accounting; failed and interrupted runs keep their submission registry.
 """
 
 import json
@@ -22,6 +24,7 @@ def run_case(name, *, config=None, spec=None, signal_number=None, targets=None):
     case = root / name
     case.mkdir(exist_ok=True)
     existing_registries = set((case / "work").glob("*/submissions.json"))
+    started = time.strftime("%Y-%m-%dT%H:%M:%S")
     cfg = json.loads(json.dumps(config or base_config))
     cfg["executor"]["work_dir"] = str(case / "work")
     (case / "config.json").write_text(json.dumps(cfg))
@@ -71,25 +74,23 @@ def run_case(name, *, config=None, spec=None, signal_number=None, targets=None):
         set((case / "work").glob("*/submissions.json")) - existing_registries
     )
     registry = json.loads(registries[0].read_text()) if registries else {"attempts": {}}
-    ids = [a["job_id"] for a in registry["attempts"].values() if a.get("job_id")]
-    accounting = (
-        subprocess.run(
+    accounting = [
+        line.split("|")
+        for line in subprocess.run(
             [
                 "sacct",
                 "-n",
                 "-P",
                 "-X",
-                "-j",
-                ",".join(ids),
+                f"--starttime={started}",
                 "--format=JobIDRaw,JobName,State,ExitCode,AllocCPUS,ReqMem,Start,End",
             ],
             text=True,
             capture_output=True,
             check=True,
-        ).stdout
-        if ids
-        else ""
-    )
+        ).stdout.splitlines()
+        if line.split("|")[1].startswith("adagio-")
+    ]
     report[name] = {
         "command": cmd,
         "exit_code": code,
@@ -97,36 +98,36 @@ def run_case(name, *, config=None, spec=None, signal_number=None, targets=None):
         "accounting": accounting,
     }
     (root / "acceptance-report.json").write_text(json.dumps(report, indent=2))
-    return code, registry
+    return code, registry, accounting
 
 
 def main():
-    code, registry = run_case("cache-rerun")
+    code, registry, jobs = run_case("cache-rerun")
     assert code == 0
-    assert len(registry["attempts"]) == 4
-    code, registry = run_case("targeted", targets="B")
+    assert len(jobs) == 4 and not registry["attempts"]
+    code, registry, jobs = run_case("targeted", targets="B")
     assert code == 0
-    assert {a["node_id"] for a in registry["attempts"].values()} == {"A", "B"}
+    assert len(jobs) == 2
     one = json.loads(json.dumps(base_config))
     one["executor"]["max_in_flight"] = 1
-    code, registry = run_case("bounded-one", config=one)
+    code, registry, jobs = run_case("bounded-one", config=one)
     assert code == 0
     failure = json.loads(json.dumps(base_spec))
     failure["graph"][1]["parameters"]["min_frequency"]["value"] = 1000000
     failure_config = json.loads(json.dumps(base_config))
     failure_config["resources"]["tasks"]["C"]["cpus"] = 10
-    code, registry = run_case("fail-fast", config=failure_config, spec=failure)
+    code, registry, jobs = run_case("fail-fast", config=failure_config, spec=failure)
     assert code != 0
     assert "D" not in {a["node_id"] for a in registry["attempts"].values()}
-    code, registry = run_case("sigint", signal_number=signal.SIGINT)
-    assert code != 0
-    code, registry = run_case("sigterm", signal_number=signal.SIGTERM)
-    assert code != 0
-    serial = json.loads(json.dumps(base_config))
-    serial["executor"] = {"kind": "serial"}
-    # Serial shares the same cache and scientific worker path.
-    code, registry = run_case("serial", config=serial)
-    assert code == 0
+    for name, number in [("sigint", signal.SIGINT), ("sigterm", signal.SIGTERM)]:
+        code, registry, jobs = run_case(name, signal_number=number)
+        assert code != 0
+        assert all(job[2].startswith(("CANCELLED", "COMPLETED")) for job in jobs), jobs
+    local = json.loads(json.dumps(base_config))
+    local["executor"] = {"kind": "local"}
+    # The local executor shares the same cache and scientific worker path.
+    code, registry, jobs = run_case("local", config=local)
+    assert code == 0 and not jobs
     print(root / "acceptance-report.json")
 
 

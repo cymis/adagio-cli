@@ -1,101 +1,288 @@
-"""Coordination invariants independent of a scientific runtime or scheduler."""
+"""Coordination invariants, independent of any scientific runtime or scheduler."""
 
 from types import SimpleNamespace as NS
-from unittest.mock import Mock
 
 import pytest
 
-from adagio.cli.config import AdagioRunConfig
-from adagio.execution import coordinator
-from adagio.executors.serial_runner import SerialExecutionState, TaskOutcome
+from adagio.execution.backends.base import JobHandle, JobState
+from adagio.execution.coordinator import WorkItem, coordinate
+from adagio.execution.resources import TaskResourceRequirements
 
 
-@pytest.mark.parametrize("limit,fail", [(1, False), (2, False), (2, True)])
-def test_dependencies_publish_before_release_and_fail_fast(
-    tmp_path, monkeypatch, limit, fail
-):
-    tasks = [
-        NS(
-            id=name,
-            inputs={str(i): NS(kind="archive", id=i + "-out") for i in deps},
-            outputs={"out": NS(id=name + "-out")},
-        )
-        for name, deps in [("A", []), ("B", ["A"]), ("C", ["A"]), ("D", ["B", "C"])]
-    ]
-    submitted = []
-    published = []
-    batch_sizes = []
-    canceled = []
+class QueueBackend:
+    """A scheduler-like backend: jobs queue, then finish on the next wait."""
 
-    class Backend:
-        def __init__(self, **kwargs):
-            self.handles = []
+    starts_on_submit = False
 
-        def submit(self, prepared, resources):
-            name = prepared.name
-            assert all(
-                src.id[:-4] in published
-                for src in tasks[["A", "B", "C", "D"].index(name)].inputs.values()
+    def __init__(self, *, capacity, fail=()):
+        self.capacity = capacity
+        self.fail = set(fail)
+        self.submitted = []
+        self.waits = []
+        self.cancelled = False
+
+    def submit(self, invocation, resources):
+        self.submitted.append(invocation)
+        return JobHandle(state=JobState.QUEUED, job_id=f"job-{invocation}")
+
+    def wait(self, handles):
+        self.waits.append(len(handles))
+        for handle in handles:
+            name = handle.job_id.removeprefix("job-")
+            handle.state = JobState.FAILED if name in self.fail else JobState.SUCCEEDED
+
+    def collect(self, handle):
+        if handle.state is JobState.FAILED:
+            raise RuntimeError(f"{handle.job_id} failed")
+        return handle.job_id.removeprefix("job-")
+
+    def cancel(self):
+        self.cancelled = True
+        return []
+
+
+class Recorder:
+    def __init__(self):
+        self.events = []
+
+    def started(self, item, handle):
+        self.events.append(("started", item.id, handle and handle.job_id))
+
+    def succeeded(self, item, outcome):
+        self.events.append(("succeeded", item.id, outcome))
+
+    def stopped(self, error, *, failed, unfinished, canceled, cleanup_errors):
+        self.events.append(
+            (
+                "stopped",
+                failed and failed.id,
+                [item.id for item, _ in unfinished],
+                canceled,
             )
-            submitted.append(name)
-            h = NS(job_id=name, prepared=prepared, state="PENDING", exit_code=None)
-            self.handles.append(h)
-            return h
-
-        def poll(self, handles):
-            batch_sizes.append(len(handles))
-            for h in handles:
-                h.state = "FAILED" if fail and h.job_id == "B" else "COMPLETED"
-                h.exit_code = "1:0" if h.state == "FAILED" else "0:0"
-
-        def collect(self, h):
-            if h.state == "FAILED":
-                raise RuntimeError("original worker failure")
-            return h.job_id
-
-        def cancel(self, handles):
-            canceled.extend(h.job_id for h in handles)
-            return []
-
-    monkeypatch.setattr(coordinator, "SlurmBackend", Backend)
-    monkeypatch.setattr(coordinator.time, "sleep", lambda _: None)
-
-    def resolve(task, state, console):
-        prepared = NS(name=task.id, log_path=tmp_path / "log")
-        result = yield (
-            NS(prepare=lambda **kwargs: prepared),
-            {"environment": NS(kind="conda"), "request": NS()},
         )
-        assert result == task.id
-        published.append(task.id)
-        state.scope[task.id + "-out"] = "validated"
-        return TaskOutcome()
 
-    state = SerialExecutionState(
-        cwd=tmp_path, work_path=tmp_path, params={}, scope={}, cache_config=None
+
+def items(graph, published=None):
+    published = [] if published is None else published
+
+    def program(name):
+        def start():
+            result = yield name
+            assert result == name
+            published.append(name)
+            return f"{name}-outcome"
+
+        return start
+
+    return [
+        WorkItem(
+            id=name,
+            depends_on=frozenset(deps),
+            resources=TaskResourceRequirements(cpus=1),
+            start=program(name),
+        )
+        for name, deps in graph
+    ]
+
+
+DIAMOND = [("A", []), ("B", ["A"]), ("C", ["A"]), ("D", ["B", "C"])]
+
+
+@pytest.mark.parametrize("capacity", [1, 2, 8])
+def test_dependents_wait_for_publication_and_capacity_is_respected(capacity):
+    published = []
+    backend = QueueBackend(capacity=capacity)
+    recorder = Recorder()
+    coordinate(items=items(DIAMOND, published), backend=backend, listener=recorder)
+    assert published == ["A", "B", "C", "D"] or published == ["A", "C", "B", "D"]
+    assert max(backend.waits) <= capacity
+    # A queued job is reported started only once the scheduler runs it.
+    assert recorder.events[0] == ("started", "A", "job-A")
+    assert ("succeeded", "D", "D-outcome") in recorder.events
+
+
+def test_failure_cancels_outstanding_work_and_reports_every_unfinished_item():
+    backend = QueueBackend(capacity=2, fail={"B"})
+    recorder = Recorder()
+    with pytest.raises(RuntimeError, match="job-B failed"):
+        coordinate(items=items(DIAMOND), backend=backend, listener=recorder)
+    assert backend.cancelled
+    assert "D" not in backend.submitted
+    assert recorder.events[-1] == ("stopped", "B", ["B", "C", "D"], False)
+
+
+def test_local_backends_report_start_before_running_the_program():
+    order = []
+
+    class InlineBackend(QueueBackend):
+        starts_on_submit = True
+
+        def submit(self, invocation, resources):
+            order.append(f"run {invocation}")
+            return JobHandle(state=JobState.SUCCEEDED, job_id=f"job-{invocation}")
+
+    class OrderRecorder(Recorder):
+        def started(self, item, handle):
+            order.append(f"start {item.id}")
+
+    coordinate(
+        items=items([("A", []), ("B", ["A"])]),
+        backend=InlineBackend(capacity=1),
+        listener=OrderRecorder(),
     )
-    args = {
-        "execution_plan": tasks,
-        "state": state,
-        "resolve_task": resolve,
-        "finish_outputs": lambda **kwargs: None,
-        "sig": None,
-        "arguments": None,
-        "monitor": Mock(),
-        "console": None,
-        "run_config": AdagioRunConfig(
-            executor={
-                "kind": "slurm",
-                "work_dir": str(tmp_path),
-                "max_in_flight": limit,
-            }
-        ),
-    }
-    if fail:
-        with pytest.raises(RuntimeError, match="original worker failure"):
-            coordinator.coordinate(**args)
-        assert "D" not in submitted and "B" not in published and "C" in canceled
-    else:
-        coordinator.coordinate(**args)
-        assert set(published) == {"A", "B", "C", "D"}
-    assert max(batch_sizes) <= limit
+    assert order == ["start A", "run A", "start B", "run B"]
+
+
+def test_items_without_invocations_start_and_succeed_immediately():
+    def done():
+        return True
+        yield  # pragma: no cover - makes this a generator
+
+    recorder = Recorder()
+    coordinate(
+        items=[
+            WorkItem(
+                id="input",
+                depends_on=frozenset(),
+                resources=TaskResourceRequirements(cpus=1),
+                start=done,
+            )
+        ],
+        backend=QueueBackend(capacity=1),
+        listener=recorder,
+    )
+    assert recorder.events == [
+        ("started", "input", None),
+        ("succeeded", "input", True),
+    ]
+
+
+def test_interrupt_cancels_and_reports_everything_canceled():
+    class InterruptingBackend(QueueBackend):
+        def wait(self, handles):
+            raise KeyboardInterrupt("Run interrupted by SIGTERM.")
+
+    backend = InterruptingBackend(capacity=2)
+    recorder = Recorder()
+    with pytest.raises(KeyboardInterrupt):
+        coordinate(items=items(DIAMOND), backend=backend, listener=recorder)
+    assert backend.cancelled
+    assert recorder.events[-1] == ("stopped", None, ["A", "B", "C", "D"], True)
+
+
+def test_unsatisfiable_dependencies_are_reported():
+    recorder = Recorder()
+    with pytest.raises(RuntimeError, match="Unable to resolve task dependencies: B"):
+        coordinate(
+            items=items([("B", ["missing"])]),
+            backend=QueueBackend(capacity=1),
+            listener=recorder,
+        )
+
+
+def test_sigterm_handler_is_restored(monkeypatch):
+    import signal
+
+    before = signal.getsignal(signal.SIGTERM)
+    coordinate(
+        items=items([("A", [])]), backend=QueueBackend(capacity=1), listener=Recorder()
+    )
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
+def test_multi_step_programs_resubmit_until_they_return():
+    def program():
+        first = yield "import"
+        second = yield "materialize"
+        return (first, second)
+
+    recorder = Recorder()
+    backend = QueueBackend(capacity=1)
+    coordinate(
+        items=[
+            WorkItem(
+                id="data-import",
+                depends_on=frozenset(),
+                resources=TaskResourceRequirements(cpus=1),
+                start=program,
+            )
+        ],
+        backend=backend,
+        listener=recorder,
+    )
+    assert backend.submitted == ["import", "materialize"]
+    assert recorder.events[-1] == (
+        "succeeded",
+        "data-import",
+        ("import", "materialize"),
+    )
+
+
+def test_listener_failure_is_attributed_to_the_item():
+    class FailingRecorder(Recorder):
+        def succeeded(self, item, outcome):
+            if item.id == "A":
+                raise OSError("disk full")
+            super().succeeded(item, outcome)
+
+    recorder = FailingRecorder()
+    with pytest.raises(OSError):
+        coordinate(
+            items=items([("A", []), ("B", ["A"])]),
+            backend=QueueBackend(capacity=1),
+            listener=recorder,
+        )
+    assert recorder.events[-1] == ("stopped", "A", ["A", "B"], False)
+
+
+def test_handles_reach_the_listener_for_unfinished_items():
+    seen = []
+
+    class HandleRecorder(Recorder):
+        def stopped(self, error, *, failed, unfinished, canceled, cleanup_errors):
+            seen.extend((item.id, handle and handle.job_id) for item, handle in unfinished)
+
+    with pytest.raises(RuntimeError):
+        coordinate(
+            items=items(DIAMOND),
+            backend=QueueBackend(capacity=2, fail={"A"}),
+            listener=HandleRecorder(),
+        )
+    assert seen == [("A", "job-A"), ("B", None), ("C", None), ("D", None)]
+
+
+def test_local_backend_reports_launcher_failures_and_system_exit(tmp_path):
+    from adagio.execution.backends.base import TaskInvocation
+    from adagio.execution.backends.local import LocalBackend
+
+    class Launcher:
+        def __init__(self, error):
+            self.error = error
+
+        def launch(self, *, environment, request, console=None):
+            raise self.error
+
+    request = NS(task=NS(id="node"), work_path=tmp_path)
+    backend = LocalBackend()
+    for error in (RuntimeError("container failed"), SystemExit("docker not found")):
+        handle = backend.submit(
+            TaskInvocation(launcher=Launcher(error), environment=NS(), request=request),
+            TaskResourceRequirements(cpus=1),
+        )
+        assert handle.state is JobState.FAILED
+        assert handle.log_path == tmp_path / "node_container.log"
+        with pytest.raises(type(error)):
+            backend.collect(handle)
+
+
+def test_a_failure_while_waiting_blames_no_item():
+    class BrokenBackend(QueueBackend):
+        def wait(self, handles):
+            raise RuntimeError("scheduler unreachable")
+
+    recorder = Recorder()
+    with pytest.raises(RuntimeError, match="scheduler unreachable"):
+        coordinate(
+            items=items([("A", [])]), backend=BrokenBackend(capacity=1), listener=recorder
+        )
+    assert recorder.events[-1] == ("stopped", None, ["A"], False)

@@ -1,7 +1,7 @@
 """Use fixed scientific parameters to verify real cache hits under Slurm."""
 
 import json
-from pathlib import Path
+import re
 
 from run_acceptance import base_spec, root, run_case
 
@@ -9,11 +9,15 @@ spec = json.loads(json.dumps(base_spec))
 spec["graph"][0]["parameters"]["random_seed"] = {"kind": "literal", "value": 42}
 spec["graph"][2]["parameters"]["max_frequency"] = {"kind": "literal", "value": 1000000}
 for name in ["deterministic-first", "deterministic-rerun"]:
-    code, registry = run_case(name, spec=spec)
+    code, registry, jobs = run_case(name, spec=spec)
     assert code == 0
-    manifests = list(Path(registry["run_dir"]).rglob("*results.json"))
-    reused = {p.name: json.loads(p.read_text())["reused"] for p in manifests}
-    (root / name / "reuse-evidence.json").write_text(json.dumps(reused, indent=2))
-    print(name, reused, flush=True)
+    statuses = dict(
+        re.findall(
+            r"finished task id=(\S+) status=(\w+)",
+            (root / name / "driver.log").read_text(),
+        )
+    )
+    (root / name / "reuse-evidence.json").write_text(json.dumps(statuses, indent=2))
+    print(name, statuses, flush=True)
     if name.endswith("rerun"):
-        assert len(reused) == 4 and all(reused.values())
+        assert len(statuses) == 4 and set(statuses.values()) == {"cached"}

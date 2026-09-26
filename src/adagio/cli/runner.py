@@ -10,20 +10,16 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from ..executors.cache_support import (
-    describe_cache_config,
-    resolve_cache_config,
-    resolve_cache_dir_path,
-)
-from .config import (
-    default_environment_override,
-    load_run_config,
-    named_environment_overrides,
-)
+from .config import build_executor, load_run_config
 from .pipeline_sources import (
     PipelineResolution,
     PipelineResolutionError,
     resolve_pipeline_reference_details,
+)
+from ..executors.cache_support import (
+    describe_cache_config,
+    resolve_cache_dir_path,
+    resolve_cache_config,
 )
 
 
@@ -67,7 +63,7 @@ def run_pipeline_from_kwargs(
     recycle_pool = kwargs.pop("recycle_pool", None)
     log_dir = kwargs.pop("log_dir", None)
     targets_raw = kwargs.pop("targets", None)
-    plan_only = kwargs.pop("plan_only", False)
+    plan_only = bool(kwargs.pop("plan_only", False))
 
     with ExitStack() as exit_stack:
         try:
@@ -125,8 +121,7 @@ def run_pipeline_from_kwargs(
         if unknown_publish:
             _error_exit(
                 console,
-                "Unknown publish outputs in arguments file: "
-                + ", ".join(unknown_publish),
+                "Unknown publish outputs in arguments file: " + ", ".join(unknown_publish),
             )
 
         arguments.inputs.update(arguments_data.inputs)
@@ -141,9 +136,7 @@ def run_pipeline_from_kwargs(
             if isinstance(value, list):
                 arguments.inputs[original] = [str(item) for item in value]
             elif isinstance(value, dict):
-                arguments.inputs[original] = {
-                    str(key): str(item) for key, item in value.items()
-                }
+                arguments.inputs[original] = {str(key): str(item) for key, item in value.items()}
             else:
                 arguments.inputs[original] = str(value)
 
@@ -184,41 +177,7 @@ def run_pipeline_from_kwargs(
         cwd=Path.cwd().resolve(),
     )
 
-    suppress_header = plan_only or _is_truthy(os.getenv("ADAGIO_SUPPRESS_RUN_HEADER"))
-    if not suppress_header:
-        console.print(f"[bold]Pipeline:[/bold] {pipeline}")
-        console.print(f"[bold]Resolved from:[/bold] {pipeline_resolution.origin}")
-
-    cache_config = (
-        None
-        if plan_only
-        else resolve_cache_config(
-            cwd=Path.cwd().resolve(),
-            cache_dir=cache_dir,
-            reuse=reuse,
-            recycle_pool=str(recycle_pool) if recycle_pool else None,
-        )
-    )
-
-    if not suppress_header:
-        console.print(f"[bold]Cache:[/bold] {describe_cache_config(cache_config)}")
-
-    from ..executors import select_default_executor
-
-    executor = select_default_executor(
-        run_config=run_config,
-        default_override=default_environment_override(run_config),
-        plugin_overrides=named_environment_overrides(
-            run_config.plugins if run_config is not None else {}
-        ),
-        task_overrides=named_environment_overrides(
-            run_config.tasks if run_config is not None else {}
-        ),
-    )
-
-    if not suppress_header:
-        console.print(f"[bold]Executing pipeline[/bold] ({executor.mode_label})")
-
+    executor = build_executor(run_config)
     target_ids: set[str] | None = None
     if targets_raw:
         target_ids = {
@@ -226,17 +185,27 @@ def run_pipeline_from_kwargs(
         } or None
 
     if plan_only:
-        from adagio.execution.planning import inspect_plan
-
-        console.print_json(
-            data=inspect_plan(
-                executor=executor,
-                pipeline=parsed_pipeline,
-                arguments=arguments,
-                target_ids=target_ids,
-            )
+        plan = executor.plan(
+            pipeline=parsed_pipeline, arguments=arguments, target_ids=target_ids
         )
+        console.print_json(data=executor.describe_plan(plan))
         return
+
+    suppress_header = _is_truthy(os.getenv("ADAGIO_SUPPRESS_RUN_HEADER"))
+    if not suppress_header:
+        console.print(f"[bold]Pipeline:[/bold] {pipeline}")
+        console.print(f"[bold]Resolved from:[/bold] {pipeline_resolution.origin}")
+
+    cache_config = resolve_cache_config(
+        cwd=Path.cwd().resolve(),
+        cache_dir=cache_dir,
+        reuse=reuse,
+        recycle_pool=str(recycle_pool) if recycle_pool else None,
+    )
+
+    if not suppress_header:
+        console.print(f"[bold]Cache:[/bold] {describe_cache_config(cache_config)}")
+        console.print(f"[bold]Executing pipeline[/bold] ({executor.mode_label})")
 
     executor.execute(
         pipeline=parsed_pipeline,
@@ -250,13 +219,7 @@ def run_pipeline_from_kwargs(
 
 def _is_missing(value: Any) -> bool:
     """Treat placeholders and null values as missing."""
-    return (
-        value is None
-        or value == ""
-        or value == "<fill me>"
-        or value == []
-        or value == {}
-    )
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
 
 
 def _resolve_download_cache_dir(raw_value: str | Path | None) -> Path | None:

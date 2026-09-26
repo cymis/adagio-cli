@@ -2,9 +2,8 @@ import inspect
 import math
 import re
 import types
-from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any, Union, get_args, get_origin
+from typing import Any, Annotated, Callable, Union, get_args, get_origin
 
 from cyclopts import Group
 from cyclopts import Parameter as CliParameter
@@ -33,9 +32,10 @@ class _PipelineGroupFormatter:
         self.entry_metadata = entry_metadata
 
     def __call__(self, console: Any, options: Any, panel: Any) -> None:
-        from cyclopts.help.specs import PanelSpec, TableSpec
         from rich.console import Group as RichGroup
         from rich.console import NewLine
+
+        from cyclopts.help.specs import PanelSpec, TableSpec
 
         renderables: list[Any] = []
 
@@ -80,9 +80,7 @@ def _pipeline_type_label(type_hint: Any) -> str:
     return "TEXT"
 
 
-def _display_type_label(
-    *, spec_type: str | None, type_hint: Any, is_input: bool
-) -> str:
+def _display_type_label(*, spec_type: str | None, type_hint: Any, is_input: bool) -> str:
     if is_input:
         return path_type_label(spec_type)
 
@@ -111,8 +109,9 @@ def _render_pipeline_type(
 def _render_pipeline_description(
     entry: Any, entry_metadata: dict[str, dict[str, Any]]
 ) -> Any:
-    from cyclopts.help.inline_text import InlineText
     from rich.text import Text
+
+    from cyclopts.help.inline_text import InlineText
 
     metadata = entry_metadata.get(_entry_key(entry), {})
     description = entry.description
@@ -236,7 +235,7 @@ def _is_required_param(spec: ParamSpec) -> bool:
 
 
 def _is_collection_type(type_name: str) -> bool:
-    return type_name.startswith(("List[", "Collection["))
+    return type_name.startswith("List[") or type_name.startswith("Collection[")
 
 
 def build_dynamic_run(
@@ -269,9 +268,7 @@ def build_dynamic_run(
     visible_input_names = (
         set(visible_input_names) if visible_input_names is not None else None
     )
-    visible_param_names = (
-        set(visible_param_names) if visible_param_names is not None else None
-    )
+    visible_param_names = set(visible_param_names) if visible_param_names is not None else None
     visible_output_names = (
         set(visible_output_names) if visible_output_names is not None else None
     )
@@ -396,13 +393,12 @@ def build_dynamic_run(
             ),
         ),
     ]
-
     annotations["plan_only"] = Annotated[
         bool,
         CliParameter(
             name=("--plan-only",),
             group=command_group,
-            help="Validate and print the resolved whole-action plan without executing tasks.",
+            help="Validate the run and print its plan as JSON without executing tasks.",
         ),
     ]
 
@@ -465,16 +461,13 @@ def build_dynamic_run(
             default=None,
             annotation=annotations["targets"],
         ),
-    ]
-
-    parameters.append(
         inspect.Parameter(
             name="plan_only",
             kind=inspect.Parameter.KEYWORD_ONLY,
             default=False,
             annotation=annotations["plan_only"],
-        )
-    )
+        ),
+    ]
 
     def add_dynamic_option(
         *,
@@ -514,9 +507,7 @@ def build_dynamic_run(
     required_input_specs = [spec for spec in input_specs if spec.required]
     optional_input_specs = [spec for spec in input_specs if not spec.required]
     required_param_specs = [spec for spec in param_specs if _is_required_param(spec)]
-    optional_param_specs = [
-        spec for spec in param_specs if not _is_required_param(spec)
-    ]
+    optional_param_specs = [spec for spec in param_specs if not _is_required_param(spec)]
 
     def add_input_spec(spec: InputSpec) -> None:
         original = spec.name
@@ -570,9 +561,7 @@ def build_dynamic_run(
         argument_value = argument_params.get(original)
         has_argument_default = not _is_missing(argument_value)
         display_default = (
-            default
-            if default is not None
-            else (argument_value if has_argument_default else None)
+            default if default is not None else (argument_value if has_argument_default else None)
         )
         display_required = is_required and display_default is None
         param_default = None
@@ -681,10 +670,4 @@ def build_dynamic_run(
 
 
 def _is_missing(value: Any) -> bool:
-    return (
-        value is None
-        or value == ""
-        or value == "<fill me>"
-        or value == []
-        or value == {}
-    )
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}

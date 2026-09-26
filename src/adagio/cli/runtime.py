@@ -19,11 +19,7 @@ from ..model.pipeline import AdagioPipeline
 from ..monitor.composite import CompositeMonitor
 from ..monitor.connected import ConnectedMonitor
 from ..monitor.log import LogMonitor
-from .config import (
-    default_environment_override,
-    load_run_config,
-    named_environment_overrides,
-)
+from .config import build_executor, load_run_config
 
 
 def run_runtime(argv: list[str], *, console: Console) -> None:
@@ -39,7 +35,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     parser.add_argument(
         "--config",
         required=True,
-        help="Path to runtime config TOML.",
+        help="Path to the run configuration (TOML or JSON).",
     )
     parser.add_argument(
         "--arguments", required=False, help="Path to run arguments JSON."
@@ -100,12 +96,22 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         action="store_true",
         help="Emit execution status updates to the runtime-adapter.",
     )
-
+    parser.add_argument(
+        "--run-record",
+        required=False,
+        default=None,
+        help=(
+            "File to record work this run leaves outside its process tree, such "
+            "as scheduler jobs. If the run is killed, `adagio cleanup` with the "
+            "same path cancels that work."
+        ),
+    )
     parser.add_argument(
         "--plan-only",
         action="store_true",
-        help="Validate and print the resolved whole-action plan without executing tasks.",
+        help="Validate the run and print its plan as JSON without executing tasks.",
     )
+
     opts = parser.parse_args(argv)
 
     spec_data = _load_json(Path(opts.spec))
@@ -127,43 +133,21 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     )
     target_ids = _parse_targets(opts.targets)
     _validate_required_arguments(pipeline, arguments, target_ids=target_ids)
-    cache_config = (
-        None
-        if opts.plan_only
-        else resolve_cache_config(
-            cwd=Path.cwd().resolve(),
-            cache_dir=opts.cache_dir,
-            reuse=opts.reuse,
-            recycle_pool=opts.recycle_pool,
-            no_reuse_nodes=_parse_node_ids(opts.no_reuse_nodes),
-        )
+    executor = build_executor(
+        run_config, run_record=Path(opts.run_record) if opts.run_record else None
     )
-
-    from ..executors import select_default_executor
-
-    executor = select_default_executor(
-        run_config=run_config,
-        default_override=default_environment_override(run_config),
-        plugin_overrides=named_environment_overrides(
-            run_config.plugins if run_config is not None else {}
-        ),
-        task_overrides=named_environment_overrides(
-            run_config.tasks if run_config is not None else {}
-        ),
-    )
-
     if opts.plan_only:
-        from adagio.execution.planning import inspect_plan
-
-        console.print_json(
-            data=inspect_plan(
-                executor=executor,
-                pipeline=pipeline,
-                arguments=arguments,
-                target_ids=target_ids,
-            )
-        )
+        plan = executor.plan(pipeline=pipeline, arguments=arguments, target_ids=target_ids)
+        console.print_json(data=executor.describe_plan(plan))
         return
+
+    cache_config = resolve_cache_config(
+        cwd=Path.cwd().resolve(),
+        cache_dir=opts.cache_dir,
+        reuse=opts.reuse,
+        recycle_pool=opts.recycle_pool,
+        no_reuse_nodes=_parse_node_ids(opts.no_reuse_nodes),
+    )
 
     connected = bool(
         opts.connected
@@ -211,7 +195,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
             target_ids=target_ids,
             log_dir=opts.log_dir,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         if connected and runtime_url and opts.job_id:
             _post_job_event(
                 runtime_url=runtime_url,
@@ -280,7 +264,6 @@ def _resolve_output_dir(
     if create:
         os.makedirs(output_dir, exist_ok=True)
     return output_dir
-
 
 def _build_arguments(
     *,
@@ -461,13 +444,7 @@ def _outputs_need_default(outputs: str | dict[str, str]) -> bool:
 
 
 def _is_missing(value: Any) -> bool:
-    return (
-        value is None
-        or value == ""
-        or value == "<fill me>"
-        or value == []
-        or value == {}
-    )
+    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
 
 
 def _validate_required_arguments(
@@ -562,4 +539,4 @@ def _post_job_event(*, runtime_url: str, job_id: str, payload: dict[str, Any]) -
         with urllib.request.urlopen(req, timeout=5):
             pass
     except (urllib.error.URLError, TimeoutError):
-        return
+        return None

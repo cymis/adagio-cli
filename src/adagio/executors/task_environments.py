@@ -1,17 +1,21 @@
-import inspect
 import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 
+from adagio.execution.backends.base import Backend, TaskInvocation
+from adagio.execution.backends.local import LocalBackend, launch
+from adagio.execution.resources import ConfiguredResourcePolicy, ResourcePolicy
 from adagio.model.arguments import AdagioArguments
 from adagio.model.task import (
     ConvertToMetadataTask,
     DataImportTask,
     PluginActionTask,
     RootInputTask,
+    input_source_ids,
 )
 from adagio.monitor.api import Monitor
 
@@ -23,9 +27,15 @@ from .base import (
     TaskExecutionRequest,
 )
 from .cache_support import ExecutionCacheConfig
-from .common import prune_to_targets, task_label
+from .common import task_label
 from .path_utils import resolve_output_destination
-from .serial_runner import SerialExecutionState, TaskOutcome, run_serial_pipeline
+from .serial_runner import (
+    PipelinePlan,
+    SerialExecutionState,
+    TaskOutcome,
+    plan_pipeline,
+    run_serial_pipeline,
+)
 from .signature import compute_input_signature, environment_reference
 from .task_contract import (
     DATA_IMPORT_PLUGIN,
@@ -42,11 +52,58 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         *,
         environment_resolver: TaskEnvironmentResolver,
         launchers: dict[str, TaskEnvironmentLauncher],
-        run_config=None,
+        backend: Backend | None = None,
+        resources: ResourcePolicy | None = None,
     ) -> None:
         self._environment_resolver = environment_resolver
         self._launchers = dict(launchers)
-        self.run_config = run_config
+        self._backend = backend if backend is not None else LocalBackend()
+        self._resources = (
+            resources if resources is not None else ConfiguredResourcePolicy()
+        )
+
+    def plan(
+        self,
+        *,
+        pipeline,
+        arguments: AdagioArguments,
+        target_ids: set[str] | None = None,
+    ) -> PipelinePlan:
+        """Plan a run and check every task it will execute can run on this backend."""
+        plan = plan_pipeline(pipeline=pipeline, arguments=arguments, target_ids=target_ids)
+        self._validate_closure_environments(tasks=plan.tasks)
+        return plan
+
+    def describe_plan(self, plan: PipelinePlan) -> dict[str, Any]:
+        """The ``--plan-only`` report: executor settings and each planned task."""
+        tasks = []
+        for task in plan.tasks:
+            environment = (
+                self._environment_resolver.resolve(task=task)
+                if isinstance(task, PluginActionTask)
+                else None
+            )
+            tasks.append(
+                {
+                    "node_id": task.id,
+                    "kind": task.kind,
+                    "inputs": [
+                        source_id
+                        for src in task.inputs.values()
+                        for source_id in input_source_ids(src)
+                    ],
+                    "outputs": {name: out.id for name, out in task.outputs.items()},
+                    "environment": (
+                        {"kind": environment.kind, "reference": environment.reference}
+                        if environment is not None
+                        else None
+                    ),
+                    "resources": self._resources.for_task(task).model_dump(
+                        exclude_none=True
+                    ),
+                }
+            )
+        return {"executor": self._backend.describe(), "tasks": tasks}
 
     def execute(
         self,
@@ -59,21 +116,18 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         target_ids: set[str] | None = None,
         log_dir: str | None = None,
     ) -> None:
-        from adagio.execution.planning import inspect_plan
-
-        inspect_plan(
-            executor=self, pipeline=pipeline, arguments=arguments, target_ids=target_ids
-        )
+        plan = self.plan(pipeline=pipeline, arguments=arguments, target_ids=target_ids)
+        self._backend.check_available()
         consumer_tasks = _build_consumer_tasks(pipeline)
         metadata_source_ids = _build_metadata_source_ids(pipeline)
 
-        def resolve_task(task, state, console):
+        def resolve_task(task, state, console):  # noqa: ANN001
             return self._resolve_task_steps(
                 task,
                 state,
                 console,
                 metadata_source_ids=metadata_source_ids,
-                pipeline=pipeline,
+                pipeline_outputs=pipeline.signature.outputs,
                 consumer_tasks=consumer_tasks,
             )
 
@@ -103,43 +157,31 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             cache_config=cache_config,
             target_ids=target_ids,
             log_dir=log_dir,
-            run_config=self.run_config,
+            plan=plan,
+            backend=self._backend,
+            resources=self._resources,
         )
 
-    def _validate_closure_environments(
-        self,
-        *,
-        pipeline,
-        target_ids: set[str] | None,
-    ) -> None:
+    def _validate_closure_environments(self, *, tasks: list[Any]) -> None:
         """Resolve the environment of every action that will run, before launching.
 
-        Scoped to the same closure the runner executes (``prune_to_targets``), so
-        a selected-node run is never failed by a node it will not run. A full run
-        keeps the fail-fast it has always had: every unconfigured action is
-        reported here rather than after hours of upstream work.
+        Scoped to the planned closure, so a selected-node run is never failed by
+        a node it will not run. A full run keeps the fail-fast it has always had:
+        every unconfigured or unplaceable action is reported here rather than
+        after hours of upstream work.
 
         Resolution is expected to be pure and cheap, so the executed tasks
         resolve again at launch rather than threading a cache through the run.
         """
-        tasks = list(pipeline.iter_tasks())
-        if target_ids:
-            tasks = prune_to_targets(execution_plan=tasks, target_ids=set(target_ids))
-
         failures: list[str] = []
         for task in tasks:
             if not isinstance(task, PluginActionTask):
                 continue
             try:
                 environment = self._environment_resolver.resolve(task=task)
-                if (
-                    self.run_config
-                    and self.run_config.executor.kind == "slurm"
-                    and environment.kind not in {"conda", "apptainer"}
-                ):
-                    raise ValueError(
-                        "Slurm supports Apptainer or shared Conda environments; Docker is unsupported."
-                    )
+                reason = self._backend.unsupported_reason(environment)
+                if reason is not None:
+                    raise ValueError(reason)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"  - {task_label(task)}: {exc}")
 
@@ -156,7 +198,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         state: SerialExecutionState,
         console: Console | None,
         consumer_tasks: dict[str, list[PluginActionTask]],
-    ) -> None:
+    ):
         environment = self._resolve_materialization_environment(
             output=output,
             consumer_tasks=consumer_tasks,
@@ -188,13 +230,15 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             cache_path=None,
             recycle_pool=None,
         )
-        result = yield (
-            launcher,
-            {"environment": environment, "request": request, "console": console},
+        result = yield TaskInvocation(
+            launcher=launcher,
+            environment=environment,
+            request=request,
+            console=console,
         )
         artifact_path = result.outputs.get("artifact")
         if not isinstance(artifact_path, str):
-            raise RuntimeError(  # noqa: TRY004 - remote result protocol failure
+            raise RuntimeError(
                 f"Importing data-import output {output.name!r} "
                 "did not produce an artifact."
             )
@@ -203,7 +247,14 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         # real .qza and any downstream consumers load it directly.
         state.scope[output.id] = artifact_path
         del state.materializations[output.id]
-        return TaskOutcome(reused=result.reused, enrichment={"log_path": result.log_path, "command": result.command, "exit_code": result.exit_code})
+        return TaskOutcome(
+            reused=result.reused,
+            enrichment={
+                "command": result.command,
+                "exit_code": result.exit_code,
+                "log_path": result.log_path,
+            },
+        )
 
     def _resolve_materialization_environment(
         self,
@@ -231,22 +282,33 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         failures: list[str] = []
         for consumer in candidates:
             try:
-                return self._environment_resolver.resolve(task=consumer)
+                environment = self._environment_resolver.resolve(task=consumer)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"{task_label(consumer)}: {exc}")
+                continue
+            reason = self._backend.unsupported_reason(environment)
+            if reason is None:
+                return environment
+            failures.append(f"{task_label(consumer)}: {reason}")
 
         raise RuntimeError(
             f"Cannot write data-import output {output.name!r} ({output.id}): "
             "raw imports are materialized inside a consuming action's "
             "environment, but no consuming action has a usable execution "
-            "environment. Configure an environment for one of: " + "; ".join(failures)
+            "environment. Configure an environment for one of: "
+            + "; ".join(failures)
         )
 
-    def _resolve_task(self, task, state, console, **kwargs):
-        """Synchronous compatibility API; pipeline coordination uses the steps."""
-        from adagio.execution.coordinator import run_local_steps
-
-        return run_local_steps(self._resolve_task_steps(task, state, console, **kwargs))
+    def _resolve_task(self, task, state: SerialExecutionState, console, **kwargs):
+        """Perform one task on this host, launching whatever it needs in turn."""
+        steps = self._resolve_task_steps(task, state, console, **kwargs)
+        result = None
+        while True:
+            try:
+                invocation = steps.send(result)
+            except StopIteration as done:
+                return done.value
+            result = launch(invocation)
 
     def _resolve_task_steps(
         self,
@@ -255,9 +317,15 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         console: Console | None,
         *,
         metadata_source_ids: set[str] | None = None,
-        pipeline=None,
-        consumer_tasks=None,
-    ) -> "bool | TaskOutcome":
+        pipeline_outputs: list[Any] | None = None,
+        consumer_tasks: dict[str, list[PluginActionTask]] | None = None,
+    ):
+        """Perform one task, yielding each invocation it needs to have run.
+
+        A generator: the caller runs each yielded ``TaskInvocation`` wherever its
+        backend places it and sends back the result; the return value is the
+        task's outcome (``bool`` reused, or a ``TaskOutcome``).
+        """
         if isinstance(task, RootInputTask):
             for name, src in task.inputs.items():
                 dst = task.outputs[name]
@@ -282,18 +350,17 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         if isinstance(task, DataImportTask):
             self._resolve_data_import(task=task, state=state)
             outcome = False
-            if pipeline:
-                for output in pipeline.signature.outputs:
-                    if (
-                        output.id in {o.id for o in task.outputs.values()}
-                        and output.id in state.materializations
-                    ):
-                        outcome = yield from self._materialize_output(
-                            output=output,
-                            state=state,
-                            console=console,
-                            consumer_tasks=consumer_tasks,
-                        )
+            produced = {output.id for output in task.outputs.values()}
+            for output in pipeline_outputs or ():
+                # A raw import exposed as a pipeline output is written as a real
+                # artifact, imported in a consuming action's environment.
+                if output.id in produced and output.id in state.materializations:
+                    outcome = yield from self._materialize_output(
+                        output=output,
+                        state=state,
+                        console=console,
+                        consumer_tasks=consumer_tasks or {},
+                    )
             return outcome
 
         if isinstance(task, PluginActionTask):
@@ -375,7 +442,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         state: SerialExecutionState,
         console: Console | None,
         metadata_source_ids: set[str],
-    ) -> TaskOutcome:
+    ):
         environment = self._environment_resolver.resolve(task=task)
         launcher = self._launchers.get(environment.kind)
         if launcher is None:
@@ -504,21 +571,19 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         except Exception:  # noqa: BLE001
             input_signature = None
 
-        result = yield (
-            launcher,
-            {
-                "environment": environment,
-                "request": request,
-                "console": console,
-                "monitor": state.monitor,
-                "task_id": task.id,
-            },
+        result = yield TaskInvocation(
+            launcher=launcher,
+            environment=environment,
+            request=request,
+            console=console,
+            monitor=state.monitor,
+            task_id=task.id,
         )
 
         for output_name, dest in task.outputs.items():
             actual_path = result.outputs.get(output_name)
             if not isinstance(actual_path, str):
-                raise RuntimeError(  # noqa: TRY004 - remote result protocol failure
+                raise RuntimeError(
                     f"Task {task.id!r} did not produce output {output_name!r}."
                 )
             state.scope[dest.id] = actual_path
@@ -557,7 +622,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         return TaskOutcome(reused=result.reused, enrichment=enrichment)
 
 
-def _build_consumer_tasks(pipeline) -> dict[str, list[PluginActionTask]]:
+def _build_consumer_tasks(pipeline) -> dict[str, list[PluginActionTask]]:  # noqa: ANN001
     """Map each consumed archive id to the actions that consume it.
 
     A data-import artifact has no plugin of its own, so when it must be written
@@ -581,7 +646,7 @@ def _build_consumer_tasks(pipeline) -> dict[str, list[PluginActionTask]]:
     return consumers
 
 
-def _build_metadata_source_ids(pipeline) -> set[str]:
+def _build_metadata_source_ids(pipeline) -> set[str]:  # noqa: ANN001
     """Find artifact values that must be viewed as Metadata by their producer.
 
     QIIME transformers are plugin-registered. Per-task environments therefore
@@ -601,28 +666,6 @@ def _build_metadata_source_ids(pipeline) -> set[str]:
             src.id for src in task.inputs.values() if src.kind == "metadata"
         )
     return source_ids
-
-
-def _launch(launcher, **kwargs):
-    """Call ``launcher.launch`` passing only the kwargs it accepts.
-
-    The launcher protocol gained optional ``monitor`` / ``task_id`` parameters
-    for fine-phase telemetry. Third-party launchers (and test doubles) written
-    against the older signature do not accept them; filter to the callable's
-    real parameters so those keep working unchanged.
-    """
-    try:
-        signature = inspect.signature(launcher.launch)
-    except (TypeError, ValueError):
-        return launcher.launch(**kwargs)
-    params = signature.parameters
-    accepts_var_kw = any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
-    )
-    if accepts_var_kw:
-        return launcher.launch(**kwargs)
-    accepted = {name: value for name, value in kwargs.items() if name in params}
-    return launcher.launch(**accepted)
 
 
 @dataclass(frozen=True)
@@ -656,7 +699,7 @@ def _resolve_task_parameter(
     raise TypeError(f"Data import parameter {name!r} cannot use kind {param.kind!r}.")
 
 
-def _dump_materialization(materialization) -> dict[str, object]:
+def _dump_materialization(materialization) -> dict[str, object]:  # noqa: ANN001
     if hasattr(materialization, "model_dump"):
         return dict(materialization.model_dump(exclude_none=True))
     if isinstance(materialization, dict):
@@ -750,7 +793,7 @@ def _save_outputs(
                     os.makedirs(publish_parent, exist_ok=True)
                 if Path(publish_destination).resolve() != Path(destination).resolve():
                     shutil.copy2(destination, publish_destination)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             if monitor is not None:
                 monitor.finish_output(
                     output_id=output.id,

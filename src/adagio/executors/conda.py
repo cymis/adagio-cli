@@ -37,7 +37,18 @@ from .task_contract import (
 class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
     kind = "conda"
 
-    def prepare(self, *, environment, request, shared=False):
+    def prepare(
+        self,
+        *,
+        environment: TaskEnvironmentSpec,
+        request: TaskExecutionRequest,
+        shared: bool = False,
+    ) -> PreparedInvocation:
+        """Write the task spec and build the command, without running it.
+
+        ``shared`` stages the Adagio package into the work directory so the
+        command also runs on a host that cannot see this installation.
+        """
         task = request.task
         manifest_path = result_manifest_path(
             task_id=task.id, work_path=request.work_path
@@ -88,7 +99,6 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             "--task",
             str(spec_path),
         ]
-
         return PreparedInvocation(
             command=command,
             env=_subprocess_env(python_root=python_root),
@@ -98,7 +108,6 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             log_path=container_log_path(task_id=task.id, work_path=request.work_path),
             request=request,
             image_ref=reference,
-            containerized=False,
         )
 
     def launch(
@@ -113,14 +122,14 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         prepared = self.prepare(environment=environment, request=request)
         task = request.task
         event_task_id = task_id if task_id is not None else task.id
-        manifest_path = prepared.manifest_path
         command = prepared.command
+        manifest_path = prepared.manifest_path
         reference = prepared.image_ref
         label = f"conda run -p {reference}"
-        if console is not None and not getattr(
-            console, "_adagio_inline_monitor_active", False
-        ):
-            console.print(f"[dim]Task environment:[/dim] {label}")
+
+        if console is not None:
+            if not getattr(console, "_adagio_inline_monitor_active", False):
+                console.print(f"[dim]Task environment:[/dim] {label}")
 
         if monitor is not None:
             # Conda has no image to pull; the environment is already resolved on
@@ -129,12 +138,12 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         signal_task_running(monitor=monitor, event_task_id=event_task_id)
         run_started = time.monotonic()
         try:
-            result = subprocess.run(  # noqa: UP022
+            result = subprocess.run(
                 command,
                 check=False,
                 cwd=request.cwd,
                 env=prepared.env,
-                stdout=subprocess.PIPE,  # explicit streams preserve launcher test adapters
+                stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
@@ -189,7 +198,7 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         for output_name in request.outputs:
             actual_path = reported_outputs.get(output_name)
             if not isinstance(actual_path, str):
-                raise RuntimeError(  # noqa: TRY004 - remote result protocol failure
+                raise RuntimeError(
                     f"Task {task.id!r} did not report output {output_name!r}."
                 )
             outputs[output_name] = actual_path
@@ -198,8 +207,9 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         for output_name in request.metadata_outputs or {}:
             actual_path = reported_metadata_outputs.get(output_name)
             if not isinstance(actual_path, str):
-                raise RuntimeError(  # noqa: TRY004 - remote result protocol failure
-                    f"Task {task.id!r} did not report metadata view {output_name!r}."
+                raise RuntimeError(
+                    f"Task {task.id!r} did not report metadata view "
+                    f"{output_name!r}."
                 )
             metadata_outputs[output_name] = actual_path
 

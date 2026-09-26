@@ -1,14 +1,14 @@
 """Internal exec-task subcommand: runs a single QIIME action inside a plugin container."""
 
 import argparse
+from collections.abc import Mapping
+from contextlib import nullcontext
 import os
 import re
 import sys
 import tempfile
 import warnings
 import zipfile
-from collections.abc import Mapping
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +26,7 @@ def run_task_exec(argv: list[str]) -> None:
         prog="adagio exec-task",
         description="Execute a single QIIME plugin action (internal use only).",
     )
-    parser.add_argument(
-        "--task", required=True, help="Path to the task spec JSON file."
-    )
+    parser.add_argument("--task", required=True, help="Path to the task spec JSON file.")
     opts = parser.parse_args(argv)
 
     task_spec = read_json_file(Path(opts.task))
@@ -36,14 +34,6 @@ def run_task_exec(argv: list[str]) -> None:
 
 
 def _run_task(spec: dict[str, Any]) -> None:
-    if ("mode" in spec or "schema_version" in spec) and (
-        type(spec.get("schema_version")) is not int
-        or spec.get("schema_version") != 1
-        or spec.get("mode") != "whole-artifact"
-    ):
-        raise ValueError(
-            "Only legacy or version 1 whole-artifact task envelopes are supported."
-        )
     if spec.get("plugin") == DATA_IMPORT_PLUGIN:
         _run_data_import(spec)
         return
@@ -57,14 +47,10 @@ def _run_task(spec: dict[str, Any]) -> None:
     archive_input_materializations: dict[str, dict[str, Any]] = spec.get(
         "archive_input_materializations", {}
     )
-    archive_collection_inputs: dict[str, list[str]] = spec.get(
-        "archive_collection_inputs", {}
-    )
+    archive_collection_inputs: dict[str, list[str]] = spec.get("archive_collection_inputs", {})
     metadata_inputs: dict[str, str] = spec.get("metadata_inputs", {})
     params: dict[str, Any] = spec.get("params", {})
-    metadata_column_kwargs: dict[str, dict[str, str]] = spec.get(
-        "metadata_column_kwargs", {}
-    )
+    metadata_column_kwargs: dict[str, dict[str, str]] = spec.get("metadata_column_kwargs", {})
     outputs: dict[str, str] = spec["outputs"]
     metadata_outputs: dict[str, str] = spec.get("metadata_outputs", {})
     result_manifest: str | None = spec.get("result_manifest")
@@ -141,9 +127,7 @@ def _run_task(spec: dict[str, Any]) -> None:
             else nullcontext()
         )
         with recycle_context:
-            cached_results = _load_cached_results(
-                cache=cache, action=action, kwargs=kwargs
-            )
+            cached_results = _load_cached_results(cache=cache, action=action, kwargs=kwargs)
             if cached_results is not None:
                 reused = True
                 results = cached_results
@@ -165,10 +149,10 @@ def _run_task(spec: dict[str, Any]) -> None:
         write_json_file(
             Path(result_manifest),
             build_result_manifest(
-                attempt_id=spec.get("attempt_id"),
                 outputs=saved_outputs,
                 metadata_outputs=saved_metadata_outputs,
                 reused=reused,
+                attempt_id=spec.get("attempt_id"),
             ),
         )
 
@@ -244,12 +228,15 @@ def _load_archive_input(
     if input_format is not None and (
         not isinstance(input_format, str) or not input_format
     ):
-        raise ValueError(f"Raw input {input_name!r} has invalid QIIME import format.")
+        raise ValueError(
+            f"Raw input {input_name!r} has invalid QIIME import format."
+        )
 
     validate_level = materialization.get("validate_level", "max")
     if validate_level not in {"min", "max"}:
         raise ValueError(
-            f"Raw input {input_name!r} has invalid validation level {validate_level!r}."
+            f"Raw input {input_name!r} has invalid validation level "
+            f"{validate_level!r}."
         )
 
     semantic_type = materialization.get("semantic_type")
@@ -410,10 +397,9 @@ def _build_invocation(*, action: Any, kwargs: dict[str, Any]) -> Any:
 def _validate_collection_order(collection_order: list[Any]) -> bool:
     if not collection_order:
         return True
-    if (
-        not all(elem.total == collection_order[0].total for elem in collection_order)
-        or len(collection_order) != collection_order[0].total
-    ):
+    if not all(
+        elem.total == collection_order[0].total for elem in collection_order
+    ) or len(collection_order) != collection_order[0].total:
         warnings.warn(
             "Incomplete collection found when recycling, collection will be remade"
         )

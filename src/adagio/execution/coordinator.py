@@ -1,251 +1,162 @@
-"""One coordinator publishes results; workers never mutate pipeline state.
+"""Dispatch a dependency graph of work items to a backend.
 
-Task coroutines prepare an opaque invocation, suspend across backend execution,
-then publish its validated result on the coordinating thread. Whole-action
-bindings are empty; attempt and scheduler identities are separate.
+The coordinator decides *when* work runs: an item is dispatched once every
+item it depends on has succeeded, and never beyond the backend's capacity.
+*Where* it runs belongs to the backend, *what* it does to the item's program
+(a generator that yields task invocations and receives their results), and
+how progress is reported to the listener. Nothing here knows about pipelines,
+QIIME, or any particular scheduler.
 """
 
-import inspect
+from __future__ import annotations
+
 import signal
 import threading
-import time
-import traceback
-import uuid
-from dataclasses import replace
-from pathlib import Path
+from collections.abc import Callable, Generator, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
 
-from adagio.executors.serial_runner import (
-    TaskOutcome,
-    _coerce_outcome,
-    _persist_task_log,
-)
-from adagio.executors.task_contract import write_json_file
-from adagio.model.task import input_source_ids
+from .backends.base import Backend, JobHandle, JobState, TaskInvocation
 
-from .slurm import TERMINAL, SlurmBackend
+if TYPE_CHECKING:
+    from adagio.executors.base import TaskExecutionResult
+
+    from .resources import TaskResourceRequirements
+
+Program = Generator[TaskInvocation, "TaskExecutionResult", Any]
 
 
-def run_local_steps(steps):
-    from adagio.executors.task_environments import _launch
+@dataclass(frozen=True)
+class WorkItem:
+    id: str
+    depends_on: frozenset[str]
+    resources: TaskResourceRequirements
+    #: Begin the item's program. Every invocation it yields is submitted to the
+    #: backend and the result sent back; its return value is the outcome.
+    start: Callable[[], Program]
 
-    if not inspect.isgenerator(steps):
-        return steps
-    value = None
-    while True:
-        try:
-            launcher, kwargs = steps.send(value)
-        except StopIteration as done:
-            return done.value
-        value = _launch(launcher, **kwargs)
+
+class Listener(Protocol):
+    def started(self, item: WorkItem, handle: JobHandle | None) -> None: ...
+
+    def succeeded(self, item: WorkItem, outcome: Any) -> None: ...
+
+    def stopped(
+        self,
+        error: BaseException,
+        *,
+        failed: WorkItem | None,
+        unfinished: Sequence[tuple[WorkItem, JobHandle | None]],
+        canceled: bool,
+        cleanup_errors: Sequence[str],
+    ) -> None:
+        """Report a run that ended early; ``failed`` is the item that caused it."""
+
+
+@dataclass
+class _Active:
+    item: WorkItem
+    program: Program
+    handle: JobHandle
 
 
 def coordinate(
-    *,
-    execution_plan,
-    state,
-    resolve_task,
-    finish_outputs,
-    sig,
-    arguments,
-    monitor,
-    console,
-    run_config,
-):
-    slurm = run_config is not None and run_config.executor.kind == "slurm"
-    backend = (
-        SlurmBackend(config=run_config.executor, run_dir=state.work_path)
-        if slurm
-        else None
-    )
-    limit = run_config.executor.max_in_flight if slurm else 1
-    completed = set()
-    remaining = list(execution_plan)
-    producers = {
-        output.id: task.id
-        for task in execution_plan
-        for output in task.outputs.values()
-    }
-    dependencies = {
-        task.id: {
-            producers[i]
-            for src in task.inputs.values()
-            for i in input_source_ids(src)
-            if i in producers and producers[i] != task.id
-        }
-        for task in execution_plan
-    }
-    active = {}  # node -> coroutine, handle, isolated attempt path
-    task_id = None
-    original_handler = None
-    if threading.current_thread() is threading.main_thread():
-        original_handler = signal.getsignal(signal.SIGTERM)
-        signal.signal(signal.SIGTERM, _interrupt)
-    if slurm:
-        write_json_file(
-            state.work_path / "config.json", run_config.model_dump(exclude_none=True)
-        )
-        write_json_file(
-            state.work_path / "plan.json",
-            {
-                "tasks": [
-                    {
-                        "node_id": task.id,
-                        "binding": {},
-                        "inputs": [
-                            i
-                            for src in task.inputs.values()
-                            for i in input_source_ids(src)
-                        ],
-                        "resources": run_config.resources.for_task(task.id).model_dump(
-                            exclude_none=True
-                        ),
-                    }
-                    for task in execution_plan
-                ]
-            },
-        )
-        if console:
-            console.print(f"Slurm run directory: {state.work_path}")
-        # Runtime fallback discovers this single run's registry; no credentials in it.
-        import os
+    *, items: Sequence[WorkItem], backend: Backend, listener: Listener
+) -> None:
+    """Run ``items`` (given in dependency order) to completion, or stop on failure.
 
-        if pointer := os.getenv("ADAGIO_SLURM_REGISTRY_POINTER"):
-            write_json_file(Path(pointer), {"registry": str(backend.registry_path)})
+    On any failure or interrupt, the backend cancels its outstanding work and
+    the listener hears about every unfinished item before the error propagates.
+    """
+    pending = list(items)
+    completed: set[str] = set()
+    started: set[str] = set()
+    active: dict[str, _Active] = {}
+    current: WorkItem | None = None
 
-    def publish(task, outcome, task_state):
-        outcome = _coerce_outcome(outcome)
-        _persist_task_log(state=task_state, task_id=task.id, outcome=outcome)
-        finish_outputs(
-            sig=sig,
-            arguments=arguments,
-            state=state,
-            monitor=monitor,
-            require_all=False,
-        )
-        monitor.advance_task(task_id=task.id, advance=1)
-        monitor.finish_task(
-            task_id=task.id,
-            status="cached" if outcome.reused else "completed",
-            **outcome.enrichment,
-        )
-        completed.add(task.id)
+    def start(item: WorkItem, handle: JobHandle | None = None) -> None:
+        if item.id not in started:
+            started.add(item.id)
+            listener.started(item, handle)
 
-    def advance(task, steps, task_state, value=None):
+    def advance(item: WorkItem, program: Program, result: Any) -> None:
+        nonlocal current
+        current = item
         try:
-            launcher, kwargs = steps.send(value)
+            invocation = program.send(result)
         except StopIteration as done:
-            publish(task, done.value, task_state)
+            start(item)
+            listener.succeeded(item, done.value)
+            completed.add(item.id)
             return
-        environment, request = kwargs["environment"], kwargs["request"]
-        if environment.kind not in {"apptainer", "conda"} or not hasattr(
-            launcher, "prepare"
-        ):
-            raise ValueError(
-                "Slurm supports Apptainer or shared Conda environments; Docker is unsupported."
-            )
-        prepared = launcher.prepare(
-            environment=environment, request=request, shared=True
-        )
-        prepared.node_id = task.id
-        handle = backend.submit(prepared, run_config.resources.for_task(task.id))
-        active[task.id] = (task, steps, handle, task_state, False)
-        if console:
-            console.print(f"Task {task.id}: queued as Slurm job {handle.job_id}")
+        if backend.starts_on_submit:
+            start(item)
+        active[item.id] = _Active(item, program, backend.submit(invocation, item.resources))
 
+    restore_sigterm = _interrupt_on_sigterm()
     try:
-        while remaining or active:
-            for task in list(remaining):
-                if len(active) >= limit:
+        while pending or active:
+            dispatched = False
+            for item in list(pending):
+                if len(active) >= backend.capacity:
                     break
-                if not dependencies[task.id] <= completed:
+                if not item.depends_on <= completed:
                     continue
-                task_id = task.id
-                remaining.remove(task)
-                # Shared dictionaries are touched exclusively by this thread;
-                # only work_path differs per coroutine. No worker receives state.
-                task_state = state
-                if slurm:
-                    attempt_dir = state.work_path / ("attempt-" + uuid.uuid4().hex)
-                    attempt_dir.mkdir(mode=0o700)
-                    task_state = replace(
-                        state, work_path=attempt_dir, cwd=state.work_path
-                    )
-                steps = resolve_task(task, task_state, console)
-                if not slurm:
-                    monitor.start_task(task_id=task.id)
-                    publish(task, run_local_steps(steps), task_state)
-                elif inspect.isgenerator(steps):
-                    advance(task, steps, task_state)
-                else:
-                    publish(task, steps, task_state)
+                pending.remove(item)
+                dispatched = True
+                advance(item, item.start(), None)
             if active:
-                backend.poll([entry[2] for entry in active.values()])
-                # Detect every failure before releasing any successful dependents.
-                for task, steps, handle, task_state, started in list(active.values()):
-                    task_id = task.id
-                    if handle.state in TERMINAL and (
-                        handle.state != "COMPLETED" or handle.exit_code != "0:0"
-                    ):
-                        backend.collect(handle)
-                for task, steps, handle, task_state, started in list(active.values()):
-                    task_id = task.id
-                    if not started and handle.state != "PENDING":
-                        monitor.start_task(
-                            task_id=task.id, scheduler_job_id=handle.job_id
-                        )
-                        active[task.id] = (task, steps, handle, task_state, True)
-                    if handle.state == "COMPLETED":
-                        result = backend.collect(handle)
-                        del active[task.id]
-                        advance(task, steps, task_state, result)
-                if active:
-                    time.sleep(0.5)
-            elif remaining and not any(
-                dependencies[t.id] <= completed for t in remaining
-            ):
+                # A failure while waiting belongs to no single item.
+                current = None
+                backend.wait([entry.handle for entry in active.values()])
+                for entry in active.values():
+                    if entry.handle.state is not JobState.QUEUED:
+                        start(entry.item, entry.handle)
+                # Surface every failure before releasing any dependents.
+                for entry in list(active.values()):
+                    if entry.handle.state is JobState.FAILED:
+                        current = entry.item
+                        backend.collect(entry.handle)
+                for entry in list(active.values()):
+                    if entry.handle.state is JobState.SUCCEEDED:
+                        del active[entry.item.id]
+                        current = entry.item
+                        advance(entry.item, entry.program, backend.collect(entry.handle))
+            elif pending and not dispatched:
+                current = None
                 raise RuntimeError(
-                    "Unable to resolve task dependencies after publication."
+                    "Unable to resolve task dependencies: "
+                    + ", ".join(item.id for item in pending)
                 )
     except BaseException as error:
-        cleanup = backend.cancel(backend.handles) if backend else []
-        diagnostic = (
-            str(error) or "Run interrupted; outstanding Slurm jobs were canceled."
+        canceled = isinstance(error, KeyboardInterrupt)
+        cleanup_errors = backend.cancel()
+        listener.stopped(
+            error,
+            failed=None if canceled else current,
+            unfinished=[
+                (item, active[item.id].handle if item.id in active else None)
+                for item in items
+                if item.id not in completed
+            ],
+            canceled=canceled,
+            cleanup_errors=cleanup_errors,
         )
-        if cleanup:
-            diagnostic += " Cleanup incomplete: " + "; ".join(cleanup)
-            if hasattr(error, "add_note"):
-                error.add_note(diagnostic)
-            if console:
-                console.print(diagnostic)
-        canceled = isinstance(error, (KeyboardInterrupt, SystemExit))
-        failed_logs = {}
-        for task, steps, handle, task_state, started in active.values():
-            outcome = TaskOutcome(
-                enrichment={"log_path": str(handle.prepared.log_path)}
-            )
-            _persist_task_log(state=task_state, task_id=task.id, outcome=outcome)
-            failed_logs[task.id] = outcome.enrichment["log_path"]
-        for task in execution_plan:
-            if task.id in completed:
-                continue
-            monitor.finish_task(
-                task_id=task.id,
-                status="canceled"
-                if canceled
-                else ("failed" if task.id == task_id else "skipped"),
-                error=diagnostic
-                if task.id == task_id or canceled
-                else f"Skipped because task {task_id!r} failed.",
-                traceback=traceback.format_exc() if task.id == task_id else None,
-                log_path=failed_logs.get(task.id),
-            )
-        if state.save_output_started:
-            monitor.finish_save_output()
         raise
     finally:
-        if original_handler is not None:
-            signal.signal(signal.SIGTERM, original_handler)
+        restore_sigterm()
 
 
-def _interrupt(signum, frame):
-    raise KeyboardInterrupt("Run interrupted by SIGTERM.")
+def _interrupt_on_sigterm() -> Callable[[], None]:
+    """Turn SIGTERM into KeyboardInterrupt so a terminated run cancels its work."""
+    if threading.current_thread() is not threading.main_thread():
+        return lambda: None
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def interrupt(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt("Run interrupted by SIGTERM.")
+
+    signal.signal(signal.SIGTERM, interrupt)
+    return lambda: signal.signal(
+        signal.SIGTERM, previous if previous is not None else signal.SIG_DFL
+    )

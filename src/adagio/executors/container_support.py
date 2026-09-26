@@ -191,7 +191,11 @@ def local_source_root() -> Path:
 def container_python_root(
     *, work_path: Path, module_file: Path | None = None, force_stage: bool = False
 ) -> Path:
-    """Return an isolated Python root that exposes only the Adagio package."""
+    """Return an isolated Python root that exposes only the Adagio package.
+
+    ``force_stage`` copies the package into ``work_path`` even when running
+    from a source checkout, for commands that run on another host.
+    """
     source_root = _adagio_source_root(module_file=module_file)
     if source_root is not None and not force_stage:
         return source_root
@@ -202,9 +206,7 @@ def container_python_root(
     return staged_root
 
 
-def record_container_output(
-    *, log_path: Path, stdout_text: str, stderr_text: str
-) -> None:
+def record_container_output(*, log_path: Path, stdout_text: str, stderr_text: str) -> None:
     """Persist a task's container stdout+stderr to a per-task log file.
 
     Keeps the live console clean (Nextflow-style): the full container output —

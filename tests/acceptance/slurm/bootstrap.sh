@@ -44,7 +44,7 @@ $hardware
 PartitionName=test Nodes=slurm Default=YES MaxTime=00:10:00 State=UP
 EOF
 # Neither test setup enforces memory cgroups; do not claim OOM enforcement.
-if slurmd -V | grep -q 'slurm 23'; then
+if slurmd -V | grep -Eq ' 23\.'; then
     echo CgroupPlugin=cgroup/v1 > /etc/slurm/cgroup.conf
 else
     echo CgroupPlugin=disabled > /etc/slurm/cgroup.conf

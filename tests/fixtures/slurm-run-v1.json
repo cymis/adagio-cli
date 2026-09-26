@@ -34,9 +34,5 @@
         "memory": "1 GB"
       }
     }
-  },
-  "profile": {
-    "id": "fixture-profile",
-    "name": "Lab Slurm"
   }
 }

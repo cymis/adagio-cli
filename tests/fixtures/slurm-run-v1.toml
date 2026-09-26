@@ -28,10 +28,6 @@ cpus = 7
 "qos" = "normal"
 "extra_args" = ["--constraint=avx2","--licenses=software:1"]
 
-[profile]
-"id" = "fixture-profile"
-"name" = "Lab Slurm"
-
 [resources.defaults]
 "cpus" = 2
 "memory" = "4 GiB"

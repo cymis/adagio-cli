@@ -1,0 +1,114 @@
+"""The durable record of every job one run handed to a batch scheduler.
+
+Each submission is recorded before the scheduler is asked, so a crash between
+the request and its reply leaves an entry to reconcile instead of an untracked
+job. Cancellation, and cleanup after an abnormal exit, act on this record and
+never on the scheduler's wider view of what the user owns.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from adagio.executors.task_contract import read_json_file, write_json_file
+
+from .base import JobState
+
+REGISTRY_VERSION = 1
+#: Recorded before the scheduler replies; the job may or may not exist.
+SUBMITTING = "submitting"
+#: The scheduler's reply never confirmed the job; it is never retried.
+UNCONFIRMED = "unconfirmed"
+
+
+class SubmissionRegistry:
+    FILENAME = "submissions.json"
+
+    def __init__(self, path: Path, data: dict[str, Any]) -> None:
+        self.path = path
+        self._data = data
+
+    @classmethod
+    def create(cls, run_dir: Path, *, executor: str) -> SubmissionRegistry:
+        registry = cls(
+            run_dir / cls.FILENAME,
+            {
+                "version": REGISTRY_VERSION,
+                "executor": executor,
+                "run_dir": str(run_dir),
+                "attempts": {},
+            },
+        )
+        registry.save()
+        return registry
+
+    @classmethod
+    def load(cls, path: Path) -> SubmissionRegistry:
+        data = read_json_file(path)
+        if (
+            not isinstance(data, dict)
+            or data.get("version") != REGISTRY_VERSION
+            or not isinstance(data.get("attempts"), dict)
+        ):
+            raise ValueError(f"Unrecognized submission registry: {path}.")
+        return cls(path, data)
+
+    @property
+    def executor(self) -> str:
+        return self._data["executor"]
+
+    def save(self) -> None:
+        write_json_file(self.path, self._data)
+
+    def record_intent(self, attempt_id: str, **entry: Any) -> None:
+        self._data["attempts"][attempt_id] = {
+            **entry,
+            "state": SUBMITTING,
+            "job_id": None,
+            "cluster": None,
+        }
+        self.save()
+
+    def record_submitted(
+        self, attempt_id: str, *, job_id: str, cluster: str | None
+    ) -> None:
+        self._data["attempts"][attempt_id].update(
+            state=JobState.QUEUED.value, job_id=job_id, cluster=cluster
+        )
+        self.save()
+
+    def record_unconfirmed(self, attempt_id: str, error: str) -> None:
+        self._data["attempts"][attempt_id].update(state=UNCONFIRMED, error=error)
+        self.save()
+
+    def record_status(
+        self,
+        attempt_id: str,
+        *,
+        state: JobState,
+        scheduler_state: str,
+        exit_code: str | None,
+    ) -> None:
+        """Update one attempt in memory; callers ``save`` once per poll."""
+        self._data["attempts"][attempt_id].update(
+            state=state.value, scheduler_state=scheduler_state, exit_code=exit_code
+        )
+
+    def record_found(self, attempt_id: str, *, job_id: str) -> None:
+        self._data["attempts"][attempt_id].update(job_id=job_id)
+
+    def outstanding(self) -> list[tuple[str, dict[str, Any]]]:
+        """Attempts that may still hold scheduler resources."""
+        finished = {JobState.SUCCEEDED.value, JobState.FAILED.value}
+        return [
+            (attempt_id, dict(entry))
+            for attempt_id, entry in self._data["attempts"].items()
+            if entry.get("state") not in finished
+        ]
+
+    def attempt_for_job(self, job_id: str, cluster: str | None) -> str | None:
+        for attempt_id, entry in self._data["attempts"].items():
+            if entry.get("job_id") == job_id and entry.get("cluster") == cluster:
+                return attempt_id
+        return None
