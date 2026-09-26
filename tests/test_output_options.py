@@ -8,8 +8,7 @@ from unittest.mock import patch
 from adagio.app.parsers.pipeline import Input, Output, Parameter, parse_outputs
 from adagio.cli.args import ShowParamsMode
 from adagio.cli.dynamic import build_dynamic_run
-from adagio.cli.main import main
-from adagio.cli.main import _filter_visible_specs
+from adagio.cli.main import _filter_visible_specs, main
 from adagio.cli.runner import _apply_output_overrides
 
 
@@ -53,8 +52,12 @@ class OutputOptionTests(unittest.TestCase):
         self.assertIn("output_dir", dynamic_run.__signature__.parameters)
         self.assertIn("output_table", dynamic_run.__signature__.parameters)
 
-        output_dir_annotation = dynamic_run.__signature__.parameters["output_dir"].annotation
-        output_annotation = dynamic_run.__signature__.parameters["output_table"].annotation
+        output_dir_annotation = dynamic_run.__signature__.parameters[
+            "output_dir"
+        ].annotation
+        output_annotation = dynamic_run.__signature__.parameters[
+            "output_table"
+        ].annotation
         output_dir_help = typing.get_args(output_dir_annotation)[1].help
         output_help = typing.get_args(output_annotation)[1].help
 
@@ -132,7 +135,9 @@ class OutputOptionTests(unittest.TestCase):
             run_handler=lambda *args, **kwargs: None,
         )
 
-        output_dir_annotation = dynamic_run.__signature__.parameters["output_dir"].annotation
+        output_dir_annotation = dynamic_run.__signature__.parameters[
+            "output_dir"
+        ].annotation
         output_dir_group = typing.get_args(output_dir_annotation)[1].group
 
         self.assertEqual(output_dir_group[0]._name, "Command Options")
@@ -154,6 +159,7 @@ class OutputOptionTests(unittest.TestCase):
         self.assertEqual(
             list(dynamic_run.__signature__.parameters)[10:],
             [
+                "plan_only",
                 "input_seqs",
                 "param_metric",
                 "input_tree",
@@ -299,7 +305,10 @@ class OutputOptionTests(unittest.TestCase):
 
     def test_output_dir_override_applies_to_all_outputs(self) -> None:
         resolved = _apply_output_overrides(
-            outputs={"table": "/tmp/from-file/table.qza", "stats": "/tmp/from-file/stats.qza"},
+            outputs={
+                "table": "/tmp/from-file/table.qza",
+                "stats": "/tmp/from-file/stats.qza",
+            },
             output_names=["table", "stats"],
             output_dir="/tmp/all-outputs",
             output_overrides={"stats": "/tmp/custom/stats.qza"},

@@ -20,6 +20,7 @@ def select_default_executor(
     plugin_overrides=None,
     task_overrides=None,
     launchers=None,
+    run_config=None,
 ):
     from .defaults import ConfigurableTaskEnvironmentResolver
     from .task_environments import TaskEnvironmentExecutor
@@ -31,4 +32,5 @@ def select_default_executor(
             task_overrides=task_overrides,
         ),
         launchers=launchers or builtin_task_environment_launchers(),
+        run_config=run_config,
     )

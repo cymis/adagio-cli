@@ -101,6 +101,11 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         help="Emit execution status updates to the runtime-adapter.",
     )
 
+    parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Validate and print the resolved whole-action plan without executing tasks.",
+    )
     opts = parser.parse_args(argv)
 
     spec_data = _load_json(Path(opts.spec))
@@ -112,7 +117,9 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         runtime_arguments = {}
 
     pipeline = _parse_pipeline(spec_data)
-    output_dir = _resolve_output_dir(opts.output_dir, opts.job_id)
+    output_dir = _resolve_output_dir(
+        opts.output_dir, opts.job_id, create=not opts.plan_only
+    )
     arguments = _build_arguments(
         pipeline=pipeline,
         runtime_arguments=runtime_arguments,
@@ -120,13 +127,43 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     )
     target_ids = _parse_targets(opts.targets)
     _validate_required_arguments(pipeline, arguments, target_ids=target_ids)
-    cache_config = resolve_cache_config(
-        cwd=Path.cwd().resolve(),
-        cache_dir=opts.cache_dir,
-        reuse=opts.reuse,
-        recycle_pool=opts.recycle_pool,
-        no_reuse_nodes=_parse_node_ids(opts.no_reuse_nodes),
+    cache_config = (
+        None
+        if opts.plan_only
+        else resolve_cache_config(
+            cwd=Path.cwd().resolve(),
+            cache_dir=opts.cache_dir,
+            reuse=opts.reuse,
+            recycle_pool=opts.recycle_pool,
+            no_reuse_nodes=_parse_node_ids(opts.no_reuse_nodes),
+        )
     )
+
+    from ..executors import select_default_executor
+
+    executor = select_default_executor(
+        run_config=run_config,
+        default_override=default_environment_override(run_config),
+        plugin_overrides=named_environment_overrides(
+            run_config.plugins if run_config is not None else {}
+        ),
+        task_overrides=named_environment_overrides(
+            run_config.tasks if run_config is not None else {}
+        ),
+    )
+
+    if opts.plan_only:
+        from adagio.execution.planning import inspect_plan
+
+        console.print_json(
+            data=inspect_plan(
+                executor=executor,
+                pipeline=pipeline,
+                arguments=arguments,
+                target_ids=target_ids,
+            )
+        )
+        return
 
     connected = bool(
         opts.connected
@@ -164,18 +201,6 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
 
     monitor.report_reproducibility(reproducibility=reproducibility)
 
-    from ..executors import select_default_executor
-
-    executor = select_default_executor(
-        default_override=default_environment_override(run_config),
-        plugin_overrides=named_environment_overrides(
-            run_config.plugins if run_config is not None else {}
-        ),
-        task_overrides=named_environment_overrides(
-            run_config.tasks if run_config is not None else {}
-        ),
-    )
-
     try:
         executor.execute(
             pipeline=pipeline,
@@ -186,7 +211,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
             target_ids=target_ids,
             log_dir=opts.log_dir,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if connected and runtime_url and opts.job_id:
             _post_job_event(
                 runtime_url=runtime_url,
@@ -243,15 +268,19 @@ def _parse_pipeline(data: Any) -> AdagioPipeline:
     return AdagioPipeline.model_validate(pipeline_data)
 
 
-def _resolve_output_dir(raw_output_dir: str | None, job_id: str | None) -> str:
+def _resolve_output_dir(
+    raw_output_dir: str | None, job_id: str | None, *, create: bool = True
+) -> str:
     if raw_output_dir:
         output_dir = raw_output_dir
     elif job_id:
         output_dir = f"/storage/runtime_jobs/{job_id}/outputs"
     else:
         output_dir = "/storage/runtime_outputs"
-    os.makedirs(output_dir, exist_ok=True)
+    if create:
+        os.makedirs(output_dir, exist_ok=True)
     return output_dir
+
 
 def _build_arguments(
     *,
@@ -432,7 +461,13 @@ def _outputs_need_default(outputs: str | dict[str, str]) -> bool:
 
 
 def _is_missing(value: Any) -> bool:
-    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
+    return (
+        value is None
+        or value == ""
+        or value == "<fill me>"
+        or value == []
+        or value == {}
+    )
 
 
 def _validate_required_arguments(
@@ -527,4 +562,4 @@ def _post_job_event(*, runtime_url: str, job_id: str, payload: dict[str, Any]) -
         with urllib.request.urlopen(req, timeout=5):
             pass
     except (urllib.error.URLError, TimeoutError):
-        return None
+        return

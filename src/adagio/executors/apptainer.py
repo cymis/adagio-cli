@@ -27,6 +27,7 @@ from .container_support import (
     signal_task_running,
     with_apptainer_binds,
 )
+from .prepared import PreparedInvocation
 from .task_contract import (
     build_task_spec,
     container_log_path,
@@ -41,20 +42,11 @@ from .task_contract import (
 class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
     kind = "apptainer"
 
-    def launch(
-        self,
-        *,
-        environment: TaskEnvironmentSpec,
-        request: TaskExecutionRequest,
-        console: Console | None = None,
-        monitor: Monitor | None = None,
-        task_id: str | None = None,
-    ) -> TaskExecutionResult:
+    def prepare(self, *, environment, request, shared=False):
         image_path = _resolve_sif_image(environment.reference)
         runtime_executable = _resolve_runtime_executable()
 
         task = request.task
-        event_task_id = task_id if task_id is not None else task.id
         archive_inputs = {
             name: containerize_host_value(value)
             for name, value in request.archive_inputs.items()
@@ -103,7 +95,9 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         )
         write_json_file(spec_path, task_spec)
 
-        python_root = container_python_root(work_path=request.work_path)
+        python_root = container_python_root(
+            work_path=request.work_path, force_stage=shared
+        )
         command = [
             runtime_executable,
             "exec",
@@ -116,7 +110,11 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         host_paths = [request.cwd, request.work_path, python_root]
         for value in (
             list(request.archive_inputs.values())
-            + [item for values in request.archive_collection_inputs.values() for item in values]
+            + [
+                item
+                for values in request.archive_collection_inputs.values()
+                for item in values
+            ]
             + list(request.metadata_inputs.values())
         ):
             if is_uri(value):
@@ -152,22 +150,48 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             ]
         )
 
+        return PreparedInvocation(
+            command=command,
+            env=None,
+            cwd=request.cwd,
+            spec_path=spec_path,
+            manifest_path=manifest_path,
+            log_path=container_log_path(task_id=task.id, work_path=request.work_path),
+            request=request,
+            image_ref=str(image_path),
+            containerized=True,
+        )
+
+    def launch(
+        self,
+        *,
+        environment: TaskEnvironmentSpec,
+        request: TaskExecutionRequest,
+        console: Console | None = None,
+        monitor: Monitor | None = None,
+        task_id: str | None = None,
+    ) -> TaskExecutionResult:
+        prepared = self.prepare(environment=environment, request=request)
+        task = request.task
+        event_task_id = task_id if task_id is not None else task.id
+        manifest_path = prepared.manifest_path
+        command = prepared.command
+        image_path = Path(prepared.image_ref)
+        runtime_executable = command[0]
         if console is not None:
             label = f"{Path(runtime_executable).name} {image_path}"
             if not getattr(console, "_adagio_inline_monitor_active", False):
                 console.print(f"[dim]Task environment:[/dim] {label}")
 
         if monitor is not None:
-            monitor.starting_container(
-                task_id=event_task_id, image_ref=str(image_path)
-            )
+            monitor.starting_container(task_id=event_task_id, image_ref=str(image_path))
         signal_task_running(monitor=monitor, event_task_id=event_task_id)
         run_started = time.monotonic()
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: UP022
                 command,
                 check=False,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.PIPE,  # explicit streams preserve launcher test adapters
                 stderr=subprocess.PIPE,
                 text=True,
             )
@@ -218,7 +242,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         for output_name in request.outputs:
             actual_path = reported_outputs.get(output_name)
             if not isinstance(actual_path, str):
-                raise RuntimeError(
+                raise RuntimeError(  # noqa: TRY004 - remote result protocol failure
                     f"Task {task.id!r} did not report output {output_name!r}."
                 )
             resolved_outputs[output_name] = str(host_path_from_container(actual_path))
@@ -227,9 +251,8 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         for output_name in request.metadata_outputs or {}:
             actual_path = reported_metadata_outputs.get(output_name)
             if not isinstance(actual_path, str):
-                raise RuntimeError(
-                    f"Task {task.id!r} did not report metadata view "
-                    f"{output_name!r}."
+                raise RuntimeError(  # noqa: TRY004 - remote result protocol failure
+                    f"Task {task.id!r} did not report metadata view {output_name!r}."
                 )
             metadata_outputs[output_name] = str(host_path_from_container(actual_path))
 

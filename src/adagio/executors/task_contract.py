@@ -1,7 +1,9 @@
 import json
-from collections.abc import Mapping
+import os
+import tempfile
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 # Sentinel "plugin" name marking a task spec that imports raw data into a single
 # artifact instead of running a QIIME plugin action. Used to materialize a
@@ -22,8 +24,7 @@ def build_task_outputs(
 ) -> dict[str, str]:
     stem = task_file_stem(task_id)
     return {
-        name: str((work_path / f"{stem}_{name}").resolve())
-        for name in output_names
+        name: str((work_path / f"{stem}_{name}").resolve()) for name in output_names
     }
 
 
@@ -88,6 +89,7 @@ def build_task_spec(
 
 def build_result_manifest(
     *,
+    attempt_id: str | None = None,
     outputs: Mapping[str, str],
     reused: bool,
     metadata_outputs: Mapping[str, str] | None = None,
@@ -96,6 +98,7 @@ def build_result_manifest(
         "outputs": dict(outputs),
         "metadata_outputs": dict(metadata_outputs or {}),
         "reused": reused,
+        **({"attempt_id": attempt_id} if attempt_id else {}),
     }
 
 
@@ -107,7 +110,9 @@ def parse_result_manifest(
         metadata_outputs = payload.get("metadata_outputs", {})
         reused = bool(payload.get("reused", False))
         if not isinstance(outputs, dict):
-            raise TypeError("Invalid task result manifest: 'outputs' must be an object.")
+            raise TypeError(
+                "Invalid task result manifest: 'outputs' must be an object."
+            )
         if not isinstance(metadata_outputs, dict):
             raise TypeError(
                 "Invalid task result manifest: 'metadata_outputs' must be an object."
@@ -122,4 +127,14 @@ def read_json_file(path: Path) -> dict[str, Any]:
 
 
 def write_json_file(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+    # Publish only complete JSON; readers never observe a partially written manifest.
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".adagio-json-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)

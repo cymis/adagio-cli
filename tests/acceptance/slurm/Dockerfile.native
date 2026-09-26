@@ -1,0 +1,6 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y software-properties-common ca-certificates python3 python3-venv slurm-wlm slurmdbd mariadb-server munge wget
+RUN add-apt-repository -y ppa:apptainer/ppa && apt-get update && apt-get install -y apptainer
+RUN python3 -m venv /opt/driver && /opt/driver/bin/pip install cyclopts pydantic rich tomli
+ENTRYPOINT ["/bin/bash"]

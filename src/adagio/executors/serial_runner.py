@@ -1,7 +1,8 @@
 import shutil
 import tempfile
-import traceback
 import typing as t
+import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,8 +15,8 @@ from adagio.monitor.log import LogMonitor
 from adagio.monitor.tty import RichMonitor
 
 from .cache_support import ExecutionCacheConfig
-from .container_support import is_uri
 from .common import plan_execution_order, prune_to_targets, task_label
+from .container_support import is_uri
 from .path_utils import InputSource, resolve_host_input, resolve_host_path
 from .task_contract import container_log_path
 
@@ -79,6 +80,7 @@ def run_serial_pipeline(
     cache_config: ExecutionCacheConfig | None = None,
     target_ids: set[str] | None = None,
     log_dir: str | Path | None = None,
+    run_config=None,
 ) -> None:
     sig = pipeline.signature
     tasks = list(pipeline.iter_tasks())
@@ -97,7 +99,14 @@ def run_serial_pipeline(
 
     active_monitor.start_pipeline(total_tasks=len(tasks))
 
-    with tempfile.TemporaryDirectory(prefix="adagio-work-") as work_dir:
+    slurm = run_config is not None and run_config.executor.kind == "slurm"
+    if slurm:
+        work_dir = Path(run_config.executor.work_dir) / ("run-" + uuid.uuid4().hex)
+        work_dir.mkdir(parents=True, mode=0o700)
+        work_context = nullcontext(str(work_dir))
+    else:
+        work_context = tempfile.TemporaryDirectory(prefix="adagio-work-")
+    with work_context as work_dir:
         state = SerialExecutionState(
             cwd=Path.cwd().resolve(),
             work_path=Path(work_dir),
@@ -108,7 +117,6 @@ def run_serial_pipeline(
             target_ids=selected_target_ids,
             monitor=active_monitor,
         )
-        completed_task_ids: set[str] = set()
 
         active_monitor.start_load_input()
         for input_def in sig.inputs:
@@ -135,9 +143,7 @@ def run_serial_pipeline(
         # still require every signature output.
         if state.target_ids:
             producer_task_of_output = {
-                output.id: task.id
-                for task in tasks
-                for output in task.outputs.values()
+                output.id: task.id for task in tasks for output in task.outputs.values()
             }
             state.expected_output_ids = {
                 out.id
@@ -153,47 +159,19 @@ def run_serial_pipeline(
             )
 
         try:
-            for task in execution_plan:
-                active_monitor.start_task(task_id=task.id)
-                try:
-                    outcome = _coerce_outcome(resolve_task(task, state, console))
-                    _persist_task_log(state=state, task_id=task.id, outcome=outcome)
-                    finish_outputs(
-                        sig=sig,
-                        arguments=arguments,
-                        state=state,
-                        monitor=active_monitor,
-                        require_all=False,
-                    )
-                    active_monitor.advance_task(task_id=task.id, advance=1)
-                    active_monitor.finish_task(
-                        task_id=task.id,
-                        status="cached" if outcome.reused else "completed",
-                        **outcome.enrichment,
-                    )
-                    completed_task_ids.add(task.id)
-                except Exception as exc:  # noqa: BLE001
-                    active_monitor.finish_task(
-                        task_id=task.id,
-                        status="failed",
-                        error=str(exc),
-                        traceback=traceback.format_exc(),
-                    )
-                    for skipped_task in execution_plan:
-                        if (
-                            skipped_task.id == task.id
-                            or skipped_task.id in completed_task_ids
-                            or skipped_task.id not in planned_task_ids
-                        ):
-                            continue
-                        active_monitor.finish_task(
-                            task_id=skipped_task.id,
-                            status="skipped",
-                            error=f"Skipped because task {task.id!r} failed.",
-                        )
-                    if state.save_output_started:
-                        active_monitor.finish_save_output()
-                    raise
+            from adagio.execution.coordinator import coordinate
+
+            coordinate(
+                execution_plan=execution_plan,
+                state=state,
+                resolve_task=resolve_task,
+                finish_outputs=finish_outputs,
+                sig=sig,
+                arguments=arguments,
+                monitor=active_monitor,
+                console=console,
+                run_config=run_config,
+            )
 
             try:
                 finish_outputs(
@@ -233,7 +211,7 @@ def _persist_task_log(
     """
     if state.log_dir is None:
         return
-    source = container_log_path(task_id=task_id, work_path=state.work_path)
+    source = Path(outcome.enrichment.get("log_path") or container_log_path(task_id=task_id, work_path=state.work_path))
     if not source.exists():
         return
     destination = state.log_dir / source.name
@@ -255,7 +233,13 @@ def resolve_monitor(*, console: Console | None, monitor: Monitor | None) -> Moni
 
 
 def _is_missing(value: t.Any) -> bool:
-    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
+    return (
+        value is None
+        or value == ""
+        or value == "<fill me>"
+        or value == []
+        or value == {}
+    )
 
 
 def resolve_pipeline_input(
@@ -275,7 +259,7 @@ def resolve_pipeline_input(
 
 
 def is_collection_type(type_name: str) -> bool:
-    return type_name.startswith("List[") or type_name.startswith("Collection[")
+    return type_name.startswith(("List[", "Collection["))
 
 
 def expand_collection_input_source(source: str) -> list[str]:

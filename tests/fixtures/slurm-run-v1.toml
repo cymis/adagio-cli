@@ -1,0 +1,37 @@
+version = 1
+
+[defaults]
+kind = "apptainer"
+image = "/shared/images/plugin.sif"
+
+[plugins]
+
+[tasks]
+
+[resources.tasks]
+
+[resources.tasks."memory-only"]
+memory = "1 GB"
+
+[resources.tasks."node.with.dots"]
+cpus = 7
+
+[executor]
+"kind" = "slurm"
+"work_dir" = "/shared/adagio/work"
+"max_in_flight" = 8
+
+[executor."slurm"]
+"partition" = "general"
+"account" = "lab"
+"time_limit" = "02:00:00"
+"qos" = "normal"
+"extra_args" = ["--constraint=avx2","--licenses=software:1"]
+
+[profile]
+"id" = "fixture-profile"
+"name" = "Lab Slurm"
+
+[resources.defaults]
+"cpus" = 2
+"memory" = "4 GiB"
