@@ -8,10 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from adagio.cli.config import AdagioRunConfig, load_run_config
+from adagio.execution import backends
 from adagio.execution.backends import batch, clean_up_run
 from adagio.execution.backends.base import JobState, TaskInvocation
 from adagio.execution.backends.batch import BatchBackend, JobRef
-from adagio.execution.backends.run_record import RunOwned, owning_run
+from adagio.execution.backends.run_record import RunOwned, owning_run, write_run_record
 from adagio.execution.backends.slurm import (
     SlurmExecutorConfig,
     SlurmScheduler,
@@ -415,12 +416,17 @@ def test_the_lost_reply_deadline_follows_the_cluster_credential_lifetime():
 
     scheduler = SlurmScheduler()
     assert scheduler.lost_reply_deadline(run_with("AuthInfo = ttl=600\n")) == 660
-    assert scheduler.lost_reply_deadline(run_with("AuthInfo = (null)\n")) == 360
+    assert (
+        scheduler.lost_reply_deadline(run_with("AuthInfo = socket=/munge,ttl=900\n"))
+        == 960
+    )
+    for value in ("(null)", "ttl=0", "ttl=-1", "ttl=600junk", "ttl=", ""):
+        assert scheduler.lost_reply_deadline(run_with(f"AuthInfo = {value}\n")) is None
 
     def unavailable(argv):
         raise OSError("scontrol not found")
 
-    assert scheduler.lost_reply_deadline(unavailable) == 360
+    assert scheduler.lost_reply_deadline(unavailable) is None
 
 
 def test_a_lost_reply_is_settled_once_no_job_can_appear(tmp_path):
@@ -429,19 +435,71 @@ def test_a_lost_reply_is_settled_once_no_job_can_appear(tmp_path):
     registry.save()
     intent = attempts(registry)["c"]["intent_at"]
     clock = Clock()
-    commands = Commands([], default="")
+    commands = Commands(["", "AuthInfo = ttl=300\n"], default="")
     errors = cancel(
-        registry, commands, clock=clock, sleep=clock.sleep, now=lambda: intent + clock.now
+        registry,
+        commands,
+        clock=clock,
+        sleep=clock.sleep,
+        now=lambda: intent + clock.now,
     )
     assert errors == []
-    # Slurm acts on a delivered request until its credential expires: five
-    # minutes unless AuthInfo sets a ttl.
+    # The explicit five-minute credential lifetime plus the safety margin.
     assert 360 <= clock.now < 366
     assert ["scontrol", "show", "config"] in commands.calls
     # Waiting backs off rather than asking the scheduler twice a second.
     assert len(commands.calls) < 100
     (entry,) = attempts(registry).values()
     assert entry["state"] == "ended" and entry["job_id"] is None
+
+
+@pytest.mark.parametrize(
+    "config", [OSError("scontrol unavailable"), "AuthInfo = (null)", "AuthInfo = ttl=0"]
+)
+def test_cleanup_retains_an_unseen_submission_without_a_verified_lifetime(
+    tmp_path, monkeypatch, config
+):
+    registry = registry_with(tmp_path, ("c", C, None))
+    registry.record_unconfirmed("c", "timed out")
+    registry.save()
+    intent = attempts(registry)["c"]["intent_at"]
+    record = tmp_path / "run-record.json"
+    write_run_record(record, executor="slurm", registry=registry.path)
+    clock = Clock()
+
+    def cancel_with_clock(*args):
+        return batch.cancel_outstanding(
+            *args, clock=clock, sleep=clock.sleep, now=lambda: intent + 1000 + clock.now
+        )
+
+    monkeypatch.setattr(backends, "cancel_outstanding", cancel_with_clock)
+    # Even well beyond the old guessed bound, repeated cleanup must preserve
+    # both the submission and the pointer the supervisor needs to find it.
+    for _ in range(2):
+        commands = Commands(["", config], default="")
+        (error,) = clean_up_run(record, command_runner=commands)
+        assert "credential lifetime could not be verified" in error
+        assert record.exists()
+        assert attempts(registry)["c"]["state"] == "unconfirmed"
+    assert clock.now < 30
+
+    # A later attempt can reconcile the record once the bound is available.
+    commands = Commands(["", "AuthInfo = ttl=900"], default="")
+    assert clean_up_run(record, command_runner=commands) == []
+    assert not record.exists()
+    assert attempts(registry)["c"]["state"] == "ended"
+
+
+def test_a_discovered_job_can_be_confirmed_absent_without_a_credential_lifetime(
+    tmp_path,
+):
+    registry = registry_with(tmp_path, ("c", C, None))
+    clock = Clock()
+    commands = Commands(["", "", f"456|{C}|PENDING", "", ""])
+    assert cancel(registry, commands, clock=clock, sleep=clock.sleep) == []
+    entry = attempts(registry)["c"]
+    assert (entry["state"], entry["job_id"]) == ("ended", "456")
+    assert commands.calls[3] == ["scancel", f"--name={C}"]
 
 
 def test_a_lost_reply_that_becomes_a_job_is_cancelled_by_name(tmp_path):

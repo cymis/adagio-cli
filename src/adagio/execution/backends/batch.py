@@ -157,9 +157,9 @@ class Scheduler(Protocol):
         """Commands that cancel exactly these jobs, matched by name."""
         ...
 
-    def lost_reply_deadline(self, run: CommandRunner) -> float:
+    def lost_reply_deadline(self, run: CommandRunner) -> float | None:
         """Seconds after a submission whose reply was lost beyond which the
-        scheduler can no longer create its job."""
+        scheduler can no longer create its job, or None if unknown."""
         ...
 
 
@@ -535,7 +535,10 @@ def cancel_outstanding(
     cancelled_at = clock()
     unconfirmed = [intent for job, (_, intent) in jobs.items() if job.job_id is None]
     settle = scheduler.lost_reply_deadline(run) if unconfirmed else 0.0
-    wait = max([confirm_for] + [i + settle - now() for i in unconfirmed])
+    wait = max(
+        [confirm_for]
+        + ([i + settle - now() for i in unconfirmed] if settle is not None else [])
+    )
     if wait > confirm_for:
         logger.warning(
             "Waiting up to %.0fs to be sure a %s submission whose reply was lost "
@@ -545,6 +548,7 @@ def cancel_outstanding(
         )
     deadline = clock() + wait
     remaining = list(jobs)
+    observed = {job for job in jobs if job.job_id is not None}
     interval = 0.5
     while remaining:
         statuses = scheduler.statuses(remaining, run)
@@ -556,14 +560,11 @@ def cancel_outstanding(
             attempt_id, intent = jobs[job]
             if job.job_id is None and status.job_id is not None:
                 registry.record_found(attempt_id, job_id=status.job_id)
+                observed.add(job)
             if status.active:
                 active.append(job)
                 continue
-            if (
-                job.job_id is None
-                and status.job_id is None
-                and now() < intent + settle
-            ):
+            if job not in observed and (settle is None or now() < intent + settle):
                 # Not listed yet: the lost reply may still become a job.
                 continue
             if status.state is not None and status.state.terminal:
@@ -596,6 +597,13 @@ def cancel_outstanding(
                 f"{job.name} ({job.job_id or 'id unknown'})" for job in remaining
             )
             + f". Registry: {registry.path}."
+            + (
+                " The scheduler credential lifetime could not be verified; "
+                "unconfirmed submissions are retained. Restore access to an "
+                "explicit positive AuthInfo ttl and retry cleanup."
+                if settle is None and any(job not in observed for job in remaining)
+                else ""
+            )
         )
     registry.save()
     return errors

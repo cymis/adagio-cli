@@ -307,20 +307,21 @@ class SlurmScheduler:
                 )
         return results
 
-    def lost_reply_deadline(self, run: CommandRunner) -> float:
+    def lost_reply_deadline(self, run: CommandRunner) -> float | None:
         # slurmctld acts on a request it receives until the request's
-        # credential expires: AuthInfo's ttl, or MUNGE's default of five
-        # minutes. A minute more covers the sbatch timeout and clock skew.
-        ttl = 300
+        # credential expires. Defaults depend on the authentication backend
+        # and its installation, so only an explicit positive ttl is a bound.
+        # A minute more covers the sbatch timeout and clock skew.
         try:
             for line in run(["scontrol", "show", "config"]).splitlines():
                 key, _, value = line.partition("=")
-                match = re.search(r"\bttl=(\d+)", value)
+                match = re.search(r"(?:^|[\s,])ttl=(\d+)(?=$|[\s,])", value)
                 if key.strip() == "AuthInfo" and match:
-                    ttl = int(match.group(1)) or ttl  # 0 means MUNGE's default
+                    ttl = int(match.group(1))
+                    return ttl + 60.0 if ttl > 0 else None
         except SCHEDULER_ERRORS:
             pass
-        return ttl + 60.0
+        return None
 
     def cancel_commands(self, jobs: Sequence[JobRef]) -> list[list[str]]:
         commands = []
