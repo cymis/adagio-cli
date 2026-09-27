@@ -126,8 +126,12 @@ class Scheduler(Protocol):
     name: ClassVar[str]
     #: Executables the scheduler needs on the submit host.
     commands: ClassVar[tuple[str, ...]]
-    #: Environment variable prefixes that would silently change what is submitted.
+    #: Environment variable prefixes that would silently change what is
+    #: submitted, listed or cancelled.
     scrubbed_environment: ClassVar[tuple[str, ...]]
+    #: Seconds after a submission whose reply was lost beyond which the
+    #: scheduler can no longer create its job.
+    lost_reply_deadline: ClassVar[float]
 
     def submit_argv(
         self,
@@ -242,8 +246,6 @@ class BatchBackend:
         self._interval = self._min_interval
         self._accounting_timeout = accounting_timeout
         self._outage_timeout = outage_timeout
-        # A submission whose reply was lost cannot become a job after this.
-        self._submit_deadline = 2 * command_timeout
         self._registry: SubmissionRegistry | None = None
         self._stopped = False
 
@@ -276,6 +278,12 @@ class BatchBackend:
                 # Held until the run is over, so ``adagio cleanup`` cannot act
                 # on this run while this process still submits and cancels.
                 owned.enter_context(owning_run(self._run_record))
+                if self._run_record.exists():
+                    raise RuntimeError(
+                        f"{self._run_record} still records an earlier run that "
+                        f"was not cleaned up; run `adagio cleanup "
+                        f"{self._run_record}` first."
+                    )
             root = Path(self.config.work_dir) / f"run-{uuid.uuid4().hex}"
             root.mkdir(parents=True, mode=0o700)
             self._registry = SubmissionRegistry.create(root, executor=self.kind)
@@ -286,10 +294,11 @@ class BatchBackend:
             yield Workspace(root=root, cwd=root)
             # Reached only when the run finished and saved its outputs. A failed
             # or interrupted run keeps its directory: task logs, and the registry
-            # that cancellation and reconciliation read.
-            shutil.rmtree(root, ignore_errors=True)
+            # that cancellation and reconciliation read. Every job has ended, so
+            # the record goes first: it must never outlive the registry it names.
             if self._run_record is not None:
                 self._run_record.unlink(missing_ok=True)
+            shutil.rmtree(root, ignore_errors=True)
 
     def attempt_directory(self, workspace: Workspace) -> Path:
         path = workspace.root / f"attempt-{uuid.uuid4().hex}"
@@ -422,6 +431,9 @@ class BatchBackend:
         without an outcome.
         """
         if not status.answered:
+            # Missing answers say nothing about the job, so they do not count
+            # towards the time it has been gone.
+            handle.unknown_since = None
             if handle.unreachable_since is None:
                 handle.unreachable_since = now
                 logger.warning(
@@ -464,7 +476,6 @@ class BatchBackend:
             self._run,
             clock=self._clock,
             sleep=self._sleep,
-            submit_deadline=self._submit_deadline,
         )
 
     def describe(self) -> dict[str, Any]:
@@ -480,14 +491,14 @@ def cancel_outstanding(
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.time,
     confirm_for: float = 10.0,
-    submit_deadline: float = 60.0,
 ) -> list[str]:
     """Cancel every recorded job that may still hold resources.
 
     Returns what could not be confirmed. Only jobs in the registry are touched,
     and each is cancelled and confirmed by its run-unique name. A submission
-    whose reply was lost is cancelled by name as well; once ``submit_deadline``
-    has passed since it was requested and no job has that name, none will.
+    whose reply was lost is cancelled by name as well, and waited for until
+    the scheduler's ``lost_reply_deadline`` has passed: only then does the
+    absence of a job with its name mean that none will appear.
     """
     jobs: dict[JobRef, tuple[str, float]] = {
         JobRef(entry["job_name"], entry.get("job_id"), entry.get("cluster")): (
@@ -507,13 +518,25 @@ def cancel_outstanding(
                 failures.append(f"{scheduler.name} cancellation failed: {error}")
 
     cancel(list(jobs))
+    cancelled_at = clock()
     unconfirmed = [intent for job, (_, intent) in jobs.items() if job.job_id is None]
-    wait = max([confirm_for] + [i + submit_deadline - now() for i in unconfirmed])
+    wait = max(
+        [confirm_for]
+        + [i + scheduler.lost_reply_deadline - now() for i in unconfirmed]
+    )
+    if wait > confirm_for:
+        logger.warning(
+            "Waiting up to %.0fs to be sure a %s submission whose reply was lost "
+            "did not become a job.",
+            wait,
+            scheduler.name,
+        )
     deadline = clock() + wait
     remaining = list(jobs)
+    interval = 0.5
     while remaining:
         statuses = scheduler.statuses(remaining, run)
-        appeared = []
+        active = []
         for job in list(remaining):
             status = statuses.get(job)
             if status is None or status.active is None:
@@ -522,13 +545,12 @@ def cancel_outstanding(
             if job.job_id is None and status.job_id is not None:
                 registry.record_found(attempt_id, job_id=status.job_id)
             if status.active:
-                if job.job_id is None:
-                    appeared.append(job)
+                active.append(job)
                 continue
             if (
                 job.job_id is None
                 and status.job_id is None
-                and now() < intent + submit_deadline
+                and now() < intent + scheduler.lost_reply_deadline
             ):
                 # Not listed yet: the lost reply may still become a job.
                 continue
@@ -544,9 +566,15 @@ def cancel_outstanding(
             remaining.remove(job)
         if not remaining or clock() >= deadline:
             break
-        # A lost reply that became a job after the first cancellation.
-        cancel(appeared)
-        sleep(0.5)
+        # Cancel again what is still active: at once for a lost reply that has
+        # since become a job, and now and then in case a cancellation did not
+        # reach the scheduler.
+        appeared = any(job.job_id is None for job in active)
+        if active and (appeared or clock() - cancelled_at >= 5.0):
+            cancel(active)
+            cancelled_at = clock()
+        sleep(interval)
+        interval = min(interval * 2, 5.0)
     errors: list[str] = []
     if remaining:
         errors.extend(failures)

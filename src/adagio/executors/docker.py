@@ -2,6 +2,7 @@ import os
 import platform as _platform
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 from rich.console import Console
@@ -128,10 +129,15 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             # run natively (no flag). Override per-node via env config `platform`.
             platform = _host_platform_default()
 
+        # Named, so an interrupted run can stop the container: killing the
+        # docker client does not stop the container it started.
+        container_name = f"adagio-task-{uuid.uuid4().hex}"
         command = [
             "docker",
             "run",
             "--rm",
+            "--name",
+            container_name,
             *docker_tty_flags(),
             "-e",
             f"PYTHONPATH={containerize_path(python_root)}",
@@ -247,6 +253,9 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             raise SystemExit(
                 "Docker is required for task environment execution but was not found in PATH."
             ) from exc
+        except BaseException:
+            _kill_container(container_name)
+            raise
         run_seconds = time.monotonic() - run_started
         timings = {"pull_seconds": pull_seconds, "run_seconds": run_seconds}
 
@@ -317,6 +326,20 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             log_path=str(log_path),
             timings=timings,
         )
+
+
+def _kill_container(name: str) -> None:
+    """Stop a task's container after its run was interrupted; best effort."""
+    try:
+        subprocess.run(
+            ["docker", "kill", name],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _resolve_image_digest(*, reference: str) -> str | None:

@@ -105,7 +105,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         help=(
             "File to record work this run leaves outside its process tree, such "
             "as scheduler jobs. If the run is killed, `adagio cleanup` with the "
-            "same path cancels that work."
+            "same path, on the same host, cancels that work. Keep it on local disk."
         ),
     )
     parser.add_argument(
@@ -226,12 +226,14 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
 
 
 def _terminate_when_stdin_closes() -> None:
-    """Deliver SIGTERM to this process once standard input reaches end of file.
+    """Deliver SIGTERM once standard input reaches end of file.
 
     SIGTERM already stops a run and cancels its work, so a supervisor that dies
-    (closing its end of the pipe) is handled like one that asked. Tasks get
-    /dev/null as standard input instead, so they can neither read the pipe nor
-    keep it open.
+    (closing its end of the pipe) is handled like one that asked: when this
+    process leads its own process group, as under a supervisor, the whole group
+    is signalled, running tasks included, as the supervisor itself would.
+    Tasks get /dev/null as standard input instead, so they can neither read
+    the pipe nor keep it open.
     """
     watched = os.dup(0)
     devnull = os.open(os.devnull, os.O_RDONLY)
@@ -246,6 +248,8 @@ def _terminate_when_stdin_closes() -> None:
         with os.fdopen(watched, "rb", buffering=0) as stream:
             while stream.read(4096):
                 pass
+        if os.getpgrp() == os.getpid():
+            os.killpg(os.getpid(), signal.SIGTERM)
         signal.pthread_kill(main, signal.SIGTERM)
 
     threading.Thread(target=watch, name="adagio-stdin", daemon=True).start()

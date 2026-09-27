@@ -91,19 +91,28 @@ class SlurmExecutorConfig(BatchExecutorConfig):
     slurm: SlurmOptions = Field(default_factory=SlurmOptions)
 
 
-_QUEUED = frozenset({"PENDING", "REQUEUED", "REQUEUE_FED", "REQUEUE_HOLD"})
+_QUEUED = frozenset(
+    {
+        "PENDING",
+        "REQUEUED",
+        "REQUEUE_FED",
+        "REQUEUE_HOLD",
+        "RESV_DEL_HOLD",
+        "SPECIAL_EXIT",
+    }
+)
 _RUNNING = frozenset(
     {
         "CONFIGURING",
         "RUNNING",
         "COMPLETING",
         "SUSPENDED",
+        "STOPPED",
         "RESIZING",
         "SIGNALING",
         "STAGE_OUT",
     }
 )
-#: Queue states in which a job can still hold or wait for resources.
 _ACTIVE = {state: JobState.QUEUED for state in _QUEUED} | {
     state: JobState.RUNNING for state in _RUNNING
 }
@@ -155,8 +164,13 @@ class SlurmScheduler:
     kind = "slurm"
     name = "Slurm"
     commands = ("sbatch", "squeue", "sacct", "scancel")
-    # SBATCH_* variables override sbatch options and would change what is submitted.
-    scrubbed_environment = ("SBATCH_",)
+    # These variables act as extra options and filters: they would change what
+    # is submitted, and hide jobs from lookups and cancellation.
+    scrubbed_environment = ("SBATCH_", "SQUEUE_", "SACCT_", "SCANCEL_")
+    # slurmctld acts on a request it receives until the request's credential
+    # expires (MUNGE's default lifetime is five minutes), so a lost sbatch
+    # reply can still become a job that long after it was sent.
+    lost_reply_deadline = 360.0
 
     def __init__(self, options: SlurmOptions | None = None) -> None:
         self.options = options or SlurmOptions()
@@ -224,7 +238,8 @@ class SlurmScheduler:
             cluster_args = [f"--clusters={cluster}"] if cluster else []
             names = sorted({job.name for job in group})
             # The queue holds every job that can still use resources, and
-            # finished ones for a few minutes; it is asked by our names only.
+            # finished ones for a few minutes; it is asked by our names only,
+            # in every partition, including hidden ones.
             listed: dict[str, list[tuple[str, str]]] = {}
             queue_error: Exception | None = None
             try:
@@ -232,6 +247,7 @@ class SlurmScheduler:
                     [
                         "squeue",
                         "--noheader",
+                        "--all",
                         "--states=all",
                         f"--name={','.join(names)}",
                         "--format=%i|%j|%T",
@@ -249,7 +265,7 @@ class SlurmScheduler:
             ended = {
                 job: job.job_id or row[0]
                 for job, row in rows.items()
-                if (row is None or row[1] not in _ACTIVE) and (job.job_id or row)
+                if (row is None or row[1] in _FINISHED) and (job.job_id or row)
             }
             accounting: dict[str, tuple[str, str]] = {}
             accounting_error: Exception | None = None
@@ -312,7 +328,7 @@ def _queue_row(
 ) -> tuple[str, str] | None:
     """The queue's (id, state) for ``job``, matched by its name and any known id."""
     rows = [row for row in listed.get(job.name, ()) if job.job_id in (None, row[0])]
-    return max(rows, key=lambda row: row[1] in _ACTIVE, default=None)
+    return max(rows, key=lambda row: row[1] not in _FINISHED, default=None)
 
 
 def _status(
@@ -323,8 +339,11 @@ def _status(
     accounting_error: Exception | None,
 ) -> SchedulerStatus:
     job_id = row[0] if row else None
-    if row is not None and row[1] in _ACTIVE:
-        return SchedulerStatus(_ACTIVE[row[1]], row[1], active=True, job_id=job_id)
+    if row is not None and row[1] not in _FINISHED:
+        # Any state that is not an end, including ones this code does not
+        # know, means the job may still hold or wait for resources.
+        state = _ACTIVE.get(row[1], JobState.QUEUED)
+        return SchedulerStatus(state, row[1], active=True, job_id=job_id)
     if accounted is not None:
         state, exit_code = accounted
         if state in _FINISHED and _EXIT_CODE.fullmatch(exit_code):
@@ -351,9 +370,12 @@ def _status(
             answered=False,
             job_id=job_id,
         )
-    return SchedulerStatus(
-        None, f"{queue}, with no accounting record", active=False, job_id=job_id
+    accounting = (
+        f"accounting shows {accounted[0]}, exit code {accounted[1] or 'none'}"
+        if accounted is not None
+        else "no accounting record"
     )
+    return SchedulerStatus(None, f"{queue}; {accounting}", active=False, job_id=job_id)
 
 
 def _by_cluster(

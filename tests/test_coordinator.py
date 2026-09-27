@@ -190,6 +190,25 @@ def test_termination_handlers_are_restored(monkeypatch):
     assert [signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)] == before
 
 
+def test_a_run_started_under_nohup_ignores_hangups():
+    import os
+    import signal
+
+    class HungUpBackend(QueueBackend):
+        def wait(self, handles):
+            os.kill(os.getpid(), signal.SIGHUP)  # the login session went away
+            super().wait(handles)
+
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        backend = HungUpBackend(capacity=1)
+        coordinate(items=items([("A", [])]), backend=backend, listener=Recorder())
+        assert not backend.cancelled
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+
+
 def test_sighup_cancels_like_sigterm():
     import os
     import signal

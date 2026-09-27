@@ -352,7 +352,8 @@ def case_lost_replies():
     never = f"adagio-{uuid.uuid4().hex}"
     record, registry = left_behind("lost-replies", (appeared, None), (never, None))
     data = json.loads(registry.path.read_text())
-    data["attempts"]["1"]["intent_at"] = time.time() - 120
+    # Requested longer ago than Slurm could still act on it.
+    data["attempts"]["1"]["intent_at"] = time.time() - 400
     registry.path.write_text(json.dumps(data))
     assert clean_up_run(record) == []
     entries = json.loads(registry.path.read_text())["attempts"]
@@ -360,6 +361,52 @@ def case_lost_replies():
     assert squeue_state(job_id) == "CANCELLED", squeue_state(job_id)
     assert entries["1"]["state"] == "ended" and entries["1"]["job_id"] is None
     report["lost_replies"] = {k: (e["state"], e["job_id"]) for k, e in entries.items()}
+
+
+AS_USER = """
+import json, subprocess, sys
+from adagio.execution.backends.batch import JobRef, make_command_runner
+from adagio.execution.backends.slurm import SlurmScheduler
+
+name = sys.argv[1]
+job_id = subprocess.run(
+    ["sbatch", "--parsable", "--partition=adagio-hidden", "--mem=32M",
+     f"--job-name={name}", "--output=/dev/null", "--wrap=sleep 300"],
+    capture_output=True, text=True, check=True,
+).stdout.strip()
+scheduler = SlurmScheduler()
+run = make_command_runner(SlurmScheduler)
+status = scheduler.statuses([JobRef(name, job_id)], run)[JobRef(name, job_id)]
+subprocess.run(["scancel", f"--name={name}", job_id], check=True)
+print(json.dumps({"job_id": job_id, "active": status.active, "detail": status.detail}))
+"""
+
+
+def case_hidden_partition_as_a_user():
+    """A normal user's job in a hidden partition is still seen, not taken as gone."""
+    subprocess.run(
+        ["scontrol", "create", "PartitionName=adagio-hidden", "Nodes=ALL", "Hidden=YES"],
+        capture_output=True,
+        check=False,  # already there from an earlier run
+    )
+    try:
+        result = subprocess.run(
+            [
+                "runuser", "-u", "ubuntu", "--", "env", "PYTHONPATH=/workspace/src",
+                sys.executable, "-c", AS_USER, f"adagio-{uuid.uuid4().hex}",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd="/tmp",
+        )
+    finally:
+        subprocess.run(
+            ["scontrol", "delete", "PartitionName=adagio-hidden"], check=False
+        )
+    seen = json.loads(result.stdout)
+    assert seen["active"] is True, seen
+    report["hidden_partition"] = seen
 
 
 def registry_after(registry):
@@ -419,5 +466,6 @@ if __name__ == "__main__":
     case_live_owner_then_stdin_closes()
     case_reused_id_spares_the_other_job()
     case_lost_replies()
+    case_hidden_partition_as_a_user()
     (root / "report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))

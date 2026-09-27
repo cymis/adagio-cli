@@ -174,7 +174,11 @@ def _interrupt_on_termination() -> Callable[[], None]:
         _ignore_termination()
         raise KeyboardInterrupt(f"Run interrupted by {signal.Signals(signum).name}.")
 
-    for signum in _TERMINATION:
+    for signum, handler in previous.items():
+        # A run started under nohup inherits an ignored SIGHUP: it asked to
+        # outlive its terminal, so the hangup stays ignored.
+        if signum != signal.SIGTERM and handler is signal.SIG_IGN:
+            continue
         signal.signal(signum, interrupt)
 
     def restore() -> None:

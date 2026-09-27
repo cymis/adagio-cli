@@ -129,6 +129,48 @@ class DockerLauncherTests(unittest.TestCase):
             self.assertEqual(result.outputs, {"visualization": str(output_path)})
             self.assertFalse(result.reused)
 
+    def test_an_interrupted_run_stops_its_container(self) -> None:
+        launcher = DockerTaskEnvironmentLauncher()
+        task = _task()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            cwd = root / "cwd"
+            work_path = root / "work"
+            cwd.mkdir()
+            work_path.mkdir()
+            request = TaskExecutionRequest(
+                task=task,
+                cwd=cwd,
+                work_path=work_path,
+                archive_inputs={},
+                archive_collection_inputs={},
+                metadata_inputs={},
+                params={},
+                metadata_column_kwargs={},
+                outputs={"visualization": str(work_path / "summary.qzv")},
+            )
+            calls = []
+
+            def fake_run(cmd, *args, **kwargs):  # noqa: ANN001
+                calls.append(cmd)
+                if cmd[:2] == ["docker", "run"]:
+                    raise KeyboardInterrupt  # the run was stopped mid-task
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with patch(
+                "adagio.executors.docker.subprocess.run", side_effect=fake_run
+            ), patch("adagio.executors.docker._ensure_docker_image"), self.assertRaises(
+                KeyboardInterrupt
+            ):
+                launcher.launch(
+                    environment=TaskEnvironmentSpec(kind="docker", reference="img:1"),
+                    request=request,
+                )
+
+            (run,) = [c for c in calls if c[:2] == ["docker", "run"]]
+            name = run[run.index("--name") + 1]
+            self.assertEqual(calls[-1], ["docker", "kill", name])
+
     def test_self_hosted_runtime_uses_the_server_unix_identity(self) -> None:
         launcher = DockerTaskEnvironmentLauncher()
         task = _task()

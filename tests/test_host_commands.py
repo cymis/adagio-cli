@@ -62,6 +62,13 @@ WATCHED = """
 import signal, subprocess, sys, time
 from adagio.cli.runtime import _terminate_when_stdin_closes
 
+TASK = (
+    "import signal, sys, time\\n"
+    "signal.signal(signal.SIGTERM, lambda *a: (open(sys.argv[1], 'w').write('stopped'), sys.exit(0)))\\n"
+    "print('ready', flush=True)\\n"
+    "time.sleep(60)"
+)
+
 def stop(signum, frame):
     print("terminated", flush=True)
     sys.exit(0)
@@ -70,18 +77,24 @@ signal.signal(signal.SIGTERM, stop)
 _terminate_when_stdin_closes()
 # Children read /dev/null, not the supervisor's pipe.
 print(repr(subprocess.run(["cat"], capture_output=True, timeout=5).stdout), flush=True)
+task = subprocess.Popen([sys.executable, "-c", TASK, sys.argv[1]], stdout=subprocess.PIPE, text=True)
+task.stdout.readline()
+print("task running", flush=True)
 time.sleep(60)
 """
 
 
-def test_a_closed_stdin_terminates_the_run():
+def test_a_closed_stdin_terminates_the_run_and_its_tasks(tmp_path):
+    marker = tmp_path / "task-stopped"
     process = subprocess.Popen(
-        [sys.executable, "-c", WATCHED],
+        [sys.executable, "-c", WATCHED, str(marker)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
+        start_new_session=True,  # as the runtime server starts it
     )
     assert process.stdout.readline() == "b''\n"
+    assert process.stdout.readline() == "task running\n"
     time.sleep(0.5)
     assert process.poll() is None  # an open pipe keeps the run going
     started = time.monotonic()
@@ -89,3 +102,8 @@ def test_a_closed_stdin_terminates_the_run():
     assert process.stdout.readline() == "terminated\n"
     assert process.wait(timeout=10) == 0
     assert time.monotonic() - started < 5
+    # The running task was signalled too, as the supervisor would have.
+    deadline = time.monotonic() + 5
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert marker.read_text() == "stopped"

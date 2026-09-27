@@ -8,7 +8,8 @@ The contents are private to the CLI: supervisors only pass the path around.
 Exactly one process owns a run at a time: the CLI running it, or a cleanup
 after the CLI has died. Ownership is a lock on ``PATH.lock``, which the kernel
 releases however its holder dies, so a lock nobody holds proves the owner is
-gone. The record must therefore live on a local filesystem.
+gone. The record must therefore live on local disk, and cleanup must run on
+the same host as the run: other hosts may not see the lock.
 """
 
 from __future__ import annotations

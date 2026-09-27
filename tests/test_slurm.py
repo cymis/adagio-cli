@@ -187,9 +187,11 @@ def test_submission_and_accounting_allocation_not_steps(tmp_path):
 
     backend.wait([handle])
     assert handle.state is JobState.QUEUED
-    # The queue is asked by our name only, including finished jobs.
+    # The queue is asked by our name only, in every partition including
+    # hidden ones, and including finished jobs.
     squeue = commands.calls[1]
     assert f"--name={handle.job.name}" in squeue and "--states=all" in squeue
+    assert "--all" in squeue
     assert "--clusters=lab" in squeue and not any("--jobs" in a for a in squeue)
     backend.wait([handle])
     assert handle.state is JobState.SUCCEEDED
@@ -400,7 +402,7 @@ def test_a_reused_job_id_is_never_taken_for_ours(tmp_path):
     assert commands.calls[0] == ["scancel", f"--name={A}", "123"]
     (entry,) = attempts(registry).values()
     assert entry["state"] == "ended"
-    assert entry["scheduler_state"] == "not in the queue, with no accounting record"
+    assert entry["scheduler_state"] == "not in the queue; no accounting record"
 
 
 def test_a_lost_reply_is_settled_once_no_job_can_appear(tmp_path):
@@ -411,15 +413,14 @@ def test_a_lost_reply_is_settled_once_no_job_can_appear(tmp_path):
     clock = Clock()
     commands = Commands([], default="")
     errors = cancel(
-        registry,
-        commands,
-        clock=clock,
-        sleep=clock.sleep,
-        now=lambda: intent + clock.now,
-        submit_deadline=60,
+        registry, commands, clock=clock, sleep=clock.sleep, now=lambda: intent + clock.now
     )
     assert errors == []
-    assert 60 <= clock.now < 61
+    # Slurm acts on a delivered request until its credential expires.
+    assert SlurmScheduler.lost_reply_deadline >= 300
+    assert SlurmScheduler.lost_reply_deadline <= clock.now < 366
+    # Waiting backs off rather than asking the scheduler twice a second.
+    assert len(commands.calls) < 100
     (entry,) = attempts(registry).values()
     assert entry["state"] == "ended" and entry["job_id"] is None
 
@@ -648,6 +649,107 @@ def test_cleanup_reports_what_it_cannot_confirm(tmp_path):
     assert any("Invalid job id" in error for error in errors)
     assert any(f"not confirmed for Slurm jobs {A} (123)" in error for error in errors)
     assert clean_up_run(tmp_path / "absent.json") == []
+
+
+def test_a_job_the_queue_still_holds_is_never_confirmed_gone(tmp_path):
+    # STOPPED keeps its CPUs; a state this code does not know may as well.
+    registry = registry_with(tmp_path, ("a", A, "1"), ("b", B, "2"))
+    clock = Clock()
+    commands = Commands([], default=f"1|{A}|STOPPED\n2|{B}|SOME_FUTURE_STATE")
+    (error,) = cancel(registry, commands, clock=clock, sleep=clock.sleep)
+    assert "not confirmed" in error and A in error and B in error
+    # Cancellation was sent again while the jobs stayed in the queue.
+    scancels = [argv for argv in commands.calls if argv[0] == "scancel"]
+    assert len(scancels) > 2
+    assert {e["state"] for e in attempts(registry).values()} == {"queued"}
+
+
+def test_a_listed_state_that_is_not_an_end_keeps_a_task_waiting(tmp_path):
+    backend, workspace = batch_backend(
+        tmp_path, Commands(["123", "123|NAME|SOME_FUTURE_STATE"])
+    )
+    handle, _ = submit(backend, workspace)
+    backend.wait([handle])
+    assert handle.state is JobState.QUEUED and handle.unknown_since is None
+
+
+def test_the_detail_says_what_accounting_shows(tmp_path):
+    now = [0]
+    commands = Commands(["123"], default="")
+    backend, workspace = batch_backend(
+        tmp_path, commands, clock=lambda: now[0], accounting_timeout=5
+    )
+    handle, _ = submit(backend, workspace)
+    commands.responses = iter(["", "123|RUNNING|0:0", "", "123|RUNNING|0:0"])
+    backend.wait([handle])
+    now[0] = 6
+    backend.wait([handle])
+    with pytest.raises(RuntimeError, match="accounting shows RUNNING, exit code 0:0"):
+        backend.collect(handle)
+
+
+def test_an_outage_restarts_the_grace_for_a_missing_job(tmp_path):
+    now = [0]
+    down = (1, "", "slurm_load_jobs error: Unable to contact slurm controller")
+    commands = Commands(["123"], default="")
+    backend, workspace = batch_backend(
+        tmp_path, commands, clock=lambda: now[0], accounting_timeout=5
+    )
+    handle, _ = submit(backend, workspace)
+    commands.responses = iter(["", "", down, down, "", ""])
+    backend.wait([handle])  # gone, no outcome yet: the grace starts
+    now[0] = 3
+    backend.wait([handle])  # an outage: says nothing about the job
+    now[0] = 60
+    backend.wait([handle])  # answered again: a fresh grace, not a failure
+    assert handle.state is JobState.QUEUED and handle.unknown_since == 60
+
+
+def test_scheduler_filters_in_the_environment_are_dropped(monkeypatch):
+    for name in ("SBATCH_PARTITION", "SQUEUE_PARTITION", "SACCT_FEDERATION", "SCANCEL_STATE"):
+        monkeypatch.setenv(name, "x")
+    monkeypatch.setenv("SLURM_CONF", "/etc/slurm/slurm.conf")
+    seen = {}
+
+    def runner(argv, **kwargs):
+        seen.update(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    batch.make_command_runner(SlurmScheduler, runner=runner)(["squeue"])
+    assert not any(k.startswith(("SBATCH_", "SQUEUE_", "SACCT_", "SCANCEL_")) for k in seen)
+    assert seen["SLURM_CONF"] == "/etc/slurm/slurm.conf"
+
+
+def test_a_run_never_replaces_an_unsettled_record(tmp_path):
+    record = tmp_path / "run-record.json"
+    record.write_text('{"earlier": "run"}')
+    backend = BatchBackend(
+        config=SlurmExecutorConfig(work_dir=str(tmp_path / "work")),
+        scheduler=SlurmScheduler(),
+        run_record=record,
+    )
+    with pytest.raises(RuntimeError, match="adagio cleanup"):
+        backend.workspace().__enter__()
+    assert record.read_text() == '{"earlier": "run"}'
+
+
+def test_a_successful_run_drops_its_record_before_its_directory(tmp_path, monkeypatch):
+    record = tmp_path / "run-record.json"
+    backend = BatchBackend(
+        config=SlurmExecutorConfig(work_dir=str(tmp_path / "work")),
+        scheduler=SlurmScheduler(),
+        run_record=record,
+    )
+
+    def interrupted(path, ignore_errors=False):
+        assert not record.exists()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(batch.shutil, "rmtree", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        with backend.workspace():
+            pass
+    assert not record.exists()
 
 
 def test_cancel_commands_name_every_job_and_refuse_foreign_names():
