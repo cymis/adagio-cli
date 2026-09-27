@@ -25,7 +25,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import signal
 import subprocess
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
@@ -189,6 +191,9 @@ def make_command_runner(
             stderr=subprocess.PIPE,
             timeout=timeout,
             env=env,
+            # Signals to the run's process group must not cut a scheduler
+            # command short; each is bounded by the timeout instead.
+            start_new_session=True,
         )
         if result.returncode:
             raise SchedulerCommandError(
@@ -356,32 +361,35 @@ class BatchBackend:
             script=str(script),
             log_path=str(prepared.log_path),
         )
-        try:
-            job = self.scheduler.parse_submission(self._run(argv), job_name)
-        except BaseException as error:
-            self._stopped = True
-            if isinstance(error, SchedulerCommandError) and self.scheduler.rejected(
-                error
-            ):
-                reason = error.stderr.strip()
-                registry.record_rejected(prepared.attempt_id, reason)
+        # A stop that arrives mid-submission waits until the outcome is recorded:
+        # cutting sbatch short would leave a submission nobody can confirm.
+        with _stops_deferred():
+            try:
+                job = self.scheduler.parse_submission(self._run(argv), job_name)
+            except BaseException as error:
+                self._stopped = True
+                if isinstance(
+                    error, SchedulerCommandError
+                ) and self.scheduler.rejected(error):
+                    reason = error.stderr.strip()
+                    registry.record_rejected(prepared.attempt_id, reason)
+                    raise RuntimeError(
+                        f"{name} rejected the job for task "
+                        f"{invocation.task_id or invocation.request.task.id!r}: {reason}"
+                    ) from error
+                registry.record_unconfirmed(
+                    prepared.attempt_id, str(error) or type(error).__name__
+                )
+                if not isinstance(error, Exception):
+                    raise
                 raise RuntimeError(
-                    f"{name} rejected the job for task "
-                    f"{invocation.task_id or invocation.request.task.id!r}: {reason}"
+                    f"{name} did not confirm submission of {job_name}: {error}. "
+                    "It was not retried; if a job with that name exists, cancel "
+                    f"it. Registry: {registry.path}."
                 ) from error
-            registry.record_unconfirmed(
-                prepared.attempt_id, str(error) or type(error).__name__
+            registry.record_submitted(
+                prepared.attempt_id, job_id=job.job_id, cluster=job.cluster
             )
-            if not isinstance(error, Exception):
-                raise
-            raise RuntimeError(
-                f"{name} did not confirm submission of {job_name}: {error}. "
-                "It was not retried; if a job with that name exists, cancel it. "
-                f"Registry: {registry.path}."
-            ) from error
-        registry.record_submitted(
-            prepared.attempt_id, job_id=job.job_id, cluster=job.cluster
-        )
         self._interval = self._min_interval
         return BatchHandle(
             state=JobState.QUEUED,
@@ -488,6 +496,7 @@ class BatchBackend:
             self._registry,
             self.scheduler,
             self._run,
+            record=self._run_record,
             clock=self._clock,
             sleep=self._sleep,
         )
@@ -496,11 +505,42 @@ class BatchBackend:
         return self.config.model_dump(exclude_none=True)
 
 
+#: Signals that stop a run.
+_STOP_SIGNALS = tuple(
+    getattr(signal, name)
+    for name in ("SIGINT", "SIGTERM", "SIGHUP")
+    if hasattr(signal, name)
+)
+
+
+@contextmanager
+def _stops_deferred() -> Iterator[None]:
+    """Hold stop signals until the block ends, then deliver them in order."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    pending: list[int] = []
+    previous = {signum: signal.getsignal(signum) for signum in _STOP_SIGNALS}
+    for signum, handler in previous.items():
+        if handler not in (signal.SIG_IGN, None):
+            signal.signal(signum, lambda received, frame: pending.append(received))
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            if handler not in (signal.SIG_IGN, None):
+                signal.signal(signum, handler)
+        for signum in dict.fromkeys(pending):
+            signal.raise_signal(signum)
+
+
 def cancel_outstanding(
     registry: SubmissionRegistry,
     scheduler: Scheduler,
     run: CommandRunner,
     *,
+    record: Path | None = None,
+    settle_unconfirmed: bool = False,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.time,
@@ -512,7 +552,10 @@ def cancel_outstanding(
     and each is cancelled and confirmed by its run-unique name. A submission
     whose reply was lost is cancelled by name as well, and waited for until
     the scheduler's ``lost_reply_deadline`` has passed: only then does the
-    absence of a job with its name mean that none will appear.
+    absence of a job with its name mean that none will appear. Without a
+    known deadline it is kept until someone who has checked the scheduler
+    asks for it to be settled (``settle_unconfirmed``); ``record`` names the
+    run's record in that advice.
     """
     jobs: dict[JobRef, tuple[str, float]] = {
         JobRef(entry["job_name"], entry.get("job_id"), entry.get("cluster")): (
@@ -534,7 +577,11 @@ def cancel_outstanding(
     cancel(list(jobs))
     cancelled_at = clock()
     unconfirmed = [intent for job, (_, intent) in jobs.items() if job.job_id is None]
-    settle = scheduler.lost_reply_deadline(run) if unconfirmed else 0.0
+    settle = (
+        scheduler.lost_reply_deadline(run)
+        if unconfirmed and not settle_unconfirmed
+        else 0.0
+    )
     wait = max(
         [confirm_for]
         + ([i + settle - now() for i in unconfirmed] if settle is not None else [])
@@ -598,9 +645,12 @@ def cancel_outstanding(
             )
             + f". Registry: {registry.path}."
             + (
-                " The scheduler credential lifetime could not be verified; "
-                "unconfirmed submissions are retained. Restore access to an "
-                "explicit positive AuthInfo ttl and retry cleanup."
+                f" {scheduler.name}'s credential lifetime could not be verified, "
+                "so a job could still appear for a submission whose reply was "
+                "lost; it is kept. Check that no job with its name exists, then "
+                "run `adagio cleanup --settle-unconfirmed "
+                f"{record or '<run record>'}`, or set an explicit AuthInfo ttl so "
+                "such submissions settle by themselves."
                 if settle is None and any(job not in observed for job in remaining)
                 else ""
             )

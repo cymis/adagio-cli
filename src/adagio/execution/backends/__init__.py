@@ -70,13 +70,16 @@ def executor_capabilities(local_environments: Iterable[str]) -> dict[str, Any]:
 def clean_up_run(
     record_path: Path,
     *,
+    settle_unconfirmed: bool = False,
     command_runner: Callable[..., subprocess.CompletedProcess] | None = None,
 ) -> list[str]:
     """Cancel whatever an interrupted run left with its scheduler.
 
     Returns what could not be confirmed; the record is removed once nothing
     is left. Raises ``RunOwned`` while the run's own process is still alive:
-    only it may act on the run then.
+    only it may act on the run then. ``settle_unconfirmed`` settles
+    submissions whose reply was lost and that no job has appeared for, once
+    someone has checked the scheduler.
     """
     if not record_path.exists():
         return []
@@ -94,7 +97,11 @@ def clean_up_run(
         scheduler = SCHEDULERS[record.executor]()
         registry = SubmissionRegistry.load(record.registry)
         errors = cancel_outstanding(
-            registry, scheduler, make_command_runner(scheduler, runner=command_runner)
+            registry,
+            scheduler,
+            make_command_runner(scheduler, runner=command_runner),
+            record=record_path,
+            settle_unconfirmed=settle_unconfirmed,
         )
         if not errors:
             remove_run_record(record_path)

@@ -467,9 +467,13 @@ def test_cleanup_retains_an_unseen_submission_without_a_verified_lifetime(
     write_run_record(record, executor="slurm", registry=registry.path)
     clock = Clock()
 
-    def cancel_with_clock(*args):
+    def cancel_with_clock(*args, **kwargs):
         return batch.cancel_outstanding(
-            *args, clock=clock, sleep=clock.sleep, now=lambda: intent + 1000 + clock.now
+            *args,
+            **kwargs,
+            clock=clock,
+            sleep=clock.sleep,
+            now=lambda: intent + 1000 + clock.now,
         )
 
     monkeypatch.setattr(backends, "cancel_outstanding", cancel_with_clock)
@@ -479,6 +483,8 @@ def test_cleanup_retains_an_unseen_submission_without_a_verified_lifetime(
         commands = Commands(["", config], default="")
         (error,) = clean_up_run(record, command_runner=commands)
         assert "credential lifetime could not be verified" in error
+        # The advice names the way out, for this very record.
+        assert f"adagio cleanup --settle-unconfirmed {record}" in error
         assert record.exists()
         assert attempts(registry)["c"]["state"] == "unconfirmed"
     assert clock.now < 30
@@ -488,6 +494,61 @@ def test_cleanup_retains_an_unseen_submission_without_a_verified_lifetime(
     assert clean_up_run(record, command_runner=commands) == []
     assert not record.exists()
     assert attempts(registry)["c"]["state"] == "ended"
+
+
+def test_someone_who_has_checked_can_settle_an_unseen_submission(tmp_path):
+    registry = registry_with(tmp_path, ("c", C, None), ("d", "adagio-" + "d" * 32, None))
+    registry.record_unconfirmed("c", "timed out")
+    registry.record_unconfirmed("d", "timed out")
+    registry.save()
+    record = tmp_path / "run-record.json"
+    write_run_record(record, executor="slurm", registry=registry.path)
+    commands = Commands(
+        [
+            "",  # scancel c
+            "",  # scancel d
+            f"456|{C}|PENDING",  # squeue: c did become a job; d is nowhere
+            "",  # scancel c again, by name
+            f"456|{C}|CANCELLED",  # squeue
+            "",  # sacct
+        ],
+        default="",
+    )
+    assert clean_up_run(record, settle_unconfirmed=True, command_runner=commands) == []
+    # Settling never skips a job that exists: it is still cancelled by name.
+    assert ["scancel", f"--name={C}"] in commands.calls
+    assert not any(argv[:3] == ["scontrol", "show", "config"] for argv in commands.calls)
+    entries = attempts(registry)
+    assert (entries["c"]["state"], entries["c"]["job_id"]) == ("ended", "456")
+    assert (entries["d"]["state"], entries["d"]["job_id"]) == ("ended", None)
+    assert not record.exists()
+
+
+def test_a_stop_during_submission_waits_for_its_outcome(tmp_path):
+    import os
+    import signal
+
+    from adagio.execution.coordinator import _interrupt_on_termination
+
+    sessions = []
+
+    def sbatch_interrupted(argv, **kwargs):
+        sessions.append(kwargs.get("start_new_session"))
+        os.kill(os.getpid(), signal.SIGTERM)  # the run is stopped mid-sbatch
+        return subprocess.CompletedProcess(argv, 0, "123", "")
+
+    backend, workspace = batch_backend(tmp_path, sbatch_interrupted)
+    restore = _interrupt_on_termination()
+    try:
+        with pytest.raises(KeyboardInterrupt, match="SIGTERM"):
+            submit(backend, workspace)
+    finally:
+        restore()
+    # The stop acted only once the job was recorded, so it can be cancelled.
+    (entry,) = json.loads(backend.registry.path.read_text())["attempts"].values()
+    assert (entry["state"], entry["job_id"]) == ("queued", "123")
+    # Out of the run's process group: a group-wide stop never reaches sbatch.
+    assert sessions == [True]
 
 
 def test_a_discovered_job_can_be_confirmed_absent_without_a_credential_lifetime(

@@ -344,23 +344,61 @@ def case_reused_id_spares_the_other_job():
     report["reused_id"] = {"foreign_job": foreign, "entry": entry["state"]}
 
 
-def case_lost_replies():
-    """A lost reply that became a job is cancelled by name; one that never did
-    is settled once no job can still appear."""
+def lost_replies(name):
+    """A registry with two lost replies: one became a job, one never did."""
     appeared = f"adagio-{uuid.uuid4().hex}"
     job_id = sbatch(appeared)
     never = f"adagio-{uuid.uuid4().hex}"
-    record, registry = left_behind("lost-replies", (appeared, None), (never, None))
+    record, registry = left_behind(name, (appeared, None), (never, None))
     data = json.loads(registry.path.read_text())
-    # Requested longer ago than Slurm could still act on it.
+    # Requested longer ago than an explicit five-minute lifetime allows.
     data["attempts"]["1"]["intent_at"] = time.time() - 400
     registry.path.write_text(json.dumps(data))
-    assert clean_up_run(record) == []
+    return record, registry, job_id
+
+
+def case_lost_replies_without_a_known_lifetime():
+    """This cluster sets no AuthInfo ttl, so a lost reply that never became a
+    job is kept until someone who has checked settles it; one that did become
+    a job is cancelled by name either way."""
+    record, registry, job_id = lost_replies("lost-replies-kept")
+    (error,) = clean_up_run(record)
+    assert "credential lifetime could not be verified" in error, error
+    assert f"adagio cleanup --settle-unconfirmed {record}" in error, error
+    entries = json.loads(registry.path.read_text())["attempts"]
+    assert entries["0"]["job_id"] == job_id, entries
+    assert squeue_state(job_id) == "CANCELLED", squeue_state(job_id)
+    assert entries["1"]["state"] == "unconfirmed" and record.exists(), entries
+    # After checking the queue, the operator settles it from the command line.
+    cleanup = subprocess.run(
+        [sys.executable, "-m", "adagio.cli.main", "cleanup", "--settle-unconfirmed", str(record)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr
+    entries = json.loads(registry.path.read_text())["attempts"]
+    assert entries["1"]["state"] == "ended" and not record.exists(), entries
+    report["lost_replies_kept"] = {k: (e["state"], e["job_id"]) for k, e in entries.items()}
+
+
+def case_lost_replies_with_a_known_lifetime():
+    """With an explicit AuthInfo ttl, a lost reply that never became a job is
+    settled once that lifetime has passed."""
+    from adagio.execution.backends.slurm import SlurmScheduler
+
+    record, registry, job_id = lost_replies("lost-replies-settled")
+    known = SlurmScheduler.lost_reply_deadline
+    SlurmScheduler.lost_reply_deadline = lambda self, run: 360.0  # AuthInfo=ttl=300
+    try:
+        assert clean_up_run(record) == []
+    finally:
+        SlurmScheduler.lost_reply_deadline = known
     entries = json.loads(registry.path.read_text())["attempts"]
     assert entries["0"]["job_id"] == job_id, entries
     assert squeue_state(job_id) == "CANCELLED", squeue_state(job_id)
     assert entries["1"]["state"] == "ended" and entries["1"]["job_id"] is None
-    report["lost_replies"] = {k: (e["state"], e["job_id"]) for k, e in entries.items()}
+    report["lost_replies_settled"] = {k: (e["state"], e["job_id"]) for k, e in entries.items()}
 
 
 AS_USER = """
@@ -465,7 +503,8 @@ if __name__ == "__main__":
     case_cleanup_after_kill()
     case_live_owner_then_stdin_closes()
     case_reused_id_spares_the_other_job()
-    case_lost_replies()
+    case_lost_replies_without_a_known_lifetime()
+    case_lost_replies_with_a_known_lifetime()
     case_hidden_partition_as_a_user()
     (root / "report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))

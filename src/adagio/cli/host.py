@@ -47,13 +47,25 @@ def run_cleanup(argv: list[str]) -> None:
         ),
     )
     parser.add_argument("run_record", help="The run's --run-record file.")
+    parser.add_argument(
+        "--settle-unconfirmed",
+        action="store_true",
+        help=(
+            "Treat submissions whose reply was lost as never having become jobs "
+            "once no job with their name is in the queue. Use only after "
+            "checking the scheduler yourself, when the cluster's credential "
+            "lifetime is not configured."
+        ),
+    )
     opts = parser.parse_args(argv)
 
     from ..execution.backends import clean_up_run
     from ..execution.backends.run_record import RunOwned
 
     try:
-        errors = clean_up_run(Path(opts.run_record))
+        errors = clean_up_run(
+            Path(opts.run_record), settle_unconfirmed=opts.settle_unconfirmed
+        )
     except RunOwned as owned:
         report = {"complete": False, "owner_alive": True, "errors": [str(owned)]}
         print(json.dumps(report))
