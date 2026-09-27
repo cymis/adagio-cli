@@ -3,6 +3,9 @@
 import json
 import subprocess
 import sys
+import time
+
+from adagio.execution.backends.run_record import owning_run
 
 
 def adagio(*args):
@@ -41,3 +44,48 @@ def test_cleanup_reports_an_unreadable_record(tmp_path):
     report = json.loads(result.stdout)
     assert not report["complete"]
     assert "Unrecognized run record" in report["errors"][0]
+
+
+def test_cleanup_leaves_a_run_alone_while_its_owner_lives(tmp_path):
+    record = tmp_path / "run-record.json"
+    record.write_text("{}")
+    with owning_run(record):
+        result = adagio("cleanup", str(record))
+    assert result.returncode == 75, result.stderr
+    report = json.loads(result.stdout)
+    assert report["owner_alive"] is True and not report["complete"]
+    assert "pid" in report["errors"][0]
+    assert record.read_text() == "{}"
+
+
+WATCHED = """
+import signal, subprocess, sys, time
+from adagio.cli.runtime import _terminate_when_stdin_closes
+
+def stop(signum, frame):
+    print("terminated", flush=True)
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, stop)
+_terminate_when_stdin_closes()
+# Children read /dev/null, not the supervisor's pipe.
+print(repr(subprocess.run(["cat"], capture_output=True, timeout=5).stdout), flush=True)
+time.sleep(60)
+"""
+
+
+def test_a_closed_stdin_terminates_the_run():
+    process = subprocess.Popen(
+        [sys.executable, "-c", WATCHED],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout.readline() == "b''\n"
+    time.sleep(0.5)
+    assert process.poll() is None  # an open pipe keeps the run going
+    started = time.monotonic()
+    process.stdin.close()  # as when the supervisor dies
+    assert process.stdout.readline() == "terminated\n"
+    assert process.wait(timeout=10) == 0
+    assert time.monotonic() - started < 5

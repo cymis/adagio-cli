@@ -2,7 +2,8 @@
 
 Run inside a bootstrapped test host (see bootstrap.sh). Each case uses a tiny
 shell worker, so it checks scheduler behavior only: submission, accounting,
-failures, a missing result manifest, cancellation and ``adagio cleanup``.
+failures, a missing result manifest, outages, cancellation and ``adagio
+cleanup``, including who may clean up and what it may cancel.
 """
 
 import json
@@ -11,13 +12,17 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
 from adagio.execution.backends import clean_up_run, create_backend
 from adagio.execution.backends.base import JobState, TaskInvocation
 from adagio.execution.backends.batch import SchedulerStatus
+from adagio.execution.backends.run_record import write_run_record
 from adagio.execution.backends.slurm import SlurmExecutorConfig
+from adagio.execution.backends.submissions import SubmissionRegistry
+from adagio.execution.coordinator import WorkItem, coordinate
 from adagio.execution.resources import TaskResourceRequirements
 from adagio.executors.base import TaskExecutionRequest
 from adagio.executors.container_support import container_python_root
@@ -26,6 +31,10 @@ from adagio.executors.task_contract import write_json_file
 
 root = Path("/workspace/acceptance-output/scheduler-edges")
 root.mkdir(parents=True, exist_ok=True)
+# Run records are locked, so they live on local disk; /workspace is a bind
+# mount that accepts locks without enforcing them.
+local = Path("/tmp/adagio-acceptance/scheduler-edges")
+local.mkdir(parents=True, exist_ok=True)
 report = {}
 
 WORKER = """
@@ -79,7 +88,7 @@ def backend(name, run_record=None, **options):
     return created
 
 
-def submit(backend_, workspace, node, **behavior):
+def invocation(backend_, workspace, node, **behavior):
     work = backend_.attempt_directory(workspace)
     request = TaskExecutionRequest(
         task=SimpleNamespace(id=node),
@@ -92,15 +101,72 @@ def submit(backend_, workspace, node, **behavior):
         metadata_column_kwargs={},
         outputs={"out": str(work / "output")},
     )
-    return backend_.submit(
-        TaskInvocation(
-            launcher=Launcher(**behavior),
-            environment=SimpleNamespace(kind="conda", reference=sys.executable),
-            request=request,
-            task_id=node,
-        ),
-        TaskResourceRequirements(cpus=1, memory="32 MiB"),
+    return TaskInvocation(
+        launcher=Launcher(**behavior),
+        environment=SimpleNamespace(kind="conda", reference=sys.executable),
+        request=request,
+        task_id=node,
     )
+
+
+RESOURCES = TaskResourceRequirements(cpus=1, memory="32 MiB")
+
+
+def submit(backend_, workspace, node, **behavior):
+    return backend_.submit(invocation(backend_, workspace, node, **behavior), RESOURCES)
+
+
+def adagio_cleanup(record):
+    result = subprocess.run(
+        [sys.executable, "-m", "adagio.cli.main", "cleanup", str(record)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, json.loads(result.stdout)
+
+
+def squeue_state(job_id):
+    return subprocess.run(
+        ["squeue", "--noheader", "--states=all", f"--jobs={job_id}", "--format=%T"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+
+
+def sbatch(name, seconds=300):
+    return subprocess.run(
+        [
+            "sbatch",
+            "--parsable",
+            "--partition=test",
+            "--mem=32M",
+            f"--job-name={name}",
+            f"--output={root}/{name}.out",
+            f"--wrap=sleep {seconds}",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def left_behind(name, *entries):
+    """A run record whose registry holds ``(job_name, job_id)`` submissions."""
+    run_dir = root / name
+    run_dir.mkdir(exist_ok=True)
+    registry = SubmissionRegistry.create(run_dir, executor="slurm")
+    for index, (job_name, job_id) in enumerate(entries):
+        registry.record_intent(str(index), job_name=job_name)
+        if job_id:
+            registry.record_submitted(str(index), job_id=job_id, cluster=None)
+        else:
+            registry.record_unconfirmed(str(index), "reply lost")
+    registry.save()
+    record = local / f"{name}-run-record.json"
+    write_run_record(record, executor="slurm", registry=registry.path)
+    return record, registry
 
 
 def settle(backend_, handles, timeout=120):
@@ -162,7 +228,8 @@ def case_cancel():
     assert errors == [], errors
     registry = json.loads(b.registry.path.read_text())
     (entry,) = registry["attempts"].values()
-    assert entry["scheduler_state"] == "CANCELLED", entry
+    # Confirmed from the queue; accounting may not have recorded it yet.
+    assert entry["scheduler_state"].startswith("CANCELLED"), entry
     report["cancel"] = {"job_id": handle.job_id, "entry": entry}
 
 
@@ -173,7 +240,7 @@ def case_unknown_state_is_still_cancelled():
     real_statuses = b.scheduler.statuses
     blind = [True]
     b.scheduler.statuses = lambda jobs, run: (
-        {job: SchedulerStatus(None, "accounting unavailable") for job in jobs}
+        {job: SchedulerStatus(None, "no record", active=False) for job in jobs}
         if blind[0]
         else real_statuses(jobs, run)
     )
@@ -184,17 +251,36 @@ def case_unknown_state_is_still_cancelled():
     blind[0] = False
     assert b.cancel() == []
     (entry,) = json.loads(b.registry.path.read_text())["attempts"].values()
-    assert entry["scheduler_state"] == "CANCELLED", entry
+    assert entry["scheduler_state"].startswith("CANCELLED"), entry
     report["unknown_state"] = {"job_id": handle.job_id, "entry": entry["scheduler_state"]}
 
 
-def case_cleanup_after_kill():
-    """A killed driver leaves jobs; `adagio cleanup` cancels exactly those."""
-    record = root / "killed-run-record.json"
+def case_outage_is_waited_out():
+    """While Slurm cannot be asked, a running task is neither failed nor lost."""
+    b = backend("outage")
+    b._accounting_timeout = 0  # were an outage a loss, the task would fail at once
+    real_statuses = b.scheduler.statuses
+    started = time.monotonic()
+    b.scheduler.statuses = lambda jobs, run: (
+        {job: SchedulerStatus(None, "controller down", answered=False) for job in jobs}
+        if time.monotonic() - started < 15
+        else real_statuses(jobs, run)
+    )
+    with b.workspace() as workspace:
+        handle = submit(b, workspace, "outage", sleep=5)
+        settle(b, [handle])
+        result = outcome(b, handle)
+    assert result == {"collected": ["out"]}, result
+    report["outage"] = result
+
+
+def start_driver(record, *, supervised=False):
     record.unlink(missing_ok=True)
     driver = subprocess.Popen(
-        [sys.executable, __file__, "--driver", str(record)],
+        [sys.executable, __file__, "--driver", str(record)]
+        + (["--exit-with-stdin"] if supervised else []),
         env={**os.environ},
+        stdin=subprocess.PIPE if supervised else subprocess.DEVNULL,
     )
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
@@ -203,23 +289,77 @@ def case_cleanup_after_kill():
                 Path(json.loads(record.read_text())["registry"]).read_text()
             )
             if len([a for a in registry["attempts"].values() if a.get("job_id")]) == 2:
-                break
+                return driver, registry
         time.sleep(0.5)
+    raise AssertionError("the driver did not submit its jobs")
+
+
+def case_cleanup_after_kill():
+    """A killed driver leaves jobs; `adagio cleanup` cancels exactly those."""
+    record = local / "killed-run-record.json"
+    driver, registry = start_driver(record)
     driver.send_signal(signal.SIGKILL)
     driver.wait()
-    cleanup = subprocess.run(
-        [sys.executable, "-m", "adagio.cli.main", "cleanup", str(record)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr
-    assert json.loads(cleanup.stdout) == {"complete": True, "errors": []}
+    assert adagio_cleanup(record) == (0, {"complete": True, "errors": []})
     assert not record.exists()
+    assert not record.with_name(record.name + ".lock").exists()
     registry_states = [a["scheduler_state"] for a in registry_after(registry)]
-    assert registry_states == ["CANCELLED", "CANCELLED"], registry_states
+    assert all(s.startswith("CANCELLED") for s in registry_states), registry_states
+    assert len(registry_states) == 2
     assert clean_up_run(record) == []
     report["cleanup_after_kill"] = registry_states
+
+
+def case_live_owner_then_stdin_closes():
+    """Cleanup leaves a live run alone; the run cancels its own jobs once its
+    supervisor's end of stdin closes."""
+    record = local / "supervised-run-record.json"
+    driver, registry = start_driver(record, supervised=True)
+    owned = adagio_cleanup(record)
+    assert owned[0] == 75 and owned[1]["owner_alive"], owned
+    job_ids = [a["job_id"] for a in registry_after(registry)]
+    assert all(squeue_state(i) in ("PENDING", "RUNNING") for i in job_ids), job_ids
+    driver.stdin.close()  # as when the supervisor dies
+    assert driver.wait(timeout=60) == 3
+    entries = registry_after(registry)
+    assert all(e["scheduler_state"].startswith("CANCELLED") for e in entries), entries
+    # The run kept its record (it did not succeed); its owner is gone now.
+    assert adagio_cleanup(record) == (0, {"complete": True, "errors": []})
+    assert not record.exists()
+    report["live_owner"] = {"refused": owned[1], "then": [e["state"] for e in entries]}
+
+
+def case_reused_id_spares_the_other_job():
+    """A recorded id that now belongs to another job is never cancelled."""
+    foreign = sbatch("someone-else")
+    name = f"adagio-{uuid.uuid4().hex}"
+    record, registry = left_behind("reused-id", (name, foreign))
+    assert clean_up_run(record) == []
+    try:
+        assert squeue_state(foreign) in ("PENDING", "RUNNING"), squeue_state(foreign)
+        (entry,) = json.loads(registry.path.read_text())["attempts"].values()
+        assert entry["state"] == "ended", entry
+    finally:
+        subprocess.run(["scancel", foreign], check=True)
+    report["reused_id"] = {"foreign_job": foreign, "entry": entry["state"]}
+
+
+def case_lost_replies():
+    """A lost reply that became a job is cancelled by name; one that never did
+    is settled once no job can still appear."""
+    appeared = f"adagio-{uuid.uuid4().hex}"
+    job_id = sbatch(appeared)
+    never = f"adagio-{uuid.uuid4().hex}"
+    record, registry = left_behind("lost-replies", (appeared, None), (never, None))
+    data = json.loads(registry.path.read_text())
+    data["attempts"]["1"]["intent_at"] = time.time() - 120
+    registry.path.write_text(json.dumps(data))
+    assert clean_up_run(record) == []
+    entries = json.loads(registry.path.read_text())["attempts"]
+    assert entries["0"]["job_id"] == job_id, entries
+    assert squeue_state(job_id) == "CANCELLED", squeue_state(job_id)
+    assert entries["1"]["state"] == "ended" and entries["1"]["job_id"] is None
+    report["lost_replies"] = {k: (e["state"], e["job_id"]) for k, e in entries.items()}
 
 
 def registry_after(registry):
@@ -227,21 +367,57 @@ def registry_after(registry):
     return list(json.loads(path.read_text())["attempts"].values())
 
 
-def drive(record):
-    b = backend("killed", run_record=Path(record))
+class Quiet:
+    def started(self, item, handle):
+        pass
+
+    def succeeded(self, item, outcome):
+        pass
+
+    def stopped(self, error, **details):
+        pass
+
+
+def drive(record, exit_with_stdin):
+    """Run two long jobs through the coordinator, as ``adagio runtime`` does."""
+    if exit_with_stdin:
+        from adagio.cli.runtime import _terminate_when_stdin_closes
+
+        _terminate_when_stdin_closes()
+    b = backend("driven", run_record=Path(record))
+
+    def program(workspace, node):
+        def start():
+            return (yield invocation(b, workspace, node, sleep=300))
+
+        return start
+
     with b.workspace() as workspace:
-        handles = [submit(b, workspace, f"long-{i}", sleep=300) for i in range(2)]
-        settle(b, handles, timeout=600)
+        coordinate(
+            items=[
+                WorkItem(f"long-{i}", frozenset(), RESOURCES, program(workspace, f"long-{i}"))
+                for i in range(2)
+            ],
+            backend=b,
+            listener=Quiet(),
+        )
 
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--driver"]:
-        drive(sys.argv[2])
+        try:
+            drive(sys.argv[2], "--exit-with-stdin" in sys.argv)
+        except KeyboardInterrupt:
+            sys.exit(3)
         sys.exit(0)
     case_results()
     case_rejected()
     case_cancel()
     case_unknown_state_is_still_cancelled()
+    case_outage_is_waited_out()
     case_cleanup_after_kill()
+    case_live_owner_then_stdin_closes()
+    case_reused_id_spares_the_other_job()
+    case_lost_replies()
     (root / "report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))

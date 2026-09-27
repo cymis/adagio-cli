@@ -8,9 +8,10 @@ from types import SimpleNamespace
 import pytest
 
 from adagio.cli.config import AdagioRunConfig, load_run_config
-from adagio.execution.backends import clean_up_run
+from adagio.execution.backends import batch, clean_up_run
 from adagio.execution.backends.base import JobState, TaskInvocation
-from adagio.execution.backends.batch import BatchBackend
+from adagio.execution.backends.batch import BatchBackend, JobRef
+from adagio.execution.backends.run_record import RunOwned, owning_run
 from adagio.execution.backends.slurm import (
     SlurmExecutorConfig,
     SlurmScheduler,
@@ -23,21 +24,74 @@ from adagio.executors.prepared import PreparedInvocation
 from adagio.executors.task_contract import write_json_file
 
 
-class Commands:
-    """Stand-in for ``subprocess.run`` that replays scheduler output in order."""
+A = "adagio-" + "a" * 32
+B = "adagio-" + "b" * 32
+C = "adagio-" + "c" * 32
 
-    def __init__(self, responses):
+
+class Commands:
+    """Stand-in for ``subprocess.run`` that replays scheduler output in order.
+
+    ``NAME`` in a response stands for the job name the command asked about.
+    Once the responses run out, ``default`` answers every further command.
+    """
+
+    def __init__(self, responses, default=None):
         self.responses = iter(responses)
+        self.default = default
         self.calls = []
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
-        response = next(self.responses)
+        response = next(self.responses, self.default)
+        if response is None:
+            raise AssertionError(f"Unexpected command: {argv}")
         if isinstance(response, BaseException):
             raise response
         if isinstance(response, tuple):  # (returncode, stdout, stderr)
             return subprocess.CompletedProcess(argv, *response)
+        names = [a.removeprefix("--name=") for a in argv if a.startswith("--name=")]
+        if names:
+            response = response.replace("NAME", names[0])
         return subprocess.CompletedProcess(argv, 0, response, "")
+
+
+class Clock:
+    """Monotonic time that advances only when the code under test sleeps."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def registry_with(tmp_path, *entries):
+    """A registry holding ``(attempt, name, job_id)`` submissions."""
+    registry = SubmissionRegistry.create(tmp_path, executor="slurm")
+    for attempt, name, job_id in entries:
+        registry.record_intent(attempt, job_name=name)
+        if job_id:
+            registry.record_submitted(attempt, job_id=job_id, cluster=None)
+    registry.save()
+    return registry
+
+
+def cancel(registry, commands, **kwargs):
+    return batch.cancel_outstanding(
+        registry,
+        SlurmScheduler(),
+        batch.make_command_runner(SlurmScheduler, runner=commands),
+        sleep=kwargs.pop("sleep", lambda _: None),
+        **kwargs,
+    )
+
+
+def attempts(registry):
+    return json.loads(registry.path.read_text())["attempts"]
 
 
 class Launcher:
@@ -117,7 +171,7 @@ def test_memory_rounds_up_total_allocation(value, expected):
 
 def test_submission_and_accounting_allocation_not_steps(tmp_path):
     commands = Commands(
-        ["123;lab", "123|PENDING", "", "123.batch|FAILED|1:0\n123|COMPLETED|0:0"]
+        ["123;lab", "123|NAME|PENDING", "", "123.batch|FAILED|1:0\n123|COMPLETED|0:0"]
     )
     backend, workspace = batch_backend(tmp_path, commands)
     handle, prepared = submit(
@@ -133,6 +187,10 @@ def test_submission_and_accounting_allocation_not_steps(tmp_path):
 
     backend.wait([handle])
     assert handle.state is JobState.QUEUED
+    # The queue is asked by our name only, including finished jobs.
+    squeue = commands.calls[1]
+    assert f"--name={handle.job.name}" in squeue and "--states=all" in squeue
+    assert "--clusters=lab" in squeue and not any("--jobs" in a for a in squeue)
     backend.wait([handle])
     assert handle.state is JobState.SUCCEEDED
 
@@ -178,7 +236,7 @@ def test_unconfirmed_submission_is_recorded_and_never_retried(tmp_path):
 def test_terminal_queue_state_waits_for_accounting_exit_code(tmp_path, accounting):
     backend, workspace = batch_backend(
         tmp_path,
-        Commands(["123", "123|COMPLETED", accounting, "", "123|COMPLETED|0:0"]),
+        Commands(["123", "123|NAME|COMPLETED", accounting, "", "123|COMPLETED|0:0"]),
     )
     handle, _ = submit(backend, workspace)
     backend.wait([handle])
@@ -211,7 +269,7 @@ def test_polling_backs_off_until_something_changes(tmp_path):
     sleeps = []
     backend, workspace = batch_backend(
         tmp_path,
-        Commands(["123"] + ["123|PENDING"] * 6 + ["123|RUNNING", "123|RUNNING"]),
+        Commands(["123"] + ["123|NAME|PENDING"] * 6 + ["123|NAME|RUNNING"] * 2),
         sleep=sleeps.append,
     )
     handle, _ = submit(backend, workspace)
@@ -256,29 +314,51 @@ def test_workspace_is_kept_after_failure_and_removed_after_success(tmp_path):
         scheduler=SlurmScheduler(),
         run_record=record,
     )
+    lock = tmp_path / "run-record.json.lock"
     with pytest.raises(RuntimeError):
         with backend.workspace() as failed:
             assert json.loads(record.read_text())["registry"] == str(
                 backend.registry.path
             )
+            # The run's own process owns it: cleanup must not act meanwhile.
+            with pytest.raises(RunOwned):
+                clean_up_run(record)
             raise RuntimeError("task failed")
-    assert failed.root.is_dir() and record.exists()
+    assert failed.root.is_dir() and record.exists() and lock.exists()
+    # Once the owner is gone, cleanup owns the run; nothing was submitted.
+    assert clean_up_run(record) == []
+    assert not record.exists() and not lock.exists()
 
     with backend.workspace() as succeeded:
         pass
-    assert not succeeded.root.exists() and not record.exists()
+    assert not succeeded.root.exists() and not record.exists() and not lock.exists()
 
 
-def test_cancel_touches_only_recorded_jobs(tmp_path):
-    registry = SubmissionRegistry.create(tmp_path, executor="slurm")
-    for attempt, job_id, name in [
-        ("a", "123", "adagio-" + "a" * 32),
-        ("b", "999", "adagio-" + "b" * 32),
-        ("c", None, "adagio-" + "c" * 32),
-    ]:
-        registry.record_intent(attempt, job_name=name)
-        if job_id:
-            registry.record_submitted(attempt, job_id=job_id, cluster=None)
+def test_a_run_record_has_one_owner(tmp_path):
+    record = tmp_path / "run-record.json"
+    backend = BatchBackend(
+        config=SlurmExecutorConfig(work_dir=str(tmp_path / "work")),
+        scheduler=SlurmScheduler(),
+        run_record=record,
+    )
+    with owning_run(record):
+        with pytest.raises(RunOwned, match="pid"):
+            backend.workspace().__enter__()
+    assert not (tmp_path / "work").exists() and not record.exists()
+
+
+def test_a_filesystem_that_ignores_locks_is_refused(tmp_path, monkeypatch):
+    import fcntl
+
+    # As on network and container bind mounts: every lock is granted.
+    monkeypatch.setattr(fcntl, "flock", lambda descriptor, operation: None)
+    with pytest.raises(RuntimeError, match="does not enforce file locks"):
+        with owning_run(tmp_path / "run-record.json"):
+            pass
+
+
+def test_cancel_touches_only_recorded_jobs_by_name(tmp_path):
+    registry = registry_with(tmp_path, ("a", A, "123"), ("b", B, "999"), ("c", C, None))
     registry.record_status(
         "b", state=JobState.SUCCEEDED, scheduler_state="COMPLETED", exit_code="0:0"
     )
@@ -290,21 +370,81 @@ def test_cancel_touches_only_recorded_jobs(tmp_path):
     )
     commands = Commands(
         [
-            f"456|adagio-{'c' * 32}",  # squeue --name for the unconfirmed submission
-            "",  # scancel
-            "",  # squeue
+            "",  # scancel a
+            "",  # scancel c, whose reply was lost: by name alone
+            f"123|{A}|CANCELLED\n456|{C}|CANCELLED",  # squeue
             "123|CANCELLED|0:15\n456|CANCELLED|0:15",  # sacct
         ]
     )
     assert clean_up_run(record, command_runner=commands) == []
-    assert commands.calls[1] == ["scancel", "123", "456"]
-    assert "999" not in str(commands.calls)
+    assert commands.calls[:2] == [
+        ["scancel", f"--name={A}", "123"],
+        ["scancel", f"--name={C}"],
+    ]
+    assert "999" not in str(commands.calls) and B not in str(commands.calls)
     assert not record.exists()
-    states = {
-        attempt: entry["state"]
-        for attempt, entry in json.loads(registry.path.read_text())["attempts"].items()
+    entries = attempts(registry)
+    assert {a: e["state"] for a, e in entries.items()} == {
+        "a": "failed",
+        "b": "succeeded",
+        "c": "failed",
     }
-    assert states == {"a": "failed", "b": "succeeded", "c": "failed"}
+    assert entries["c"]["job_id"] == "456"
+
+
+def test_a_reused_job_id_is_never_taken_for_ours(tmp_path):
+    registry = registry_with(tmp_path, ("a", A, "123"))
+    # Our job ended long ago; Slurm reused 123 for someone else's job.
+    commands = Commands(["", f"123|{B}|RUNNING", ""])
+    assert cancel(registry, commands) == []
+    assert commands.calls[0] == ["scancel", f"--name={A}", "123"]
+    (entry,) = attempts(registry).values()
+    assert entry["state"] == "ended"
+    assert entry["scheduler_state"] == "not in the queue, with no accounting record"
+
+
+def test_a_lost_reply_is_settled_once_no_job_can_appear(tmp_path):
+    registry = registry_with(tmp_path, ("c", C, None))
+    registry.record_unconfirmed("c", "timed out")
+    registry.save()
+    intent = attempts(registry)["c"]["intent_at"]
+    clock = Clock()
+    commands = Commands([], default="")
+    errors = cancel(
+        registry,
+        commands,
+        clock=clock,
+        sleep=clock.sleep,
+        now=lambda: intent + clock.now,
+        submit_deadline=60,
+    )
+    assert errors == []
+    assert 60 <= clock.now < 61
+    (entry,) = attempts(registry).values()
+    assert entry["state"] == "ended" and entry["job_id"] is None
+
+
+def test_a_lost_reply_that_becomes_a_job_is_cancelled_by_name(tmp_path):
+    registry = registry_with(tmp_path, ("c", C, None))
+    intent = attempts(registry)["c"]["intent_at"]
+    clock = Clock()
+    commands = Commands(
+        [
+            "",  # scancel: nothing has that name yet
+            "",  # squeue: still nothing
+            f"456|{C}|PENDING",  # squeue: the job appears
+            "",  # scancel it again, by name
+            f"456|{C}|CANCELLED",  # squeue
+            "456|CANCELLED|0:15",  # sacct
+        ]
+    )
+    errors = cancel(
+        registry, commands, clock=clock, sleep=clock.sleep, now=lambda: intent + 1
+    )
+    assert errors == []
+    assert commands.calls[3] == ["scancel", f"--name={C}"]
+    (entry,) = attempts(registry).values()
+    assert (entry["state"], entry["job_id"]) == ("failed", "456")
 
 
 def test_a_job_whose_state_is_unknown_is_still_cancelled(tmp_path):
@@ -317,8 +457,8 @@ def test_a_job_whose_state_is_unknown_is_still_cancelled(tmp_path):
             "",  # squeue
             "",  # sacct: still nothing after the accounting timeout
             "",  # scancel: the job may still be alive, so it is cancelled
-            "",  # squeue
-            "123|CANCELLED|0:15",  # sacct confirms the cancellation
+            "123|NAME|CANCELLED",  # squeue
+            "123|CANCELLED|0:15",  # sacct
         ]
     )
     backend, workspace = batch_backend(
@@ -330,25 +470,69 @@ def test_a_job_whose_state_is_unknown_is_still_cancelled(tmp_path):
     backend.wait([handle])
     assert handle.state is JobState.FAILED
     assert backend.cancel() == []
-    assert ["scancel", "123"] in commands.calls
+    assert ["scancel", f"--name={handle.job.name}", "123"] in commands.calls
     (entry,) = json.loads(backend.registry.path.read_text())["attempts"].values()
     assert entry["scheduler_state"] == "CANCELLED"
 
 
-def test_an_unconfirmed_submission_stays_uncertain_until_found(tmp_path):
-    commands = Commands(
-        [
-            subprocess.TimeoutExpired("sbatch", 30),  # the reply is lost
-            "",  # squeue --name: the job is not (yet) visible
-        ]
+def test_a_scheduler_outage_is_waited_out(tmp_path):
+    now = [0]
+    down = (1, "", "slurm_load_jobs error: Unable to contact slurm controller")
+    commands = Commands(["123"], default=down)
+    backend, workspace = batch_backend(
+        tmp_path,
+        commands,
+        clock=lambda: now[0],
+        accounting_timeout=5,
+        outage_timeout=600,
     )
-    backend, workspace = batch_backend(tmp_path, commands)
+    handle, _ = submit(backend, workspace)
+    for now[0] in (0, 300, 599):
+        backend.wait([handle])
+        assert handle.state is JobState.QUEUED
+    assert handle.unknown_since is None
+    now[0] = 600
+    backend.wait([handle])
+    assert handle.state is JobState.FAILED
+    with pytest.raises(RuntimeError, match="could not be asked for 600s"):
+        backend.collect(handle)
+
+
+def test_accounting_that_cannot_be_asked_is_an_outage_not_a_loss(tmp_path):
+    now = [0]
+    commands = Commands(
+        ["123"], default=(1, "", "sacct: error: slurmdbd: Connection refused")
+    )
+    backend, workspace = batch_backend(
+        tmp_path, commands, clock=lambda: now[0], accounting_timeout=5
+    )
+    handle, _ = submit(backend, workspace)
+    # squeue answers (the job left the queue) but accounting cannot be asked.
+    commands.responses = iter(["", commands.default, "", commands.default])
+    backend.wait([handle])
+    now[0] = 60
+    backend.wait([handle])
+    assert handle.state is JobState.QUEUED and handle.unknown_since is None
+
+
+def test_an_unconfirmed_submission_stays_uncertain_within_its_deadline(tmp_path):
+    clock = Clock()
+    commands = Commands([subprocess.TimeoutExpired("sbatch", 30)], default="")
+    backend, workspace = batch_backend(
+        tmp_path, commands, clock=clock, sleep=clock.sleep
+    )
     with pytest.raises(RuntimeError, match="not retried"):
         submit(backend, workspace)
     (error,) = backend.cancel()
-    assert "was not confirmed" in error
+    assert "not confirmed" in error and "id unknown" in error
+    assert commands.calls[1] == ["scancel", f"--name={backend_job_name(backend)}"]
     (entry,) = json.loads(backend.registry.path.read_text())["attempts"].values()
     assert entry["state"] == "unconfirmed"
+
+
+def backend_job_name(backend):
+    (entry,) = json.loads(backend.registry.path.read_text())["attempts"].values()
+    return entry["job_name"]
 
 
 def test_a_rejected_submission_is_reported_plainly_and_leaves_nothing(tmp_path):
@@ -389,16 +573,19 @@ def test_a_rejected_submission_is_reported_plainly_and_leaves_nothing(tmp_path):
     ],
 )
 def test_anything_but_an_explicit_refusal_stays_unconfirmed(tmp_path, stderr):
-    commands = Commands([(1, "", stderr), ""])
-    backend, workspace = batch_backend(tmp_path, commands)
+    clock = Clock()
+    commands = Commands([(1, "", stderr)], default="")
+    backend, workspace = batch_backend(
+        tmp_path, commands, clock=clock, sleep=clock.sleep
+    )
     with pytest.raises(RuntimeError, match="not retried"):
         submit(backend, workspace)
     (entry,) = json.loads(backend.registry.path.read_text())["attempts"].values()
     assert entry["state"] == "unconfirmed"
-    # Cleanup looks the job up by its unique name and keeps reporting it.
+    # Cancellation names the job, and keeps reporting it until it can be sure.
     (error,) = backend.cancel()
-    assert commands.calls[1][2] == f"--name={entry['job_name']}"
-    assert "was not confirmed" in error
+    assert commands.calls[1] == ["scancel", f"--name={entry['job_name']}"]
+    assert "not confirmed" in error
 
 
 @pytest.mark.parametrize(
@@ -424,8 +611,7 @@ def test_explicit_refusals_are_rejections(tmp_path, reason):
 
 
 def test_accounting_is_asked_even_when_the_queue_lookup_fails(tmp_path):
-    # squeue exits 1 for a job that already left the controller.
-    invalid = (1, "", "slurm_load_jobs error: Invalid job id specified")
+    invalid = (1, "", "slurm_load_jobs error: Socket timed out on send/recv")
     commands = Commands(["123", invalid, "123|COMPLETED|0:0"])
     backend, workspace = batch_backend(tmp_path, commands)
     handle, _ = submit(backend, workspace)
@@ -437,9 +623,7 @@ def test_accounting_is_asked_even_when_the_queue_lookup_fails(tmp_path):
 
 
 def test_a_failed_scancel_is_harmless_once_the_end_is_confirmed(tmp_path):
-    registry = SubmissionRegistry.create(tmp_path, executor="slurm")
-    registry.record_intent("a", job_name="adagio-" + "a" * 32)
-    registry.record_submitted("a", job_id="123", cluster=None)
+    registry = registry_with(tmp_path, ("a", A, "123"))
     commands = Commands(
         [
             (1, "", "scancel: error: Kill job error on job id 123: Job/step already completed"),
@@ -447,45 +631,36 @@ def test_a_failed_scancel_is_harmless_once_the_end_is_confirmed(tmp_path):
             "123|COMPLETED|0:0",  # sacct confirms the job ended
         ]
     )
-    from adagio.execution.backends import batch
-
-    errors = batch.cancel_outstanding(
-        registry,
-        SlurmScheduler(),
-        batch.make_command_runner(SlurmScheduler, runner=commands),
-        sleep=lambda _: None,
-    )
-    assert errors == []
+    assert cancel(registry, commands) == []
 
 
 def test_cleanup_reports_what_it_cannot_confirm(tmp_path):
-    registry = SubmissionRegistry.create(tmp_path, executor="slurm")
-    registry.record_intent("a", job_name="adagio-" + "a" * 32)
-    registry.record_submitted("a", job_id="123", cluster="lab")
-    record = tmp_path / "run-record.json"
-    write_json_file(
-        record, {"version": 1, "executor": "slurm", "registry": str(registry.path)}
-    )
+    registry = registry_with(tmp_path, ("a", A, "123"))
     now = [0.0]
 
     def commands(argv, **kwargs):
         now[0] += 6
         if argv[0] == "scancel":
             return subprocess.CompletedProcess(argv, 1, "", "Invalid job id")
-        return subprocess.CompletedProcess(argv, 0, "123|RUNNING", "")
+        return subprocess.CompletedProcess(argv, 0, f"123|{A}|RUNNING", "")
 
-    from adagio.execution.backends import batch
-
-    errors = batch.cancel_outstanding(
-        SubmissionRegistry.load(registry.path),
-        SlurmScheduler(),
-        batch.make_command_runner(SlurmScheduler, runner=commands),
-        clock=lambda: now[0],
-        sleep=lambda _: None,
-    )
+    errors = cancel(SubmissionRegistry.load(registry.path), commands, clock=lambda: now[0])
     assert any("Invalid job id" in error for error in errors)
-    assert any("not confirmed for Slurm jobs 123" in error for error in errors)
+    assert any(f"not confirmed for Slurm jobs {A} (123)" in error for error in errors)
     assert clean_up_run(tmp_path / "absent.json") == []
+
+
+def test_cancel_commands_name_every_job_and_refuse_foreign_names():
+    commands = SlurmScheduler().cancel_commands(
+        [JobRef(A, "1", "lab"), JobRef(B), JobRef(C, "3")]
+    )
+    assert commands == [
+        ["scancel", "--clusters=lab", f"--name={A}", "1"],
+        ["scancel", f"--name={B}"],
+        ["scancel", f"--name={C}", "3"],
+    ]
+    with pytest.raises(ValueError, match="Not an Adagio job name"):
+        SlurmScheduler().cancel_commands([JobRef(f"{A},{B}", "1")])
 
 
 def test_results_must_be_current_complete_and_present(tmp_path):

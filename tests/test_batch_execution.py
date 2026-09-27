@@ -80,8 +80,8 @@ class HereScheduler:
         self.resources[job_id] = resources
         return [sys.executable, "-c", RUN_JOB, str(script), str(log_path), job_id]
 
-    def parse_submission(self, output):
-        return JobRef(output)
+    def parse_submission(self, output, job_name):
+        return JobRef(job_name, output)
 
     def statuses(self, jobs, run):
         results = {}
@@ -89,20 +89,18 @@ class HereScheduler:
             script = self.scripts[job.job_id]
             if self.held_polls and any(script.parent.glob("data-import-*_spec.json")):
                 self.held_polls -= 1
-                results[job] = SchedulerStatus(JobState.RUNNING, "RUNNING")
+                results[job] = SchedulerStatus(JobState.RUNNING, "RUNNING", active=True)
                 continue
             code = script.with_suffix(".exit").read_text()
             results[job] = SchedulerStatus(
                 JobState.SUCCEEDED if code == "0" else JobState.FAILED,
                 "DONE",
                 f"{code}:0",
+                active=False,
             )
         return results
 
     def cancel_commands(self, jobs):
-        return []
-
-    def find_jobs(self, job_name, run):
         return []
 
 

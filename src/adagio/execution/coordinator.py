@@ -93,7 +93,7 @@ def coordinate(
             start(item)
         active[item.id] = _Active(item, program, backend.submit(invocation, item.resources))
 
-    restore_sigterm = _interrupt_on_sigterm()
+    restore_signals = _interrupt_on_termination()
     try:
         while pending or active:
             dispatched = False
@@ -132,7 +132,7 @@ def coordinate(
         canceled = isinstance(error, KeyboardInterrupt)
         # Supervisors often signal the whole process group more than once; a
         # second SIGTERM must not abandon the cancellation it asked for.
-        _ignore_sigterm()
+        _ignore_termination()
         cleanup_errors = backend.cancel()
         listener.stopped(
             error,
@@ -147,26 +147,38 @@ def coordinate(
         )
         raise
     finally:
-        restore_sigterm()
+        restore_signals()
 
 
-def _ignore_sigterm() -> None:
+#: Signals that end a run the way Ctrl-C does: SIGTERM from a supervisor, and
+#: SIGHUP when the terminal or SSH session running the CLI goes away.
+_TERMINATION = tuple(
+    getattr(signal, name) for name in ("SIGTERM", "SIGHUP") if hasattr(signal, name)
+)
+
+
+def _ignore_termination() -> None:
     if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        for signum in _TERMINATION:
+            signal.signal(signum, signal.SIG_IGN)
 
 
-def _interrupt_on_sigterm() -> Callable[[], None]:
-    """Turn SIGTERM into KeyboardInterrupt so a terminated run cancels its work."""
+def _interrupt_on_termination() -> Callable[[], None]:
+    """Turn termination signals into KeyboardInterrupt, so the run cancels its work."""
     if threading.current_thread() is not threading.main_thread():
         return lambda: None
-    previous = signal.getsignal(signal.SIGTERM)
+    previous = {signum: signal.getsignal(signum) for signum in _TERMINATION}
 
     def interrupt(signum: int, frame: Any) -> None:
         # Ignore repeats at once, before anything can interrupt the cleanup.
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        raise KeyboardInterrupt("Run interrupted by SIGTERM.")
+        _ignore_termination()
+        raise KeyboardInterrupt(f"Run interrupted by {signal.Signals(signum).name}.")
 
-    signal.signal(signal.SIGTERM, interrupt)
-    return lambda: signal.signal(
-        signal.SIGTERM, previous if previous is not None else signal.SIG_DFL
-    )
+    for signum in _TERMINATION:
+        signal.signal(signum, interrupt)
+
+    def restore() -> None:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
+
+    return restore

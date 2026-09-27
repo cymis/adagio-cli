@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+import signal
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -111,8 +113,19 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         action="store_true",
         help="Validate the run and print its plan as JSON without executing tasks.",
     )
+    parser.add_argument(
+        "--exit-with-stdin",
+        action="store_true",
+        help=(
+            "Stop the run, cancelling its work, when standard input closes. A "
+            "supervisor passes this and holds the other end of a pipe open, so "
+            "the run cannot outlive it."
+        ),
+    )
 
     opts = parser.parse_args(argv)
+    if opts.exit_with_stdin:
+        _terminate_when_stdin_closes()
 
     spec_data = _load_json(Path(opts.spec))
     run_config = load_run_config(Path(opts.config))
@@ -210,6 +223,32 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
                 job_id=opts.job_id,
                 payload={"event": "job_status", "status": "succeeded"},
             )
+
+
+def _terminate_when_stdin_closes() -> None:
+    """Deliver SIGTERM to this process once standard input reaches end of file.
+
+    SIGTERM already stops a run and cancels its work, so a supervisor that dies
+    (closing its end of the pipe) is handled like one that asked. Tasks get
+    /dev/null as standard input instead, so they can neither read the pipe nor
+    keep it open.
+    """
+    watched = os.dup(0)
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(devnull, 0)
+    os.close(devnull)
+    main = threading.main_thread().ident
+    assert main is not None
+
+    def watch() -> None:
+        # Leave process-directed signals to the main thread, which handles them.
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP})
+        with os.fdopen(watched, "rb", buffering=0) as stream:
+            while stream.read(4096):
+                pass
+        signal.pthread_kill(main, signal.SIGTERM)
+
+    threading.Thread(target=watch, name="adagio-stdin", daemon=True).start()
 
 
 def _parse_node_ids(raw: str | None) -> set[str]:

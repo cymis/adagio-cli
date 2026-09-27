@@ -21,7 +21,7 @@ from .batch import (
     missing_commands,
 )
 from .local import LocalBackend, LocalExecutorConfig
-from .run_record import read_run_record
+from .run_record import owning_run, read_run_record
 from .slurm import SlurmExecutorConfig, SlurmScheduler
 from .submissions import SubmissionRegistry
 
@@ -75,16 +75,20 @@ def clean_up_run(
     """Cancel whatever an interrupted run left with its scheduler.
 
     Returns what could not be confirmed; the record is removed once nothing
-    is left.
+    is left. Raises ``RunOwned`` while the run's own process is still alive:
+    only it may act on the run then.
     """
-    record = read_run_record(record_path)
-    if record is None:
+    if not record_path.exists():
         return []
-    scheduler = SCHEDULERS[record.executor]()
-    registry = SubmissionRegistry.load(record.registry)
-    errors = cancel_outstanding(
-        registry, scheduler, make_command_runner(scheduler, runner=command_runner)
-    )
-    if not errors:
-        record_path.unlink(missing_ok=True)
+    with owning_run(record_path):
+        record = read_run_record(record_path)
+        if record is None:
+            return []
+        scheduler = SCHEDULERS[record.executor]()
+        registry = SubmissionRegistry.load(record.registry)
+        errors = cancel_outstanding(
+            registry, scheduler, make_command_runner(scheduler, runner=command_runner)
+        )
+        if not errors:
+            record_path.unlink(missing_ok=True)
     return errors

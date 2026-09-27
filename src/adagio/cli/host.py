@@ -31,23 +31,34 @@ def run_capabilities(argv: list[str]) -> None:
     )
 
 
+#: ``adagio cleanup`` exit status while the run's own process is still alive
+#: (EX_TEMPFAIL): nothing was touched, so try again later.
+OWNER_ALIVE_EXIT = 75
+
+
 def run_cleanup(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(
         prog="adagio cleanup",
         description=(
             "Cancel scheduler jobs an interrupted run left behind, using the file "
             "it was given with --run-record. Prints a JSON report and exits 1 if "
-            "anything could not be confirmed."
+            "anything could not be confirmed, or 75 without touching anything "
+            "while the run's own process is still alive."
         ),
     )
     parser.add_argument("run_record", help="The run's --run-record file.")
     opts = parser.parse_args(argv)
 
     from ..execution.backends import clean_up_run
+    from ..execution.backends.run_record import RunOwned
 
     try:
         errors = clean_up_run(Path(opts.run_record))
-    except (OSError, ValueError, KeyError) as error:
+    except RunOwned as owned:
+        report = {"complete": False, "owner_alive": True, "errors": [str(owned)]}
+        print(json.dumps(report))
+        sys.exit(OWNER_ALIVE_EXIT)
+    except (OSError, ValueError, KeyError, RuntimeError) as error:
         errors = [f"Cleanup failed: {error}"]
     print(json.dumps({"complete": not errors, "errors": errors}))
     if errors:

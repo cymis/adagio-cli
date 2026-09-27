@@ -1,4 +1,8 @@
-"""Slurm for the batch backend: sbatch, squeue, sacct and scancel."""
+"""Slurm for the batch backend: sbatch, squeue, sacct and scancel.
+
+Slurm reuses job ids, so ``squeue`` and ``scancel`` always name the job as
+well: given both a name and an id, Slurm matches only a job with both.
+"""
 
 from __future__ import annotations
 
@@ -99,6 +103,10 @@ _RUNNING = frozenset(
         "STAGE_OUT",
     }
 )
+#: Queue states in which a job can still hold or wait for resources.
+_ACTIVE = {state: JobState.QUEUED for state in _QUEUED} | {
+    state: JobState.RUNNING for state in _RUNNING
+}
 _FINISHED = frozenset(
     {
         "COMPLETED",
@@ -194,13 +202,13 @@ class SlurmScheduler:
         argv.append(str(script))
         return argv
 
-    def parse_submission(self, output: str) -> JobRef:
+    def parse_submission(self, output: str, job_name: str) -> JobRef:
         match = re.fullmatch(r"([0-9]+)(?:;([A-Za-z0-9_.-]+))?", output)
         if match is None:
             raise SchedulerCommandError(
                 f"Invalid sbatch --parsable response: {output!r}."
             )
-        return JobRef(match.group(1), match.group(2))
+        return JobRef(job_name, match.group(1), match.group(2))
 
     def rejected(self, error: SchedulerCommandError) -> bool:
         reasons = [
@@ -214,34 +222,38 @@ class SlurmScheduler:
         results: dict[JobRef, SchedulerStatus] = {}
         for cluster, group in _by_cluster(jobs):
             cluster_args = [f"--clusters={cluster}"] if cluster else []
-            ids = [job.job_id for job in group]
-            failure: Exception | None = None
-            queued: dict[str, str] = {}
+            names = sorted({job.name for job in group})
+            # The queue holds every job that can still use resources, and
+            # finished ones for a few minutes; it is asked by our names only.
+            listed: dict[str, list[tuple[str, str]]] = {}
+            queue_error: Exception | None = None
             try:
                 for line in run(
                     [
                         "squeue",
                         "--noheader",
-                        f"--jobs={','.join(ids)}",
-                        "--format=%i|%T",
+                        "--states=all",
+                        f"--name={','.join(names)}",
+                        "--format=%i|%j|%T",
                         *cluster_args,
                     ]
                 ).splitlines():
-                    job_id, _, state = line.strip().partition("|")
-                    if job_id in ids:
-                        queued[job_id] = state
+                    job_id, _, rest = line.strip().partition("|")
+                    name, _, state = rest.partition("|")
+                    listed.setdefault(name, []).append((job_id, state))
             except SCHEDULER_ERRORS as error:
-                # squeue fails outright once a job has left the controller;
-                # accounting still knows how it ended.
-                failure = error
-            # A finished job leaves the queue, or lingers there without an exit
-            # code; only accounting says how its allocation ended. Job ids are
-            # reused, so accounting is asked by our run-unique names as well.
+                queue_error = error
+            rows = {job: _queue_row(job, listed) for job in group}
+            # Only accounting says how a job's allocation ended. Job ids are
+            # reused, so it is asked by our names as well.
+            ended = {
+                job: job.job_id or row[0]
+                for job, row in rows.items()
+                if (row is None or row[1] not in _ACTIVE) and (job.job_id or row)
+            }
             accounting: dict[str, tuple[str, str]] = {}
-            finished = [i for i in ids if queued.get(i) not in _QUEUED | _RUNNING]
-            names = [job.name for job in group if job.job_id in finished]
-            name_args = [f"--name={','.join(names)}"] if all(names) else []
-            if finished:
+            accounting_error: Exception | None = None
+            if ended:
                 try:
                     for line in run(
                         [
@@ -249,50 +261,45 @@ class SlurmScheduler:
                             "--noheader",
                             "--parsable2",
                             "--allocations",
-                            f"--jobs={','.join(finished)}",
+                            f"--jobs={','.join(sorted(set(ended.values())))}",
+                            f"--name={','.join(sorted({job.name for job in ended}))}",
                             "--format=JobIDRaw,State,ExitCode",
-                            *name_args,
                             *cluster_args,
                         ]
                     ).splitlines():
                         parts = line.strip().split("|")
-                        if len(parts) >= 3 and parts[0] in ids and parts[1].strip():
+                        if len(parts) >= 3 and parts[1].strip():
                             accounting[parts[0]] = (
                                 parts[1].split()[0].rstrip("+"),
                                 parts[2],
                             )
                 except SCHEDULER_ERRORS as error:
-                    failure = error
+                    accounting_error = error
             for job in group:
-                state, code = accounting.get(job.job_id, (queued.get(job.job_id), None))
-                status = _status(state, code)
-                if status.state is None and failure is not None:
-                    status = SchedulerStatus(None, str(failure))
-                results[job] = status
+                row = rows[job]
+                results[job] = _status(
+                    row,
+                    accounting.get(ended.get(job) or ""),
+                    queue_error=queue_error,
+                    accounting_error=accounting_error if job in ended else None,
+                )
         return results
 
     def cancel_commands(self, jobs: Sequence[JobRef]) -> list[list[str]]:
-        return [
-            [
-                "scancel",
-                *([f"--clusters={cluster}"] if cluster else []),
-                *(job.job_id for job in group),
-            ]
-            for cluster, group in _by_cluster(jobs)
-        ]
-
-    def find_jobs(self, job_name: str, run: CommandRunner) -> list[JobRef]:
-        if not _JOB_NAME.fullmatch(job_name):
-            raise ValueError(f"Not an Adagio job name: {job_name!r}.")
-        output = run(
-            ["squeue", "--noheader", f"--name={job_name}", "--format=%i|%j"]
-        )
-        found = []
-        for line in output.splitlines():
-            job_id, _, name = line.strip().partition("|")
-            if name == job_name and job_id.isdigit():
-                found.append(JobRef(job_id))
-        return found
+        commands = []
+        for job in jobs:
+            if not _JOB_NAME.fullmatch(job.name):
+                raise ValueError(f"Not an Adagio job name: {job.name!r}.")
+            # One job per command: scancel matches nothing given several names.
+            commands.append(
+                [
+                    "scancel",
+                    *([f"--clusters={job.cluster}"] if job.cluster else []),
+                    f"--name={job.name}",
+                    *([job.job_id] if job.job_id else []),
+                ]
+            )
+        return commands
 
 
 def memory_megabytes(value: str) -> int:
@@ -300,18 +307,52 @@ def memory_megabytes(value: str) -> int:
     return max(1, -(-memory_bytes(value) // 2**20))
 
 
-def _status(state: str | None, exit_code: str | None) -> SchedulerStatus:
-    if state in _QUEUED:
-        return SchedulerStatus(JobState.QUEUED, state)
-    if state in _RUNNING:
-        return SchedulerStatus(JobState.RUNNING, state)
-    if state in _FINISHED and exit_code and _EXIT_CODE.fullmatch(exit_code):
-        succeeded = state == "COMPLETED" and exit_code == "0:0"
+def _queue_row(
+    job: JobRef, listed: dict[str, list[tuple[str, str]]]
+) -> tuple[str, str] | None:
+    """The queue's (id, state) for ``job``, matched by its name and any known id."""
+    rows = [row for row in listed.get(job.name, ()) if job.job_id in (None, row[0])]
+    return max(rows, key=lambda row: row[1] in _ACTIVE, default=None)
+
+
+def _status(
+    row: tuple[str, str] | None,
+    accounted: tuple[str, str] | None,
+    *,
+    queue_error: Exception | None,
+    accounting_error: Exception | None,
+) -> SchedulerStatus:
+    job_id = row[0] if row else None
+    if row is not None and row[1] in _ACTIVE:
+        return SchedulerStatus(_ACTIVE[row[1]], row[1], active=True, job_id=job_id)
+    if accounted is not None:
+        state, exit_code = accounted
+        if state in _FINISHED and _EXIT_CODE.fullmatch(exit_code):
+            succeeded = state == "COMPLETED" and exit_code == "0:0"
+            return SchedulerStatus(
+                JobState.SUCCEEDED if succeeded else JobState.FAILED,
+                state,
+                exit_code,
+                active=False,
+                job_id=job_id,
+            )
+        if queue_error is not None and state in _ACTIVE:
+            return SchedulerStatus(_ACTIVE[state], state, active=True, job_id=job_id)
+    if queue_error is not None:
         return SchedulerStatus(
-            JobState.SUCCEEDED if succeeded else JobState.FAILED, state, exit_code
+            None, str(queue_error), active=None, answered=False, job_id=job_id
+        )
+    queue = f"{row[1]} in the queue" if row else "not in the queue"
+    if accounting_error is not None:
+        return SchedulerStatus(
+            None,
+            f"{queue}; accounting failed: {accounting_error}",
+            active=False,
+            answered=False,
+            job_id=job_id,
         )
     return SchedulerStatus(
-        None, "queue and accounting have no confirmed state and exit code"
+        None, f"{queue}, with no accounting record", active=False, job_id=job_id
     )
 
 

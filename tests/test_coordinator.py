@@ -180,14 +180,30 @@ def test_unsatisfiable_dependencies_are_reported():
         )
 
 
-def test_sigterm_handler_is_restored(monkeypatch):
+def test_termination_handlers_are_restored(monkeypatch):
     import signal
 
-    before = signal.getsignal(signal.SIGTERM)
+    before = [signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)]
     coordinate(
         items=items([("A", [])]), backend=QueueBackend(capacity=1), listener=Recorder()
     )
-    assert signal.getsignal(signal.SIGTERM) == before
+    assert [signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)] == before
+
+
+def test_sighup_cancels_like_sigterm():
+    import os
+    import signal
+
+    class HungUpBackend(QueueBackend):
+        def wait(self, handles):
+            os.kill(os.getpid(), signal.SIGHUP)  # the login session went away
+
+    backend = HungUpBackend(capacity=1)
+    recorder = Recorder()
+    with pytest.raises(KeyboardInterrupt, match="SIGHUP"):
+        coordinate(items=items([("A", [])]), backend=backend, listener=recorder)
+    assert backend.cancelled
+    assert recorder.events[-1] == ("stopped", None, ["A"], True)
 
 
 def test_multi_step_programs_resubmit_until_they_return():

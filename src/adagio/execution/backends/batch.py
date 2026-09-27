@@ -9,22 +9,27 @@ scheduler gets the same guarantees:
   removed only after the run succeeds;
 * each submission is recorded before the scheduler is asked, and a submission
   whose reply is lost is never retried;
-* a job that disappears from the scheduler is never taken as success;
+* a job that disappears from the scheduler is never taken as success, and a
+  scheduler that cannot be reached is waited out rather than failing tasks;
 * polling backs off while nothing changes;
+* every job is looked up and cancelled by its run-unique name, never by a
+  bare job id, which the scheduler reuses;
 * cancellation acts only on this run's recorded jobs, and cleanup after an
-  abnormal exit (``adagio cleanup``) runs exactly the same code.
+  abnormal exit (``adagio cleanup``) runs exactly the same code, and only once
+  the run's owner is gone (``run_record.owning_run``).
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
@@ -34,7 +39,7 @@ from adagio.executors.task_contract import read_json_file, write_json_file
 
 from .base import JobHandle, JobState, TaskInvocation, Workspace
 from .job_script import check_shared_paths, render_job_script
-from .run_record import write_run_record
+from .run_record import owning_run, write_run_record
 from .submissions import SubmissionRegistry
 
 if TYPE_CHECKING:
@@ -45,6 +50,8 @@ if TYPE_CHECKING:
 
 #: Task environment kinds a compute host can run from shared storage.
 SHARED_ENVIRONMENTS = frozenset({"apptainer", "conda"})
+
+logger = logging.getLogger(__name__)
 
 
 class BatchExecutorConfig(BaseModel):
@@ -72,20 +79,35 @@ class BatchExecutorConfig(BaseModel):
 
 @dataclass(frozen=True)
 class JobRef:
-    job_id: str
+    """One job, identified by the run-unique name it was submitted under.
+
+    Schedulers reuse job ids, so every lookup and cancellation matches the
+    name; ``job_id`` is None while the scheduler has not confirmed one.
+    """
+
+    name: str
+    job_id: str | None = None
     cluster: str | None = None
-    #: The run-unique name the job was submitted under. Schedulers reuse job
-    #: ids, so status lookups match on it; identity is the id and cluster.
-    name: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
 class SchedulerStatus:
-    """What the scheduler confirms about one job; ``state`` None means not yet."""
+    """What the scheduler reports about one job.
+
+    ``state`` is the confirmed outcome so far, None while there is none.
+    ``active`` is whether the queue still holds the job: None when the queue
+    could not be asked. A job can leave the queue before its outcome is
+    recorded; ``answered`` is False when a query that could have confirmed
+    the outcome failed, so the missing outcome proves nothing.
+    """
 
     state: JobState | None
     detail: str
     exit_code: str | None = None
+    active: bool | None = None
+    answered: bool = True
+    #: The id the scheduler listed, for a job looked up by name alone.
+    job_id: str | None = None
 
 
 class SchedulerCommandError(RuntimeError):
@@ -117,7 +139,7 @@ class Scheduler(Protocol):
         resources: TaskResourceRequirements,
     ) -> list[str]: ...
 
-    def parse_submission(self, output: str) -> JobRef: ...
+    def parse_submission(self, output: str, job_name: str) -> JobRef: ...
 
     def rejected(self, error: SchedulerCommandError) -> bool:
         """Whether a failed submission was refused outright, so no job exists."""
@@ -125,11 +147,13 @@ class Scheduler(Protocol):
 
     def statuses(
         self, jobs: Sequence[JobRef], run: CommandRunner
-    ) -> dict[JobRef, SchedulerStatus]: ...
+    ) -> dict[JobRef, SchedulerStatus]:
+        """Look jobs up by name, and by id as well where one is known."""
+        ...
 
-    def cancel_commands(self, jobs: Sequence[JobRef]) -> list[list[str]]: ...
-
-    def find_jobs(self, job_name: str, run: CommandRunner) -> list[JobRef]: ...
+    def cancel_commands(self, jobs: Sequence[JobRef]) -> list[list[str]]:
+        """Commands that cancel exactly these jobs, matched by name."""
+        ...
 
 
 def missing_commands(scheduler: Scheduler | type[Scheduler]) -> list[str]:
@@ -179,7 +203,10 @@ class BatchHandle(JobHandle):
     attempt_id: str = ""
     detail: str = ""
     exit_code: str | None = None
+    #: When the scheduler was first seen without the job or its outcome.
     unknown_since: float | None = None
+    #: When the scheduler first could not be asked about the job.
+    unreachable_since: float | None = None
 
 
 class BatchBackend:
@@ -198,6 +225,7 @@ class BatchBackend:
         sleep: Callable[[float], None] = time.sleep,
         poll_interval: tuple[float, float] = (2.0, 30.0),
         accounting_timeout: float = 120.0,
+        outage_timeout: float = 1800.0,
         command_timeout: float = 30.0,
     ) -> None:
         self.kind = scheduler.kind
@@ -213,6 +241,9 @@ class BatchBackend:
         self._min_interval, self._max_interval = poll_interval
         self._interval = self._min_interval
         self._accounting_timeout = accounting_timeout
+        self._outage_timeout = outage_timeout
+        # A submission whose reply was lost cannot become a job after this.
+        self._submit_deadline = 2 * command_timeout
         self._registry: SubmissionRegistry | None = None
         self._stopped = False
 
@@ -240,20 +271,25 @@ class BatchBackend:
 
     @contextmanager
     def workspace(self) -> Iterator[Workspace]:
-        root = Path(self.config.work_dir) / f"run-{uuid.uuid4().hex}"
-        root.mkdir(parents=True, mode=0o700)
-        self._registry = SubmissionRegistry.create(root, executor=self.kind)
-        if self._run_record is not None:
-            write_run_record(
-                self._run_record, executor=self.kind, registry=self._registry.path
-            )
-        yield Workspace(root=root, cwd=root)
-        # Reached only when the run finished and saved its outputs. A failed or
-        # interrupted run keeps its directory: task logs, and the registry that
-        # cancellation and reconciliation read.
-        shutil.rmtree(root, ignore_errors=True)
-        if self._run_record is not None:
-            self._run_record.unlink(missing_ok=True)
+        with ExitStack() as owned:
+            if self._run_record is not None:
+                # Held until the run is over, so ``adagio cleanup`` cannot act
+                # on this run while this process still submits and cancels.
+                owned.enter_context(owning_run(self._run_record))
+            root = Path(self.config.work_dir) / f"run-{uuid.uuid4().hex}"
+            root.mkdir(parents=True, mode=0o700)
+            self._registry = SubmissionRegistry.create(root, executor=self.kind)
+            if self._run_record is not None:
+                write_run_record(
+                    self._run_record, executor=self.kind, registry=self._registry.path
+                )
+            yield Workspace(root=root, cwd=root)
+            # Reached only when the run finished and saved its outputs. A failed
+            # or interrupted run keeps its directory: task logs, and the registry
+            # that cancellation and reconciliation read.
+            shutil.rmtree(root, ignore_errors=True)
+            if self._run_record is not None:
+                self._run_record.unlink(missing_ok=True)
 
     def attempt_directory(self, workspace: Workspace) -> Path:
         path = workspace.root / f"attempt-{uuid.uuid4().hex}"
@@ -300,7 +336,7 @@ class BatchBackend:
             log_path=str(prepared.log_path),
         )
         try:
-            reply = self.scheduler.parse_submission(self._run(argv))
+            job = self.scheduler.parse_submission(self._run(argv), job_name)
         except BaseException as error:
             self._stopped = True
             if isinstance(error, SchedulerCommandError) and self.scheduler.rejected(
@@ -322,7 +358,6 @@ class BatchBackend:
                 "It was not retried; if a job with that name exists, cancel it. "
                 f"Registry: {registry.path}."
             ) from error
-        job = JobRef(reply.job_id, reply.cluster, job_name)
         registry.record_submitted(
             prepared.attempt_id, job_id=job.job_id, cluster=job.cluster
         )
@@ -348,24 +383,22 @@ class BatchBackend:
         statuses = self.scheduler.statuses([h.job for h in handles], self._run)
         changed = False
         for handle in handles:
-            status = statuses.get(handle.job) or SchedulerStatus(None, "no status")
+            status = statuses.get(handle.job) or SchedulerStatus(
+                None, "no status", answered=False
+            )
             if status.state is None:
-                if handle.unknown_since is None:
-                    handle.unknown_since = now
-                if now - handle.unknown_since < self._accounting_timeout:
+                reason = self._unresolved(handle, status, now)
+                if reason is None:
                     continue
                 # Disappearance is never success: the task fails. The job may
                 # still be running, so its registry entry stays outstanding
                 # and cancellation and cleanup still try to stop it.
                 handle.state = JobState.FAILED
-                handle.detail = (
-                    f"state is unknown: {status.detail}. Disappearance is not "
-                    f"success. Registry: {self.registry.path}"
-                )
+                handle.detail = f"{reason}. Registry: {self.registry.path}"
                 self.registry.record_unknown(handle.attempt_id, status.detail)
                 changed = True
                 continue
-            handle.unknown_since = None
+            handle.unknown_since = handle.unreachable_since = None
             current = (status.state, status.detail, status.exit_code)
             if current != (handle.state, handle.detail, handle.exit_code):
                 changed = True
@@ -378,6 +411,37 @@ class BatchBackend:
             )
         self.registry.save()
         return changed
+
+    def _unresolved(
+        self, handle: BatchHandle, status: SchedulerStatus, now: float
+    ) -> str | None:
+        """Why a job with no confirmed state has failed, or None to keep waiting.
+
+        A scheduler that cannot be asked says nothing about the job, so an
+        outage is waited out for far longer than a job that is positively gone
+        without an outcome.
+        """
+        if not status.answered:
+            if handle.unreachable_since is None:
+                handle.unreachable_since = now
+                logger.warning(
+                    "%s could not be asked about job %s (%s); waiting for it.",
+                    self.scheduler.name,
+                    handle.job_id,
+                    status.detail,
+                )
+            if now - handle.unreachable_since < self._outage_timeout:
+                return None
+            return (
+                f"state is unknown: {self.scheduler.name} could not be asked for "
+                f"{self._outage_timeout:.0f}s: {status.detail}"
+            )
+        handle.unreachable_since = None
+        if handle.unknown_since is None:
+            handle.unknown_since = now
+        if now - handle.unknown_since < self._accounting_timeout:
+            return None
+        return f"state is unknown: {status.detail}. Disappearance is not success"
 
     def collect(self, handle: BatchHandle) -> TaskExecutionResult:
         if handle.state is not JobState.SUCCEEDED:
@@ -400,6 +464,7 @@ class BatchBackend:
             self._run,
             clock=self._clock,
             sleep=self._sleep,
+            submit_deadline=self._submit_deadline,
         )
 
     def describe(self) -> dict[str, Any]:
@@ -413,65 +478,84 @@ def cancel_outstanding(
     *,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.time,
     confirm_for: float = 10.0,
+    submit_deadline: float = 60.0,
 ) -> list[str]:
     """Cancel every recorded job that may still hold resources.
 
-    Returns what could not be confirmed. Only jobs in the registry are touched;
-    a submission whose reply was lost is looked up by its unique job name.
+    Returns what could not be confirmed. Only jobs in the registry are touched,
+    and each is cancelled and confirmed by its run-unique name. A submission
+    whose reply was lost is cancelled by name as well; once ``submit_deadline``
+    has passed since it was requested and no job has that name, none will.
     """
-    errors: list[str] = []
-    jobs: dict[JobRef, str] = {}
-    for attempt_id, entry in registry.outstanding():
-        if entry.get("job_id"):
-            jobs[JobRef(entry["job_id"], entry.get("cluster"), entry["job_name"])] = (
-                attempt_id
-            )
-            continue
-        try:
-            found = scheduler.find_jobs(entry["job_name"], run)
-        except (*SCHEDULER_ERRORS, ValueError) as error:
-            errors.append(f"Could not look up {entry['job_name']}: {error}")
-            continue
-        if not found:
-            # A lost reply may still become a job; only the scheduler's own
-            # refusal (recorded at submission) proves that none exists.
-            errors.append(
-                f"Submission of {entry['job_name']} was not confirmed and no job "
-                "with that name is queued yet; check the scheduler before "
-                f"discarding {registry.path}."
-            )
-        for job in found:
-            registry.record_found(attempt_id, job_id=job.job_id)
-            jobs[JobRef(job.job_id, job.cluster, entry["job_name"])] = attempt_id
-    cancel_failures: list[str] = []
-    for argv in scheduler.cancel_commands(list(jobs)):
-        try:
-            run(argv)
-        except SCHEDULER_ERRORS as error:
-            # Often the job already ended; only confirmation below decides.
-            cancel_failures.append(f"{scheduler.name} cancellation failed: {error}")
+    jobs: dict[JobRef, tuple[str, float]] = {
+        JobRef(entry["job_name"], entry.get("job_id"), entry.get("cluster")): (
+            attempt_id,
+            float(entry.get("intent_at") or 0),
+        )
+        for attempt_id, entry in registry.outstanding()
+    }
+    failures: list[str] = []
+
+    def cancel(targets: Sequence[JobRef]) -> None:
+        for argv in scheduler.cancel_commands(targets):
+            try:
+                run(argv)
+            except SCHEDULER_ERRORS as error:
+                # Often the job already ended; only confirmation decides.
+                failures.append(f"{scheduler.name} cancellation failed: {error}")
+
+    cancel(list(jobs))
+    unconfirmed = [intent for job, (_, intent) in jobs.items() if job.job_id is None]
+    wait = max([confirm_for] + [i + submit_deadline - now() for i in unconfirmed])
+    deadline = clock() + wait
     remaining = list(jobs)
-    deadline = clock() + confirm_for
-    while remaining and clock() < deadline:
+    while remaining:
         statuses = scheduler.statuses(remaining, run)
+        appeared = []
         for job in list(remaining):
             status = statuses.get(job)
-            if status is not None and status.state is not None and status.state.terminal:
+            if status is None or status.active is None:
+                continue
+            attempt_id, intent = jobs[job]
+            if job.job_id is None and status.job_id is not None:
+                registry.record_found(attempt_id, job_id=status.job_id)
+            if status.active:
+                if job.job_id is None:
+                    appeared.append(job)
+                continue
+            if (
+                job.job_id is None
+                and status.job_id is None
+                and now() < intent + submit_deadline
+            ):
+                # Not listed yet: the lost reply may still become a job.
+                continue
+            if status.state is not None and status.state.terminal:
                 registry.record_status(
-                    jobs[job],
+                    attempt_id,
                     state=status.state,
                     scheduler_state=status.detail,
                     exit_code=status.exit_code,
                 )
-                remaining.remove(job)
-        if remaining:
-            sleep(0.5)
+            else:
+                registry.record_ended(attempt_id, status.detail)
+            remaining.remove(job)
+        if not remaining or clock() >= deadline:
+            break
+        # A lost reply that became a job after the first cancellation.
+        cancel(appeared)
+        sleep(0.5)
+    errors: list[str] = []
     if remaining:
-        errors.extend(cancel_failures)
+        errors.extend(failures)
         errors.append(
             f"Cancellation not confirmed for {scheduler.name} jobs "
-            f"{', '.join(job.job_id for job in remaining)}. Registry: {registry.path}."
+            + ", ".join(
+                f"{job.name} ({job.job_id or 'id unknown'})" for job in remaining
+            )
+            + f". Registry: {registry.path}."
         )
     registry.save()
     return errors

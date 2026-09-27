@@ -8,6 +8,7 @@ never on the scheduler's wider view of what the user owns.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,9 @@ UNCONFIRMED = "unconfirmed"
 REJECTED = "rejected"
 #: The scheduler stopped accounting for the job; it may still be running.
 UNKNOWN = "unknown"
+#: The scheduler no longer holds the job, or never created it; how it ended
+#: is not known, but it holds no resources.
+ENDED = "ended"
 
 
 class SubmissionRegistry:
@@ -71,6 +75,7 @@ class SubmissionRegistry:
             "state": SUBMITTING,
             "job_id": None,
             "cluster": None,
+            "intent_at": time.time(),
         }
         self.save()
 
@@ -112,9 +117,14 @@ class SubmissionRegistry:
     def record_found(self, attempt_id: str, *, job_id: str) -> None:
         self._data["attempts"][attempt_id].update(job_id=job_id)
 
+    def record_ended(self, attempt_id: str, scheduler_state: str) -> None:
+        self._data["attempts"][attempt_id].update(
+            state=ENDED, scheduler_state=scheduler_state
+        )
+
     def outstanding(self) -> list[tuple[str, dict[str, Any]]]:
         """Attempts that may still hold scheduler resources."""
-        finished = {JobState.SUCCEEDED.value, JobState.FAILED.value, REJECTED}
+        finished = {JobState.SUCCEEDED.value, JobState.FAILED.value, REJECTED, ENDED}
         return [
             (attempt_id, dict(entry))
             for attempt_id, entry in self._data["attempts"].items()

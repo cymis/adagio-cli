@@ -20,7 +20,19 @@ base_spec = json.loads((root / "branch.adg").read_text())
 report = {}
 
 
-def run_case(name, *, config=None, spec=None, signal_number=None, targets=None):
+def adagio_cleanup(record):
+    result = subprocess.run(
+        [sys.executable, "-m", "adagio.cli.main", "cleanup", str(record)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, json.loads(result.stdout)
+
+
+def run_case(
+    name, *, config=None, spec=None, signal_number=None, targets=None, supervised=False
+):
     case = root / name
     case.mkdir(exist_ok=True)
     existing_registries = set((case / "work").glob("*/submissions.json"))
@@ -49,11 +61,22 @@ def run_case(name, *, config=None, spec=None, signal_number=None, targets=None):
     ]
     if targets:
         cmd += ["--targets", targets]
+    # Run records are locked, so they live on local disk; /workspace is a bind
+    # mount that accepts locks without enforcing them.
+    record = Path("/tmp/adagio-acceptance") / name / "run-record.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    if supervised:
+        # As the runtime server runs it: stdin is a pipe the server holds open.
+        cmd += ["--exit-with-stdin", "--run-record", str(record)]
     with (case / "driver.log").open("w") as log:
         process = subprocess.Popen(
-            cmd, stdout=log, stderr=subprocess.STDOUT, env=os.environ.copy()
+            cmd,
+            stdin=subprocess.PIPE if supervised else None,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=os.environ.copy(),
         )
-        if signal_number:
+        if signal_number or supervised:
             deadline = time.monotonic() + 60
             while time.monotonic() < deadline:
                 registries = sorted(
@@ -68,8 +91,19 @@ def run_case(name, *, config=None, spec=None, signal_number=None, targets=None):
                 if process.poll() is not None:
                     raise RuntimeError("Coordinator exited before cancellation test")
                 time.sleep(0.1)
-            process.send_signal(signal_number)
+            if supervised:
+                # While the run's own process lives, cleanup must not touch it.
+                owned = adagio_cleanup(record)
+                assert owned[0] == 75 and owned[1]["owner_alive"], owned
+                process.stdin.close()  # as when the server dies
+            else:
+                process.send_signal(signal_number)
         code = process.wait(timeout=180)
+        if supervised:
+            # The run cancelled its own jobs; cleanup then finds nothing left.
+            assert adagio_cleanup(record) == (0, {"complete": True, "errors": []})
+            assert not record.exists()
+            assert not record.with_name(record.name + ".lock").exists()
     registries = sorted(
         set((case / "work").glob("*/submissions.json")) - existing_registries
     )
@@ -119,10 +153,17 @@ def main():
     code, registry, jobs = run_case("fail-fast", config=failure_config, spec=failure)
     assert code != 0
     assert "D" not in {a["node_id"] for a in registry["attempts"].values()}
-    for name, number in [("sigint", signal.SIGINT), ("sigterm", signal.SIGTERM)]:
+    for name, number in [
+        ("sigint", signal.SIGINT),
+        ("sigterm", signal.SIGTERM),
+        ("sighup", signal.SIGHUP),
+    ]:
         code, registry, jobs = run_case(name, signal_number=number)
         assert code != 0
         assert all(job[2].startswith(("CANCELLED", "COMPLETED")) for job in jobs), jobs
+    code, registry, jobs = run_case("server-gone", supervised=True)
+    assert code != 0
+    assert all(job[2].startswith(("CANCELLED", "COMPLETED")) for job in jobs), jobs
     local = json.loads(json.dumps(base_config))
     local["executor"] = {"kind": "local"}
     # The local executor shares the same cache and scientific worker path.
