@@ -59,9 +59,12 @@ task, not an aggregate pipeline allocation. If a task is later expanded into
 parallel subtasks, each subtask requests this shape and the scheduler determines
 the total concurrent allocation.
 
-The current serial executor parses and validates these fields but intentionally
-does not apply them yet. Omitting either field leaves that resource at the
-executor's default.
+The local executor runs tasks one at a time and does not apply these requests.
+The Slurm executor (`[executor] kind = "slurm"`) submits each task as one batch
+job with this CPU and memory request. Omitting either field leaves that
+resource at the executor's default, or `[resources.defaults]` when set. See the
+Slurm execution guide in the Adagio documentation for the executor settings,
+cancellation and `adagio cleanup`.
 
 ## Plugin submission defaults
 

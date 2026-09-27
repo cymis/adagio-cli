@@ -8,6 +8,31 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+### Added
+
+- Runs each task as one Slurm batch job when the run configuration selects
+  `[executor] kind = "slurm"`, applying per-task CPU and memory requests, with
+  a bounded number of jobs in flight and dependents started once their inputs
+  exist.
+- `adagio capabilities` reports the run-configuration version and which
+  executors this host can use.
+- `adagio runtime --run-record FILE` and `adagio cleanup FILE` cancel exactly
+  the scheduler jobs a killed run left behind. Cleanup never acts while the
+  run's own process is alive (exit status 75), and `--settle-unconfirmed`
+  settles submissions whose reply was lost once someone has checked the
+  scheduler.
+- `adagio runtime --exit-with-stdin` stops the run, and cancels its jobs, when
+  its supervisor goes away.
+- `--plan-only` prints the validated plan without running anything.
+
+### Changed
+
+- The serial executor is now named `local`; unknown executors, keys and
+  configuration versions fail validation.
+- SIGHUP stops a run like SIGTERM unless it was started with it ignored, as
+  under `nohup`.
+- An interrupted Docker task is stopped and its container removed.
+
 ## 0.1.0 - 2026-09-10
 
 ### Added
