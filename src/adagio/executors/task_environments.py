@@ -748,6 +748,14 @@ def _save_outputs(
     for output in sig.outputs:
         if output.id in state.saved_output_ids:
             continue
+        if output.id in state.materializations:
+            # A raw import is only a path until its import finishes; another
+            # task finishing meanwhile must not publish the raw source.
+            if require_all:
+                raise RuntimeError(
+                    f"Output {output.name!r} ({output.id}) was never imported."
+                )
+            continue
         if output.id not in state.scope:
             # ``require_all`` demands a produced value, but for a partial run an
             # output whose producing task was pruned away is not expected — only

@@ -35,6 +35,8 @@ class Commands:
         response = next(self.responses)
         if isinstance(response, BaseException):
             raise response
+        if isinstance(response, tuple):  # (returncode, stdout, stderr)
+            return subprocess.CompletedProcess(argv, *response)
         return subprocess.CompletedProcess(argv, 0, response, "")
 
 
@@ -305,19 +307,81 @@ def test_cancel_touches_only_recorded_jobs(tmp_path):
     assert states == {"a": "failed", "b": "succeeded", "c": "failed"}
 
 
-def test_a_rejected_submission_leaves_nothing_to_cancel(tmp_path):
+def test_a_job_whose_state_is_unknown_is_still_cancelled(tmp_path):
+    now = [0]
     commands = Commands(
         [
-            subprocess.CalledProcessError(1, "sbatch"),  # sbatch rejects the job
-            "",  # squeue --name finds nothing under the job's unique name
+            "123",  # sbatch
+            "",  # squeue: not queued
+            "",  # sacct: no record yet
+            "",  # squeue
+            "",  # sacct: still nothing after the accounting timeout
+            "",  # scancel: the job may still be alive, so it is cancelled
+            "",  # squeue
+            "123|CANCELLED|0:15",  # sacct confirms the cancellation
+        ]
+    )
+    backend, workspace = batch_backend(
+        tmp_path, commands, clock=lambda: now[0], accounting_timeout=5
+    )
+    handle, _ = submit(backend, workspace)
+    backend.wait([handle])
+    now[0] = 6
+    backend.wait([handle])
+    assert handle.state is JobState.FAILED
+    assert backend.cancel() == []
+    assert ["scancel", "123"] in commands.calls
+    (entry,) = json.loads(backend.registry.path.read_text())["attempts"].values()
+    assert entry["scheduler_state"] == "CANCELLED"
+
+
+def test_an_unconfirmed_submission_stays_uncertain_until_found(tmp_path):
+    commands = Commands(
+        [
+            subprocess.TimeoutExpired("sbatch", 30),  # the reply is lost
+            "",  # squeue --name: the job is not (yet) visible
         ]
     )
     backend, workspace = batch_backend(tmp_path, commands)
     with pytest.raises(RuntimeError, match="not retried"):
         submit(backend, workspace)
-    assert backend.cancel() == []
+    (error,) = backend.cancel()
+    assert "was not confirmed" in error
     (entry,) = json.loads(backend.registry.path.read_text())["attempts"].values()
-    assert entry["scheduler_state"] == "NOT_QUEUED" and entry["state"] == "failed"
+    assert entry["state"] == "unconfirmed"
+
+
+def test_a_rejected_submission_is_reported_plainly_and_leaves_nothing(tmp_path):
+    rejection = (
+        "sbatch: error: invalid partition specified: nope\n"
+        "sbatch: error: Batch job submission failed: Invalid partition name specified"
+    )
+    commands = Commands([(1, "", rejection)])
+    backend, workspace = batch_backend(tmp_path, commands)
+    with pytest.raises(RuntimeError, match="Slurm rejected") as raised:
+        submit(backend, workspace)
+    assert "Invalid partition name specified" in str(raised.value)
+    assert backend.cancel() == []
+    assert len(commands.calls) == 1
+    (entry,) = json.loads(backend.registry.path.read_text())["attempts"].values()
+    assert entry["state"] == "rejected"
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "sbatch: error: Batch job submission failed: Socket timed out on send/recv operation",
+        "sbatch: error: Batch job submission failed: Unable to contact slurm controller (connect failure)",
+        "sbatch: error: Batch job submission failed: Zero Bytes were transmitted or received",
+        "sbatch: error: Slurm temporarily unable to accept job, sleeping and retrying",
+    ],
+)
+def test_communication_failures_are_not_rejections(tmp_path, stderr):
+    backend, workspace = batch_backend(tmp_path, Commands([(1, "", stderr)]))
+    with pytest.raises(RuntimeError, match="not retried"):
+        submit(backend, workspace)
+    (entry,) = json.loads(backend.registry.path.read_text())["attempts"].values()
+    assert entry["state"] == "unconfirmed"
 
 
 def test_cleanup_reports_what_it_cannot_confirm(tmp_path):

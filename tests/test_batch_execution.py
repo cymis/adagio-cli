@@ -33,6 +33,7 @@ from adagio.model.pipeline import AdagioPipeline
 from adagio.monitor.api import Monitor
 
 PIPELINE = Path(__file__).parent / "fixtures/slurm-branch.adg"
+AST = {"type": "expression", "builtin": False, "name": "FeatureTable", "predicate": None, "fields": []}
 
 WORKER = """
 import json, sys
@@ -66,9 +67,12 @@ class HereScheduler:
     commands = ("sh",)
     scrubbed_environment = ()
 
-    def __init__(self):
+    def __init__(self, held_polls=0):
         self.scripts = {}
         self.resources = {}
+        # Keep raw-data import jobs running for this many polls, so other jobs
+        # finish while an import is still in flight.
+        self.held_polls = held_polls
 
     def submit_argv(self, *, script, job_name, cwd, log_path, resources):
         job_id = str(len(self.scripts) + 1)
@@ -82,7 +86,12 @@ class HereScheduler:
     def statuses(self, jobs, run):
         results = {}
         for job in jobs:
-            code = self.scripts[job.job_id].with_suffix(".exit").read_text()
+            script = self.scripts[job.job_id]
+            if self.held_polls and any(script.parent.glob("data-import-*_spec.json")):
+                self.held_polls -= 1
+                results[job] = SchedulerStatus(JobState.RUNNING, "RUNNING")
+                continue
+            code = script.with_suffix(".exit").read_text()
             results[job] = SchedulerStatus(
                 JobState.SUCCEEDED if code == "0" else JobState.FAILED,
                 "DONE",
@@ -213,3 +222,79 @@ def test_failed_job_stops_dependents_and_keeps_its_logs(tmp_path):
     (kept,) = runs
     registry = json.loads((kept / "submissions.json").read_text())
     assert {entry["node_id"] for entry in registry["attempts"].values()} <= {"A", "B", "C"}
+
+
+IMPORT_PIPELINE = {
+    "type": "pipeline",
+    "signature": {
+        "inputs": [
+            {"id": "raw", "name": "raw", "type": "FeatureTable[Frequency]", "ast": AST, "required": True},
+            {"id": "table", "name": "table", "type": "FeatureTable[Frequency]", "ast": AST, "required": True},
+        ],
+        "parameters": [],
+        "outputs": [
+            {"id": "imported", "name": "imported", "type": "FeatureTable[Frequency]", "ast": AST},
+            {"id": "B-out", "name": "b", "type": "FeatureTable[Frequency]", "ast": AST},
+        ],
+    },
+    "graph": [
+        {
+            "id": "Import",
+            "kind": "built-in",
+            "name": "data-import",
+            "inputs": {"source": {"kind": "archive", "id": "raw"}},
+            "parameters": {"semantic_type": {"kind": "literal", "value": "FeatureTable[Frequency]"}},
+            "outputs": {"artifact": {"kind": "archive", "id": "imported"}},
+        },
+        {
+            "id": "A",
+            "kind": "plugin-action",
+            "plugin": "feature_table",
+            "action": "rarefy",
+            "inputs": {"table": {"kind": "archive", "id": "imported"}},
+            "parameters": {},
+            "outputs": {"rarefied_table": {"kind": "archive", "id": "A-out"}},
+        },
+        {
+            "id": "B",
+            "kind": "plugin-action",
+            "plugin": "feature_table",
+            "action": "rarefy",
+            "inputs": {"table": {"kind": "archive", "id": "table"}},
+            "parameters": {},
+            "outputs": {"rarefied_table": {"kind": "archive", "id": "B-out"}},
+        },
+    ],
+}
+
+
+def test_a_raw_import_is_published_only_once_imported(tmp_path):
+    # B finishes while Import's job is still running: publishing outputs then
+    # must not copy the raw source in place of the imported artifact.
+    environment = tmp_path / "env"
+    environment.mkdir()
+    (tmp_path / "raw.biom").write_text("RAW_UNIMPORTED_INPUT")
+    (tmp_path / "table.qza").write_text("input")
+    backend = BatchBackend(
+        config=BatchExecutorConfig(work_dir=str(tmp_path / "shared"), max_in_flight=3),
+        scheduler=HereScheduler(held_polls=1),
+        sleep=lambda _: None,
+    )
+    executor = TaskEnvironmentExecutor(
+        environment_resolver=ConfigurableTaskEnvironmentResolver(
+            default_override=TaskEnvironmentOverride(kind="conda", reference=str(environment))
+        ),
+        launchers={"conda": WorkerLauncher()},
+        backend=backend,
+    )
+    executor.execute(
+        pipeline=AdagioPipeline.model_validate(IMPORT_PIPELINE),
+        arguments=AdagioArguments(
+            inputs={"raw": str(tmp_path / "raw.biom"), "table": str(tmp_path / "table.qza")},
+            parameters={},
+            outputs=str(tmp_path / "out"),
+        ),
+        monitor=Events(),
+    )
+    published = {path.name: path.read_text() for path in (tmp_path / "out").iterdir()}
+    assert published == {"imported": "result", "b": "result"}, published

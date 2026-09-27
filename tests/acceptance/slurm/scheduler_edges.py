@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 from adagio.execution.backends import clean_up_run, create_backend
 from adagio.execution.backends.base import JobState, TaskInvocation
+from adagio.execution.backends.batch import SchedulerStatus
 from adagio.execution.backends.slurm import SlurmExecutorConfig
 from adagio.execution.resources import TaskResourceRequirements
 from adagio.executors.base import TaskExecutionRequest
@@ -165,6 +166,28 @@ def case_cancel():
     report["cancel"] = {"job_id": handle.job_id, "entry": entry}
 
 
+def case_unknown_state_is_still_cancelled():
+    """A job the scheduler stops accounting for fails its task but is cancelled."""
+    b = backend("unknown")
+    b._accounting_timeout = 0
+    real_statuses = b.scheduler.statuses
+    blind = [True]
+    b.scheduler.statuses = lambda jobs, run: (
+        {job: SchedulerStatus(None, "accounting unavailable") for job in jobs}
+        if blind[0]
+        else real_statuses(jobs, run)
+    )
+    workspace = b.workspace().__enter__()
+    handle = submit(b, workspace, "lost", sleep=300)
+    b.wait([handle])
+    assert handle.state is JobState.FAILED, handle
+    blind[0] = False
+    assert b.cancel() == []
+    (entry,) = json.loads(b.registry.path.read_text())["attempts"].values()
+    assert entry["scheduler_state"] == "CANCELLED", entry
+    report["unknown_state"] = {"job_id": handle.job_id, "entry": entry["scheduler_state"]}
+
+
 def case_cleanup_after_kill():
     """A killed driver leaves jobs; `adagio cleanup` cancels exactly those."""
     record = root / "killed-run-record.json"
@@ -218,6 +241,7 @@ if __name__ == "__main__":
     case_results()
     case_rejected()
     case_cancel()
+    case_unknown_state_is_still_cancelled()
     case_cleanup_after_kill()
     (root / "report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))

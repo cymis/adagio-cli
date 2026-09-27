@@ -88,6 +88,10 @@ class SchedulerStatus:
 class SchedulerCommandError(RuntimeError):
     """A scheduler command exited unsuccessfully."""
 
+    def __init__(self, message: str, *, stderr: str = "") -> None:
+        super().__init__(message)
+        self.stderr = stderr
+
 
 CommandRunner = Callable[[list[str]], str]
 
@@ -111,6 +115,10 @@ class Scheduler(Protocol):
     ) -> list[str]: ...
 
     def parse_submission(self, output: str) -> JobRef: ...
+
+    def rejected(self, error: SchedulerCommandError) -> bool:
+        """Whether a failed submission was refused outright, so no job exists."""
+        ...
 
     def statuses(
         self, jobs: Sequence[JobRef], run: CommandRunner
@@ -150,7 +158,8 @@ def make_command_runner(
         )
         if result.returncode:
             raise SchedulerCommandError(
-                f"{argv[0]} failed ({result.returncode}): {result.stderr.strip()}"
+                f"{argv[0]} failed ({result.returncode}): {result.stderr.strip()}",
+                stderr=result.stderr,
             )
         return result.stdout.strip()
 
@@ -291,6 +300,15 @@ class BatchBackend:
             job = self.scheduler.parse_submission(self._run(argv))
         except BaseException as error:
             self._stopped = True
+            if isinstance(error, SchedulerCommandError) and self.scheduler.rejected(
+                error
+            ):
+                reason = error.stderr.strip()
+                registry.record_rejected(prepared.attempt_id, reason)
+                raise RuntimeError(
+                    f"{name} rejected the job for task "
+                    f"{invocation.task_id or invocation.request.task.id!r}: {reason}"
+                ) from error
             registry.record_unconfirmed(
                 prepared.attempt_id, str(error) or type(error).__name__
             )
@@ -332,13 +350,17 @@ class BatchBackend:
                     handle.unknown_since = now
                 if now - handle.unknown_since < self._accounting_timeout:
                     continue
-                # Disappearance is never success: a job the scheduler can no
-                # longer account for fails, and its registry entry says why.
-                status = SchedulerStatus(
-                    JobState.FAILED,
+                # Disappearance is never success: the task fails. The job may
+                # still be running, so its registry entry stays outstanding
+                # and cancellation and cleanup still try to stop it.
+                handle.state = JobState.FAILED
+                handle.detail = (
                     f"state is unknown: {status.detail}. Disappearance is not "
-                    f"success. Registry: {self.registry.path}",
+                    f"success. Registry: {self.registry.path}"
                 )
+                self.registry.record_unknown(handle.attempt_id, status.detail)
+                changed = True
+                continue
             handle.unknown_since = None
             current = (status.state, status.detail, status.exit_code)
             if current != (handle.state, handle.detail, handle.exit_code):
@@ -406,13 +428,12 @@ def cancel_outstanding(
             errors.append(f"Could not look up {entry['job_name']}: {error}")
             continue
         if not found:
-            # Nothing is queued under this run-unique name: the scheduler
-            # rejected the submission or already finished the job.
-            registry.record_status(
-                attempt_id,
-                state=JobState.FAILED,
-                scheduler_state="NOT_QUEUED",
-                exit_code=None,
+            # A lost reply may still become a job; only the scheduler's own
+            # refusal (recorded at submission) proves that none exists.
+            errors.append(
+                f"Submission of {entry['job_name']} was not confirmed and no job "
+                "with that name is queued yet; check the scheduler before "
+                f"discarding {registry.path}."
             )
         for job in found:
             registry.record_found(attempt_id, job_id=job.job_id)

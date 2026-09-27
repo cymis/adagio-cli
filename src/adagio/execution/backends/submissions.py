@@ -20,6 +20,10 @@ REGISTRY_VERSION = 1
 SUBMITTING = "submitting"
 #: The scheduler's reply never confirmed the job; it is never retried.
 UNCONFIRMED = "unconfirmed"
+#: The scheduler explicitly refused the submission, so no job exists.
+REJECTED = "rejected"
+#: The scheduler stopped accounting for the job; it may still be running.
+UNKNOWN = "unknown"
 
 
 class SubmissionRegistry:
@@ -82,6 +86,16 @@ class SubmissionRegistry:
         self._data["attempts"][attempt_id].update(state=UNCONFIRMED, error=error)
         self.save()
 
+    def record_rejected(self, attempt_id: str, error: str) -> None:
+        self._data["attempts"][attempt_id].update(state=REJECTED, error=error)
+        self.save()
+
+    def record_unknown(self, attempt_id: str, reason: str) -> None:
+        """Keep a job the scheduler lost track of outstanding, so it is cancelled."""
+        self._data["attempts"][attempt_id].update(
+            state=UNKNOWN, scheduler_state="UNKNOWN", error=reason
+        )
+
     def record_status(
         self,
         attempt_id: str,
@@ -100,15 +114,9 @@ class SubmissionRegistry:
 
     def outstanding(self) -> list[tuple[str, dict[str, Any]]]:
         """Attempts that may still hold scheduler resources."""
-        finished = {JobState.SUCCEEDED.value, JobState.FAILED.value}
+        finished = {JobState.SUCCEEDED.value, JobState.FAILED.value, REJECTED}
         return [
             (attempt_id, dict(entry))
             for attempt_id, entry in self._data["attempts"].items()
             if entry.get("state") not in finished
         ]
-
-    def attempt_for_job(self, job_id: str, cluster: str | None) -> str | None:
-        for attempt_id, entry in self._data["attempts"].items():
-            if entry.get("job_id") == job_id and entry.get("cluster") == cluster:
-                return attempt_id
-        return None

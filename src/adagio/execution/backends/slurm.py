@@ -114,6 +114,20 @@ _FINISHED = frozenset(
     }
 )
 _EXIT_CODE = re.compile(r"\d+:\d+")
+# sbatch reports the controller's refusal as "Batch job submission failed:
+# <reason>". Communication failures use the same prefix but leave it unknown
+# whether the controller created the job, so they never count as a refusal.
+_SUBMISSION_REFUSED = "batch job submission failed:"
+_UNCERTAIN_SUBMISSION = (
+    "timed out",
+    "unable to contact",
+    "zero bytes",
+    "communication",
+    "connection",
+    "temporarily",
+    "standby",
+    "retry",
+)
 _JOB_NAME = re.compile(r"adagio-[0-9a-f]{32}")
 
 
@@ -175,6 +189,12 @@ class SlurmScheduler:
                 f"Invalid sbatch --parsable response: {output!r}."
             )
         return JobRef(match.group(1), match.group(2))
+
+    def rejected(self, error: SchedulerCommandError) -> bool:
+        text = error.stderr.lower()
+        return _SUBMISSION_REFUSED in text and not any(
+            phrase in text for phrase in _UNCERTAIN_SUBMISSION
+        )
 
     def statuses(
         self, jobs: Sequence[JobRef], run: CommandRunner
