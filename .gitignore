@@ -31,3 +31,7 @@ Thumbs.db
 .mypy_cache/
 .uv-cache/
 runinfo/
+
+# Disposable scheduler acceptance artifacts (reports record selected evidence)
+/acceptance-output/
+/slurm-*.out

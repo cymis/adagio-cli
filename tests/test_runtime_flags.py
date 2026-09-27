@@ -165,6 +165,13 @@ class RuntimeFlagsTests(unittest.TestCase):
         # Default recycle pool unchanged.
         self.assertEqual(call["cache_config"].recycle_pool, "adagio-recycle")
 
+    def test_exit_with_stdin_watches_stdin_before_running(self) -> None:
+        with patch.object(runtime_cli, "_terminate_when_stdin_closes") as watch:
+            self._run([], {"version": 1})
+            watch.assert_not_called()
+            self._run(["--exit-with-stdin"], {"version": 1})
+            watch.assert_called_once_with()
+
 
 class ReproducibilityTests(unittest.TestCase):
     def test_reproducibility_has_adagio_version_and_no_qiime(self) -> None:

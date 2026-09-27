@@ -292,6 +292,7 @@ def build_dynamic_run(
         "--recycle-pool",
         "--log-dir",
         "--targets",
+        "--plan-only",
     }
     argument_inputs = argument_inputs or {}
     argument_params = argument_params or {}
@@ -392,6 +393,14 @@ def build_dynamic_run(
             ),
         ),
     ]
+    annotations["plan_only"] = Annotated[
+        bool,
+        CliParameter(
+            name=("--plan-only",),
+            group=command_group,
+            help="Validate the run and print its plan as JSON without executing tasks.",
+        ),
+    ]
 
     parameters: list[inspect.Parameter] = [
         inspect.Parameter(
@@ -451,6 +460,12 @@ def build_dynamic_run(
             kind=inspect.Parameter.KEYWORD_ONLY,
             default=None,
             annotation=annotations["targets"],
+        ),
+        inspect.Parameter(
+            name="plan_only",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default=False,
+            annotation=annotations["plan_only"],
         ),
     ]
 
@@ -622,6 +637,7 @@ def build_dynamic_run(
         recycle_pool: str | None = None,
         log_dir: Path | None = None,
         targets: str | None = None,
+        plan_only: bool = False,
         **kwargs: Any,
     ) -> None:
         _ = show_params
@@ -629,6 +645,7 @@ def build_dynamic_run(
         kwargs["recycle_pool"] = recycle_pool
         kwargs["log_dir"] = log_dir
         kwargs["targets"] = targets
+        kwargs["plan_only"] = plan_only
         run_handler(
             pipeline,
             arguments_file,

@@ -34,6 +34,18 @@ console = Console()
 def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
 
+    if argv and argv[0] == "capabilities":
+        from .host import run_capabilities
+
+        run_capabilities(argv[1:])
+        return
+
+    if argv and argv[0] == "cleanup":
+        from .host import run_cleanup
+
+        run_cleanup(argv[1:])
+        return
+
     if argv and argv[0] == "exec-task":
         from .task_exec import run_task_exec
 
@@ -90,6 +102,18 @@ def main(argv: list[str] | None = None) -> None:
     def runtime() -> None:
         """Execute a pipeline from spec/config/arguments files."""
         console.print(CycloptsPanel("Try: adagio runtime --help"))
+        sys.exit(1)
+
+    @app.command
+    def capabilities() -> None:
+        """Report the executors this host can use, as JSON."""
+        console.print(CycloptsPanel("Try: adagio capabilities --help"))
+        sys.exit(1)
+
+    @app.command
+    def cleanup() -> None:
+        """Cancel scheduler jobs an interrupted run left behind."""
+        console.print(CycloptsPanel("Try: adagio cleanup --help"))
         sys.exit(1)
 
     @app.command

@@ -1,17 +1,21 @@
-import inspect
 import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 
+from adagio.execution.backends.base import Backend, TaskInvocation
+from adagio.execution.backends.local import LocalBackend, launch
+from adagio.execution.resources import ConfiguredResourcePolicy, ResourcePolicy
 from adagio.model.arguments import AdagioArguments
 from adagio.model.task import (
     ConvertToMetadataTask,
     DataImportTask,
     PluginActionTask,
     RootInputTask,
+    input_source_ids,
 )
 from adagio.monitor.api import Monitor
 
@@ -23,9 +27,15 @@ from .base import (
     TaskExecutionRequest,
 )
 from .cache_support import ExecutionCacheConfig
-from .common import prune_to_targets, task_label
+from .common import task_label
 from .path_utils import resolve_output_destination
-from .serial_runner import SerialExecutionState, TaskOutcome, run_serial_pipeline
+from .serial_runner import (
+    PipelinePlan,
+    SerialExecutionState,
+    TaskOutcome,
+    plan_pipeline,
+    run_serial_pipeline,
+)
 from .signature import compute_input_signature, environment_reference
 from .task_contract import (
     DATA_IMPORT_PLUGIN,
@@ -42,9 +52,58 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         *,
         environment_resolver: TaskEnvironmentResolver,
         launchers: dict[str, TaskEnvironmentLauncher],
+        backend: Backend | None = None,
+        resources: ResourcePolicy | None = None,
     ) -> None:
         self._environment_resolver = environment_resolver
         self._launchers = dict(launchers)
+        self._backend = backend if backend is not None else LocalBackend()
+        self._resources = (
+            resources if resources is not None else ConfiguredResourcePolicy()
+        )
+
+    def plan(
+        self,
+        *,
+        pipeline,
+        arguments: AdagioArguments,
+        target_ids: set[str] | None = None,
+    ) -> PipelinePlan:
+        """Plan a run and check every task it will execute can run on this backend."""
+        plan = plan_pipeline(pipeline=pipeline, arguments=arguments, target_ids=target_ids)
+        self._validate_closure_environments(tasks=plan.tasks)
+        return plan
+
+    def describe_plan(self, plan: PipelinePlan) -> dict[str, Any]:
+        """The ``--plan-only`` report: executor settings and each planned task."""
+        tasks = []
+        for task in plan.tasks:
+            environment = (
+                self._environment_resolver.resolve(task=task)
+                if isinstance(task, PluginActionTask)
+                else None
+            )
+            tasks.append(
+                {
+                    "node_id": task.id,
+                    "kind": task.kind,
+                    "inputs": [
+                        source_id
+                        for src in task.inputs.values()
+                        for source_id in input_source_ids(src)
+                    ],
+                    "outputs": {name: out.id for name, out in task.outputs.items()},
+                    "environment": (
+                        {"kind": environment.kind, "reference": environment.reference}
+                        if environment is not None
+                        else None
+                    ),
+                    "resources": self._resources.for_task(task).model_dump(
+                        exclude_none=True
+                    ),
+                }
+            )
+        return {"executor": self._backend.describe(), "tasks": tasks}
 
     def execute(
         self,
@@ -57,16 +116,19 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         target_ids: set[str] | None = None,
         log_dir: str | None = None,
     ) -> None:
-        self._validate_closure_environments(pipeline=pipeline, target_ids=target_ids)
+        plan = self.plan(pipeline=pipeline, arguments=arguments, target_ids=target_ids)
+        self._backend.check_available()
         consumer_tasks = _build_consumer_tasks(pipeline)
         metadata_source_ids = _build_metadata_source_ids(pipeline)
 
         def resolve_task(task, state, console):  # noqa: ANN001
-            return self._resolve_task(
+            return self._resolve_task_steps(
                 task,
                 state,
                 console,
                 metadata_source_ids=metadata_source_ids,
+                pipeline_outputs=pipeline.signature.outputs,
+                consumer_tasks=consumer_tasks,
             )
 
         def finish_outputs(
@@ -77,12 +139,6 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             monitor: Monitor | None,
             require_all: bool = True,
         ) -> None:
-            self._materialize_pending_outputs(
-                sig=sig,
-                state=state,
-                console=console,
-                consumer_tasks=consumer_tasks,
-            )
             _save_outputs(
                 sig=sig,
                 arguments=arguments,
@@ -101,36 +157,31 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             cache_config=cache_config,
             target_ids=target_ids,
             log_dir=log_dir,
+            plan=plan,
+            backend=self._backend,
+            resources=self._resources,
         )
 
-    def _validate_closure_environments(
-        self,
-        *,
-        pipeline,
-        target_ids: set[str] | None,
-    ) -> None:
+    def _validate_closure_environments(self, *, tasks: list[Any]) -> None:
         """Resolve the environment of every action that will run, before launching.
 
-        Scoped to the same closure the runner executes (``prune_to_targets``), so
-        a selected-node run is never failed by a node it will not run. A full run
-        keeps the fail-fast it has always had: every unconfigured action is
-        reported here rather than after hours of upstream work.
+        Scoped to the planned closure, so a selected-node run is never failed by
+        a node it will not run. A full run keeps the fail-fast it has always had:
+        every unconfigured or unplaceable action is reported here rather than
+        after hours of upstream work.
 
         Resolution is expected to be pure and cheap, so the executed tasks
         resolve again at launch rather than threading a cache through the run.
         """
-        tasks = list(pipeline.iter_tasks())
-        if target_ids:
-            tasks = prune_to_targets(
-                execution_plan=tasks, target_ids=set(target_ids)
-            )
-
         failures: list[str] = []
         for task in tasks:
             if not isinstance(task, PluginActionTask):
                 continue
             try:
-                self._environment_resolver.resolve(task=task)
+                environment = self._environment_resolver.resolve(task=task)
+                reason = self._backend.unsupported_reason(environment)
+                if reason is not None:
+                    raise ValueError(reason)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"  - {task_label(task)}: {exc}")
 
@@ -140,28 +191,6 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                 "execution environment:\n" + "\n".join(failures)
             )
 
-    def _materialize_pending_outputs(
-        self,
-        *,
-        sig,
-        state: SerialExecutionState,
-        console: Console | None,
-        consumer_tasks: dict[str, list[PluginActionTask]],
-    ) -> None:
-        for output in sig.outputs:
-            if output.id in state.saved_output_ids:
-                continue
-            if output.id not in state.materializations:
-                continue
-            if output.id not in state.scope:
-                continue
-            self._materialize_output(
-                output=output,
-                state=state,
-                console=console,
-                consumer_tasks=consumer_tasks,
-            )
-
     def _materialize_output(
         self,
         *,
@@ -169,7 +198,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         state: SerialExecutionState,
         console: Console | None,
         consumer_tasks: dict[str, list[PluginActionTask]],
-    ) -> None:
+    ):
         environment = self._resolve_materialization_environment(
             output=output,
             consumer_tasks=consumer_tasks,
@@ -201,7 +230,8 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             cache_path=None,
             recycle_pool=None,
         )
-        result = launcher.launch(
+        result = yield TaskInvocation(
+            launcher=launcher,
             environment=environment,
             request=request,
             console=console,
@@ -217,6 +247,14 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         # real .qza and any downstream consumers load it directly.
         state.scope[output.id] = artifact_path
         del state.materializations[output.id]
+        return TaskOutcome(
+            reused=result.reused,
+            enrichment={
+                "command": result.command,
+                "exit_code": result.exit_code,
+                "log_path": result.log_path,
+            },
+        )
 
     def _resolve_materialization_environment(
         self,
@@ -244,9 +282,14 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         failures: list[str] = []
         for consumer in candidates:
             try:
-                return self._environment_resolver.resolve(task=consumer)
+                environment = self._environment_resolver.resolve(task=consumer)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"{task_label(consumer)}: {exc}")
+                continue
+            reason = self._backend.unsupported_reason(environment)
+            if reason is None:
+                return environment
+            failures.append(f"{task_label(consumer)}: {reason}")
 
         raise RuntimeError(
             f"Cannot write data-import output {output.name!r} ({output.id}): "
@@ -256,14 +299,33 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             + "; ".join(failures)
         )
 
-    def _resolve_task(
+    def _resolve_task(self, task, state: SerialExecutionState, console, **kwargs):
+        """Perform one task on this host, launching whatever it needs in turn."""
+        steps = self._resolve_task_steps(task, state, console, **kwargs)
+        result = None
+        while True:
+            try:
+                invocation = steps.send(result)
+            except StopIteration as done:
+                return done.value
+            result = launch(invocation)
+
+    def _resolve_task_steps(
         self,
         task,
         state: SerialExecutionState,
         console: Console | None,
         *,
         metadata_source_ids: set[str] | None = None,
-    ) -> "bool | TaskOutcome":
+        pipeline_outputs: list[Any] | None = None,
+        consumer_tasks: dict[str, list[PluginActionTask]] | None = None,
+    ):
+        """Perform one task, yielding each invocation it needs to have run.
+
+        A generator: the caller runs each yielded ``TaskInvocation`` wherever its
+        backend places it and sends back the result; the return value is the
+        task's outcome (``bool`` reused, or a ``TaskOutcome``).
+        """
         if isinstance(task, RootInputTask):
             for name, src in task.inputs.items():
                 dst = task.outputs[name]
@@ -287,14 +349,28 @@ class TaskEnvironmentExecutor(PipelineExecutor):
 
         if isinstance(task, DataImportTask):
             self._resolve_data_import(task=task, state=state)
-            return False
+            outcome = False
+            produced = {output.id for output in task.outputs.values()}
+            for output in pipeline_outputs or ():
+                # A raw import exposed as a pipeline output is written as a real
+                # artifact, imported in a consuming action's environment.
+                if output.id in produced and output.id in state.materializations:
+                    outcome = yield from self._materialize_output(
+                        output=output,
+                        state=state,
+                        console=console,
+                        consumer_tasks=consumer_tasks or {},
+                    )
+            return outcome
 
         if isinstance(task, PluginActionTask):
-            return self._execute_plugin_action(
-                task=task,
-                state=state,
-                console=console,
-                metadata_source_ids=metadata_source_ids or set(),
+            return (
+                yield from self._execute_plugin_action(
+                    task=task,
+                    state=state,
+                    console=console,
+                    metadata_source_ids=metadata_source_ids or set(),
+                )
             )
 
         raise TypeError(f"Unsupported task type: {type(task)}")
@@ -366,7 +442,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         state: SerialExecutionState,
         console: Console | None,
         metadata_source_ids: set[str],
-    ) -> TaskOutcome:
+    ):
         environment = self._environment_resolver.resolve(task=task)
         launcher = self._launchers.get(environment.kind)
         if launcher is None:
@@ -495,8 +571,8 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         except Exception:  # noqa: BLE001
             input_signature = None
 
-        result = _launch(
-            launcher,
+        result = yield TaskInvocation(
+            launcher=launcher,
             environment=environment,
             request=request,
             console=console,
@@ -592,28 +668,6 @@ def _build_metadata_source_ids(pipeline) -> set[str]:  # noqa: ANN001
     return source_ids
 
 
-def _launch(launcher, **kwargs):  # noqa: ANN001, ANN003
-    """Call ``launcher.launch`` passing only the kwargs it accepts.
-
-    The launcher protocol gained optional ``monitor`` / ``task_id`` parameters
-    for fine-phase telemetry. Third-party launchers (and test doubles) written
-    against the older signature do not accept them; filter to the callable's
-    real parameters so those keep working unchanged.
-    """
-    try:
-        signature = inspect.signature(launcher.launch)
-    except (TypeError, ValueError):
-        return launcher.launch(**kwargs)
-    params = signature.parameters
-    accepts_var_kw = any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
-    )
-    if accepts_var_kw:
-        return launcher.launch(**kwargs)
-    accepted = {name: value for name, value in kwargs.items() if name in params}
-    return launcher.launch(**accepted)
-
-
 @dataclass(frozen=True)
 class _ImportMaterializeTask:
     """Synthetic task for materializing a raw data-import artifact as an output.
@@ -693,6 +747,14 @@ def _save_outputs(
 
     for output in sig.outputs:
         if output.id in state.saved_output_ids:
+            continue
+        if output.id in state.materializations:
+            # A raw import is only a path until its import finishes; another
+            # task finishing meanwhile must not publish the raw source.
+            if require_all:
+                raise RuntimeError(
+                    f"Output {output.name!r} ({output.id}) was never imported."
+                )
             continue
         if output.id not in state.scope:
             # ``require_all`` demands a produced value, but for a partial run an

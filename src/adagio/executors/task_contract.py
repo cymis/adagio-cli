@@ -1,4 +1,6 @@
 import json
+import os
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable
@@ -91,11 +93,13 @@ def build_result_manifest(
     outputs: Mapping[str, str],
     reused: bool,
     metadata_outputs: Mapping[str, str] | None = None,
+    attempt_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         "outputs": dict(outputs),
         "metadata_outputs": dict(metadata_outputs or {}),
         "reused": reused,
+        **({"attempt_id": attempt_id} if attempt_id else {}),
     }
 
 
@@ -122,4 +126,14 @@ def read_json_file(path: Path) -> dict[str, Any]:
 
 
 def write_json_file(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+    # Replace atomically: a concurrent reader, or a crash mid-write, never sees
+    # partial JSON. Created like any other file, so the umask still applies.
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(temporary, "x", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)

@@ -4,11 +4,8 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from adagio.cli.config import (
-    EnvironmentOverride,
-    TaskResourceRequirements,
-    load_run_config,
-)
+from adagio.cli.config import EnvironmentOverride, load_run_config
+from adagio.execution.resources import TaskResourceRequirements
 from adagio.executors.base import TaskEnvironmentOverride
 from adagio.executors.defaults import ConfigurableTaskEnvironmentResolver
 from adagio.model.task import PluginActionTask

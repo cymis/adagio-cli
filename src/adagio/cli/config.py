@@ -1,11 +1,11 @@
 import json
-import re
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ..execution.backends import ExecutorConfig, LocalExecutorConfig, create_backend
+from ..execution.resources import ConfiguredResourcePolicy, ResourceRequirementsConfig
 from ..executors.base import TaskEnvironmentOverride
 
 try:
@@ -76,59 +76,31 @@ class EnvironmentOverride(BaseModel):
         )
 
 
-_MEMORY_REQUEST_PATTERN = re.compile(
-    r"^(?P<amount>(?:\d+(?:\.\d+)?|\.\d+))\s*"
-    r"(?:B|KB|MB|GB|TB|PB|KiB|MiB|GiB|TiB|PiB)$",
-    re.IGNORECASE,
-)
-
-
-class TaskResourceRequirements(BaseModel):
-    """Requested shape for one task execution.
-
-    These values are parsed and retained for forward compatibility. The serial
-    executor intentionally does not apply them yet.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    cpus: int | None = Field(default=None, ge=1, strict=True)
-    memory: str | None = None
-
-    @field_validator("memory")
-    @classmethod
-    def _validate_memory(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip()
-        match = _MEMORY_REQUEST_PATTERN.fullmatch(normalized)
-        if match is None:
-            raise ValueError(
-                'Memory must be a positive, unit-bearing quantity such as "8 GiB".'
-            )
-        try:
-            amount = Decimal(match.group("amount"))
-        except InvalidOperation as err:  # pragma: no cover - guarded by regex
-            raise ValueError("Memory amount is invalid.") from err
-        if amount <= 0:
-            raise ValueError("Memory must be greater than zero.")
-        return normalized
-
-
-class ResourceRequirementsConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    tasks: dict[str, TaskResourceRequirements] = Field(default_factory=dict)
+#: The ``version`` of the run configuration this CLI reads.
+RUN_CONFIG_VERSION = 1
 
 
 class AdagioRunConfig(BaseModel):
-    version: int = 1
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = RUN_CONFIG_VERSION
+    executor: ExecutorConfig = Field(default_factory=LocalExecutorConfig)
     defaults: EnvironmentOverride = Field(default_factory=EnvironmentOverride)
     plugins: dict[str, EnvironmentOverride] = Field(default_factory=dict)
     tasks: dict[str, EnvironmentOverride] = Field(default_factory=dict)
     resources: ResourceRequirementsConfig = Field(
         default_factory=ResourceRequirementsConfig
     )
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def _supported_version(cls, value: Any) -> Any:
+        if type(value) is not int or value != RUN_CONFIG_VERSION:
+            raise ValueError(
+                "Unsupported run configuration version; "
+                f"expected {RUN_CONFIG_VERSION}."
+            )
+        return value
 
 
 def load_run_config(path: Path | None) -> AdagioRunConfig | None:
@@ -181,3 +153,23 @@ def named_environment_overrides(
         if (override := raw_override.to_task_environment_override()) is not None
     }
     return resolved or None
+
+
+def build_executor(
+    run_config: AdagioRunConfig | None, *, run_record: Path | None = None
+):
+    """The pipeline executor a run configuration describes.
+
+    ``run_record`` names the file a batch backend writes so that a supervisor
+    can clean up after this run (``adagio cleanup``).
+    """
+    from ..executors import select_default_executor
+
+    run_config = run_config or AdagioRunConfig()
+    return select_default_executor(
+        default_override=default_environment_override(run_config),
+        plugin_overrides=named_environment_overrides(run_config.plugins),
+        task_overrides=named_environment_overrides(run_config.tasks),
+        backend=create_backend(run_config.executor, run_record=run_record),
+        resources=ConfiguredResourcePolicy(run_config.resources),
+    )

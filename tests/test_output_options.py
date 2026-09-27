@@ -154,6 +154,7 @@ class OutputOptionTests(unittest.TestCase):
         self.assertEqual(
             list(dynamic_run.__signature__.parameters)[10:],
             [
+                "plan_only",
                 "input_seqs",
                 "param_metric",
                 "input_tree",

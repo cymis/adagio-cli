@@ -152,6 +152,7 @@ def _run_task(spec: dict[str, Any]) -> None:
                 outputs=saved_outputs,
                 metadata_outputs=saved_metadata_outputs,
                 reused=reused,
+                attempt_id=spec.get("attempt_id"),
             ),
         )
 
@@ -191,7 +192,11 @@ def _run_data_import(spec: dict[str, Any]) -> None:
     if result_manifest:
         write_json_file(
             Path(result_manifest),
-            build_result_manifest(outputs={output_name: saved}, reused=False),
+            build_result_manifest(
+                outputs={output_name: saved},
+                reused=False,
+                attempt_id=spec.get("attempt_id"),
+            ),
         )
 
 

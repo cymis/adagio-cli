@@ -22,6 +22,7 @@ from .container_support import (
     record_container_output,
     signal_task_running,
 )
+from .prepared import PreparedInvocation
 from .task_contract import (
     build_task_spec,
     container_log_path,
@@ -36,17 +37,19 @@ from .task_contract import (
 class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
     kind = "conda"
 
-    def launch(
+    def prepare(
         self,
         *,
         environment: TaskEnvironmentSpec,
         request: TaskExecutionRequest,
-        console: Console | None = None,
-        monitor: Monitor | None = None,
-        task_id: str | None = None,
-    ) -> TaskExecutionResult:
+        shared: bool = False,
+    ) -> PreparedInvocation:
+        """Write the task spec and build the command, without running it.
+
+        ``shared`` stages the Adagio package into the work directory so the
+        command also runs on a host that cannot see this installation.
+        """
         task = request.task
-        event_task_id = task_id if task_id is not None else task.id
         manifest_path = result_manifest_path(
             task_id=task.id, work_path=request.work_path
         )
@@ -77,7 +80,9 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         reference = _conda_prefix(environment=environment)
         conda_executable = _resolve_conda_executable(options=options, prefix=reference)
         python_executable = _conda_python_executable(reference=reference)
-        python_root = container_python_root(work_path=request.work_path)
+        python_root = container_python_root(
+            work_path=request.work_path, force_stage=shared
+        )
         # Keep Conda in the launch path even though the interpreter is invoked
         # explicitly. Packages such as OpenJDK rely on activate.d hooks to
         # configure their runtime. ``--no-capture-output`` keeps conda's
@@ -94,6 +99,32 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             "--task",
             str(spec_path),
         ]
+        return PreparedInvocation(
+            command=command,
+            env=_subprocess_env(python_root=python_root),
+            cwd=request.cwd,
+            spec_path=spec_path,
+            manifest_path=manifest_path,
+            log_path=container_log_path(task_id=task.id, work_path=request.work_path),
+            request=request,
+            image_ref=reference,
+        )
+
+    def launch(
+        self,
+        *,
+        environment: TaskEnvironmentSpec,
+        request: TaskExecutionRequest,
+        console: Console | None = None,
+        monitor: Monitor | None = None,
+        task_id: str | None = None,
+    ) -> TaskExecutionResult:
+        prepared = self.prepare(environment=environment, request=request)
+        task = request.task
+        event_task_id = task_id if task_id is not None else task.id
+        command = prepared.command
+        manifest_path = prepared.manifest_path
+        reference = prepared.image_ref
         label = f"conda run -p {reference}"
 
         if console is not None:
@@ -111,7 +142,7 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 command,
                 check=False,
                 cwd=request.cwd,
-                env=_subprocess_env(python_root=python_root),
+                env=prepared.env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

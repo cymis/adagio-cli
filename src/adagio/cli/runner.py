@@ -10,11 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from .config import (
-    default_environment_override,
-    load_run_config,
-    named_environment_overrides,
-)
+from .config import build_executor, load_run_config
 from .pipeline_sources import (
     PipelineResolution,
     PipelineResolutionError,
@@ -67,6 +63,7 @@ def run_pipeline_from_kwargs(
     recycle_pool = kwargs.pop("recycle_pool", None)
     log_dir = kwargs.pop("log_dir", None)
     targets_raw = kwargs.pop("targets", None)
+    plan_only = bool(kwargs.pop("plan_only", False))
 
     with ExitStack() as exit_stack:
         try:
@@ -180,6 +177,20 @@ def run_pipeline_from_kwargs(
         cwd=Path.cwd().resolve(),
     )
 
+    executor = build_executor(run_config)
+    target_ids: set[str] | None = None
+    if targets_raw:
+        target_ids = {
+            part.strip() for part in str(targets_raw).split(",") if part.strip()
+        } or None
+
+    if plan_only:
+        plan = executor.plan(
+            pipeline=parsed_pipeline, arguments=arguments, target_ids=target_ids
+        )
+        console.print_json(data=executor.describe_plan(plan))
+        return
+
     suppress_header = _is_truthy(os.getenv("ADAGIO_SUPPRESS_RUN_HEADER"))
     if not suppress_header:
         console.print(f"[bold]Pipeline:[/bold] {pipeline}")
@@ -194,27 +205,7 @@ def run_pipeline_from_kwargs(
 
     if not suppress_header:
         console.print(f"[bold]Cache:[/bold] {describe_cache_config(cache_config)}")
-
-    from ..executors import select_default_executor
-
-    executor = select_default_executor(
-        default_override=default_environment_override(run_config),
-        plugin_overrides=named_environment_overrides(
-            run_config.plugins if run_config is not None else {}
-        ),
-        task_overrides=named_environment_overrides(
-            run_config.tasks if run_config is not None else {}
-        ),
-    )
-
-    if not suppress_header:
         console.print(f"[bold]Executing pipeline[/bold] ({executor.mode_label})")
-
-    target_ids: set[str] | None = None
-    if targets_raw:
-        target_ids = {
-            part.strip() for part in str(targets_raw).split(",") if part.strip()
-        } or None
 
     executor.execute(
         pipeline=parsed_pipeline,
