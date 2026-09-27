@@ -329,14 +329,20 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
 
 
 def _kill_container(name: str) -> None:
-    """Stop a task's container after its run was interrupted; best effort."""
+    """Stop and remove a task's container after its run was interrupted.
+
+    Best effort. ``rm -f`` also removes a container that was created but never
+    started. It runs in its own session, so a further signal to the run's
+    process group cannot cut it short.
+    """
     try:
         subprocess.run(
-            ["docker", "kill", name],
+            ["docker", "rm", "-f", name],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=30,
+            start_new_session=True,
         )
     except (OSError, subprocess.SubprocessError):
         pass

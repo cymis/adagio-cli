@@ -325,10 +325,13 @@ def test_workspace_is_kept_after_failure_and_removed_after_success(tmp_path):
             # The run's own process owns it: cleanup must not act meanwhile.
             with pytest.raises(RunOwned):
                 clean_up_run(record)
-            raise RuntimeError("task failed")
+            backend.registry.record_intent("a", job_name=A)
+            backend.registry.record_submitted("a", job_id="123", cluster=None)
+            raise RuntimeError("killed before cancelling job 123")
     assert failed.root.is_dir() and record.exists() and lock.exists()
-    # Once the owner is gone, cleanup owns the run; nothing was submitted.
-    assert clean_up_run(record) == []
+    # Once the owner is gone, cleanup owns the run and settles job 123.
+    commands = Commands(["", "", "123|CANCELLED|0:15"])  # scancel, squeue, sacct
+    assert clean_up_run(record, command_runner=commands) == []
     assert not record.exists() and not lock.exists()
 
     with backend.workspace() as succeeded:
@@ -374,6 +377,7 @@ def test_cancel_touches_only_recorded_jobs_by_name(tmp_path):
         [
             "",  # scancel a
             "",  # scancel c, whose reply was lost: by name alone
+            "",  # scontrol show config: how long a lost reply can take
             f"123|{A}|CANCELLED\n456|{C}|CANCELLED",  # squeue
             "123|CANCELLED|0:15\n456|CANCELLED|0:15",  # sacct
         ]
@@ -405,6 +409,20 @@ def test_a_reused_job_id_is_never_taken_for_ours(tmp_path):
     assert entry["scheduler_state"] == "not in the queue; no accounting record"
 
 
+def test_the_lost_reply_deadline_follows_the_cluster_credential_lifetime():
+    def run_with(output):
+        return lambda argv: output
+
+    scheduler = SlurmScheduler()
+    assert scheduler.lost_reply_deadline(run_with("AuthInfo = ttl=600\n")) == 660
+    assert scheduler.lost_reply_deadline(run_with("AuthInfo = (null)\n")) == 360
+
+    def unavailable(argv):
+        raise OSError("scontrol not found")
+
+    assert scheduler.lost_reply_deadline(unavailable) == 360
+
+
 def test_a_lost_reply_is_settled_once_no_job_can_appear(tmp_path):
     registry = registry_with(tmp_path, ("c", C, None))
     registry.record_unconfirmed("c", "timed out")
@@ -416,9 +434,10 @@ def test_a_lost_reply_is_settled_once_no_job_can_appear(tmp_path):
         registry, commands, clock=clock, sleep=clock.sleep, now=lambda: intent + clock.now
     )
     assert errors == []
-    # Slurm acts on a delivered request until its credential expires.
-    assert SlurmScheduler.lost_reply_deadline >= 300
-    assert SlurmScheduler.lost_reply_deadline <= clock.now < 366
+    # Slurm acts on a delivered request until its credential expires: five
+    # minutes unless AuthInfo sets a ttl.
+    assert 360 <= clock.now < 366
+    assert ["scontrol", "show", "config"] in commands.calls
     # Waiting backs off rather than asking the scheduler twice a second.
     assert len(commands.calls) < 100
     (entry,) = attempts(registry).values()
@@ -432,6 +451,7 @@ def test_a_lost_reply_that_becomes_a_job_is_cancelled_by_name(tmp_path):
     commands = Commands(
         [
             "",  # scancel: nothing has that name yet
+            "",  # scontrol show config
             "",  # squeue: still nothing
             f"456|{C}|PENDING",  # squeue: the job appears
             "",  # scancel it again, by name
@@ -443,7 +463,7 @@ def test_a_lost_reply_that_becomes_a_job_is_cancelled_by_name(tmp_path):
         registry, commands, clock=clock, sleep=clock.sleep, now=lambda: intent + 1
     )
     assert errors == []
-    assert commands.calls[3] == ["scancel", f"--name={C}"]
+    assert commands.calls[4] == ["scancel", f"--name={C}"]
     (entry,) = attempts(registry).values()
     assert (entry["state"], entry["job_id"]) == ("failed", "456")
 
@@ -673,6 +693,36 @@ def test_a_listed_state_that_is_not_an_end_keeps_a_task_waiting(tmp_path):
     assert handle.state is JobState.QUEUED and handle.unknown_since is None
 
 
+def test_a_run_that_leaves_nothing_behind_drops_its_record(tmp_path):
+    record = tmp_path / "run-record.json"
+    commands = Commands(["123", "", "123|FAILED|3:0"])  # sbatch, squeue, sacct
+    backend = BatchBackend(
+        config=SlurmExecutorConfig(work_dir=str(tmp_path / "work")),
+        scheduler=SlurmScheduler(),
+        command_runner=commands,
+        sleep=lambda _: None,
+        run_record=record,
+    )
+    with pytest.raises(RuntimeError):
+        with backend.workspace() as workspace:
+            handle, _ = submit(backend, workspace)
+            backend.wait([handle])
+            backend.collect(handle)  # the task failed; its job has ended
+    # Nothing is outstanding, so the next run may use the same record path.
+    assert not record.exists() and workspace.root.is_dir()
+
+
+def test_a_record_whose_registry_is_gone_says_what_to_do(tmp_path):
+    record = tmp_path / "run-record.json"
+    write_json_file(
+        record,
+        {"version": 1, "executor": "slurm", "registry": str(tmp_path / "gone.json")},
+    )
+    (error,) = clean_up_run(record)
+    assert "is missing" in error and f"delete {record}" in error
+    assert record.exists()
+
+
 def test_the_detail_says_what_accounting_shows(tmp_path):
     now = [0]
     commands = Commands(["123"], default="")
@@ -688,7 +738,7 @@ def test_the_detail_says_what_accounting_shows(tmp_path):
         backend.collect(handle)
 
 
-def test_an_outage_restarts_the_grace_for_a_missing_job(tmp_path):
+def test_an_outage_pauses_the_grace_for_a_missing_job(tmp_path):
     now = [0]
     down = (1, "", "slurm_load_jobs error: Unable to contact slurm controller")
     commands = Commands(["123"], default="")
@@ -696,13 +746,34 @@ def test_an_outage_restarts_the_grace_for_a_missing_job(tmp_path):
         tmp_path, commands, clock=lambda: now[0], accounting_timeout=5
     )
     handle, _ = submit(backend, workspace)
-    commands.responses = iter(["", "", down, down, "", ""])
-    backend.wait([handle])  # gone, no outcome yet: the grace starts
+    commands.responses = iter(["", "", down, down, "", "", "", ""])
+    backend.wait([handle])  # gone, no outcome yet: the grace starts at 0
     now[0] = 3
     backend.wait([handle])  # an outage: says nothing about the job
     now[0] = 60
-    backend.wait([handle])  # answered again: a fresh grace, not a failure
-    assert handle.state is JobState.QUEUED and handle.unknown_since == 60
+    backend.wait([handle])  # answered again: 3s of grace used, not 60
+    assert handle.state is JobState.QUEUED and handle.unknown_since == 57
+    now[0] = 62
+    backend.wait([handle])  # 5s gone while the scheduler answered
+    assert handle.state is JobState.FAILED
+
+
+def test_a_lost_job_still_fails_while_the_scheduler_flaps(tmp_path):
+    now = [0]
+    down = (1, "", "sacct: error: slurmdbd: Connection refused")
+    commands = Commands(["123"], default="")
+    backend, workspace = batch_backend(
+        tmp_path, commands, clock=lambda: now[0], accounting_timeout=120
+    )
+    handle, _ = submit(backend, workspace)
+    # squeue never lists the job; sacct fails on every other poll.
+    polls = 0
+    while handle.state is JobState.QUEUED and now[0] < 1800:
+        commands.responses = iter(["", down if polls % 2 else ""])
+        backend.wait([handle])
+        polls += 1
+        now[0] += 30
+    assert handle.state is JobState.FAILED and now[0] <= 300
 
 
 def test_scheduler_filters_in_the_environment_are_dropped(monkeypatch):

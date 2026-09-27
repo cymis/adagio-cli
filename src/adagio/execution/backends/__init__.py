@@ -21,7 +21,7 @@ from .batch import (
     missing_commands,
 )
 from .local import LocalBackend, LocalExecutorConfig
-from .run_record import owning_run, read_run_record
+from .run_record import owning_run, read_run_record, remove_run_record
 from .slurm import SlurmExecutorConfig, SlurmScheduler
 from .submissions import SubmissionRegistry
 
@@ -84,11 +84,18 @@ def clean_up_run(
         record = read_run_record(record_path)
         if record is None:
             return []
+        if not record.registry.exists():
+            return [
+                f"The run's registry {record.registry} is missing, so its jobs "
+                "cannot be looked up. If its storage is not mounted, mount it and "
+                "try again; if it was deleted, make sure none of the run's "
+                f"adagio-… jobs remain, then delete {record_path}."
+            ]
         scheduler = SCHEDULERS[record.executor]()
         registry = SubmissionRegistry.load(record.registry)
         errors = cancel_outstanding(
             registry, scheduler, make_command_runner(scheduler, runner=command_runner)
         )
         if not errors:
-            record_path.unlink(missing_ok=True)
+            remove_run_record(record_path)
     return errors

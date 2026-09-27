@@ -248,7 +248,10 @@ def _terminate_when_stdin_closes() -> None:
         with os.fdopen(watched, "rb", buffering=0) as stream:
             while stream.read(4096):
                 pass
-        if os.getpgrp() == os.getpid():
+        # An ignored SIGTERM means the run is already stopping, and its tasks
+        # were signalled with it; signalling again could cut short its cleanup.
+        stopping = signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+        if os.getpgrp() == os.getpid() and not stopping:
             os.killpg(os.getpid(), signal.SIGTERM)
         signal.pthread_kill(main, signal.SIGTERM)
 

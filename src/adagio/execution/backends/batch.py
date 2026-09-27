@@ -39,7 +39,7 @@ from adagio.executors.task_contract import read_json_file, write_json_file
 
 from .base import JobHandle, JobState, TaskInvocation, Workspace
 from .job_script import check_shared_paths, render_job_script
-from .run_record import owning_run, write_run_record
+from .run_record import owning_run, remove_run_record, write_run_record
 from .submissions import SubmissionRegistry
 
 if TYPE_CHECKING:
@@ -129,9 +129,6 @@ class Scheduler(Protocol):
     #: Environment variable prefixes that would silently change what is
     #: submitted, listed or cancelled.
     scrubbed_environment: ClassVar[tuple[str, ...]]
-    #: Seconds after a submission whose reply was lost beyond which the
-    #: scheduler can no longer create its job.
-    lost_reply_deadline: ClassVar[float]
 
     def submit_argv(
         self,
@@ -157,6 +154,11 @@ class Scheduler(Protocol):
 
     def cancel_commands(self, jobs: Sequence[JobRef]) -> list[list[str]]:
         """Commands that cancel exactly these jobs, matched by name."""
+        ...
+
+    def lost_reply_deadline(self, run: CommandRunner) -> float:
+        """Seconds after a submission whose reply was lost beyond which the
+        scheduler can no longer create its job."""
         ...
 
 
@@ -291,13 +293,22 @@ class BatchBackend:
                 write_run_record(
                     self._run_record, executor=self.kind, registry=self._registry.path
                 )
-            yield Workspace(root=root, cwd=root)
+            succeeded = False
+            try:
+                yield Workspace(root=root, cwd=root)
+                succeeded = True
+            finally:
+                # With nothing left outstanding there is nothing to clean up,
+                # and the record would only block the next run that names it.
+                # It goes before the directory: it must never outlive the
+                # registry it names.
+                if self._run_record is not None and (
+                    succeeded or not self._registry.outstanding()
+                ):
+                    remove_run_record(self._run_record)
             # Reached only when the run finished and saved its outputs. A failed
             # or interrupted run keeps its directory: task logs, and the registry
-            # that cancellation and reconciliation read. Every job has ended, so
-            # the record goes first: it must never outlive the registry it names.
-            if self._run_record is not None:
-                self._run_record.unlink(missing_ok=True)
+            # that cancellation and reconciliation read.
             shutil.rmtree(root, ignore_errors=True)
 
     def attempt_directory(self, workspace: Workspace) -> Path:
@@ -431,9 +442,6 @@ class BatchBackend:
         without an outcome.
         """
         if not status.answered:
-            # Missing answers say nothing about the job, so they do not count
-            # towards the time it has been gone.
-            handle.unknown_since = None
             if handle.unreachable_since is None:
                 handle.unreachable_since = now
                 logger.warning(
@@ -448,7 +456,12 @@ class BatchBackend:
                 f"state is unknown: {self.scheduler.name} could not be asked for "
                 f"{self._outage_timeout:.0f}s: {status.detail}"
             )
-        handle.unreachable_since = None
+        if handle.unreachable_since is not None:
+            # Missing answers say nothing about the job: the time it has been
+            # gone pauses while the scheduler cannot be asked.
+            if handle.unknown_since is not None:
+                handle.unknown_since += now - handle.unreachable_since
+            handle.unreachable_since = None
         if handle.unknown_since is None:
             handle.unknown_since = now
         if now - handle.unknown_since < self._accounting_timeout:
@@ -520,10 +533,8 @@ def cancel_outstanding(
     cancel(list(jobs))
     cancelled_at = clock()
     unconfirmed = [intent for job, (_, intent) in jobs.items() if job.job_id is None]
-    wait = max(
-        [confirm_for]
-        + [i + scheduler.lost_reply_deadline - now() for i in unconfirmed]
-    )
+    settle = scheduler.lost_reply_deadline(run) if unconfirmed else 0.0
+    wait = max([confirm_for] + [i + settle - now() for i in unconfirmed])
     if wait > confirm_for:
         logger.warning(
             "Waiting up to %.0fs to be sure a %s submission whose reply was lost "
@@ -550,7 +561,7 @@ def cancel_outstanding(
             if (
                 job.job_id is None
                 and status.job_id is None
-                and now() < intent + scheduler.lost_reply_deadline
+                and now() < intent + settle
             ):
                 # Not listed yet: the lost reply may still become a job.
                 continue

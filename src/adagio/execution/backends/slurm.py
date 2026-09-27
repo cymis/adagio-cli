@@ -165,12 +165,15 @@ class SlurmScheduler:
     name = "Slurm"
     commands = ("sbatch", "squeue", "sacct", "scancel")
     # These variables act as extra options and filters: they would change what
-    # is submitted, and hide jobs from lookups and cancellation.
-    scrubbed_environment = ("SBATCH_", "SQUEUE_", "SACCT_", "SCANCEL_")
-    # slurmctld acts on a request it receives until the request's credential
-    # expires (MUNGE's default lifetime is five minutes), so a lost sbatch
-    # reply can still become a job that long after it was sent.
-    lost_reply_deadline = 360.0
+    # is submitted, or send lookups and cancellation to another cluster or hide
+    # jobs from them. Every command uses the local cluster unless told.
+    scrubbed_environment = (
+        "SBATCH_",
+        "SQUEUE_",
+        "SACCT_",
+        "SCANCEL_",
+        "SLURM_CLUSTERS",
+    )
 
     def __init__(self, options: SlurmOptions | None = None) -> None:
         self.options = options or SlurmOptions()
@@ -296,10 +299,26 @@ class SlurmScheduler:
                 results[job] = _status(
                     row,
                     accounting.get(ended.get(job) or ""),
+                    asked=job in ended,
                     queue_error=queue_error,
                     accounting_error=accounting_error if job in ended else None,
                 )
         return results
+
+    def lost_reply_deadline(self, run: CommandRunner) -> float:
+        # slurmctld acts on a request it receives until the request's
+        # credential expires: AuthInfo's ttl, or MUNGE's default of five
+        # minutes. A minute more covers the sbatch timeout and clock skew.
+        ttl = 300
+        try:
+            for line in run(["scontrol", "show", "config"]).splitlines():
+                key, _, value = line.partition("=")
+                match = re.search(r"\bttl=(\d+)", value)
+                if key.strip() == "AuthInfo" and match:
+                    ttl = int(match.group(1))
+        except SCHEDULER_ERRORS:
+            pass
+        return ttl + 60.0
 
     def cancel_commands(self, jobs: Sequence[JobRef]) -> list[list[str]]:
         commands = []
@@ -335,6 +354,7 @@ def _status(
     row: tuple[str, str] | None,
     accounted: tuple[str, str] | None,
     *,
+    asked: bool,
     queue_error: Exception | None,
     accounting_error: Exception | None,
 ) -> SchedulerStatus:
@@ -370,12 +390,11 @@ def _status(
             answered=False,
             job_id=job_id,
         )
-    accounting = (
-        f"accounting shows {accounted[0]}, exit code {accounted[1] or 'none'}"
-        if accounted is not None
-        else "no accounting record"
-    )
-    return SchedulerStatus(None, f"{queue}; {accounting}", active=False, job_id=job_id)
+    if accounted is not None:
+        queue += f"; accounting shows {accounted[0]}, exit code {accounted[1] or 'none'}"
+    elif asked:
+        queue += "; no accounting record"
+    return SchedulerStatus(None, queue, active=False, job_id=job_id)
 
 
 def _by_cluster(

@@ -75,6 +75,8 @@ def run_case(
             stdout=log,
             stderr=subprocess.STDOUT,
             env=os.environ.copy(),
+            # Whatever this script inherited (nohup ignores SIGHUP).
+            preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_DFL),
         )
         if signal_number or supervised:
             deadline = time.monotonic() + 60

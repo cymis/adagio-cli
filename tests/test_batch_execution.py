@@ -66,7 +66,6 @@ class HereScheduler:
     name = "Here"
     commands = ("sh",)
     scrubbed_environment = ()
-    lost_reply_deadline = 0.0
 
     def __init__(self, held_polls=0):
         self.scripts = {}
@@ -103,6 +102,9 @@ class HereScheduler:
 
     def cancel_commands(self, jobs):
         return []
+
+    def lost_reply_deadline(self, run):
+        return 0.0
 
 
 class WorkerLauncher:

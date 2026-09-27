@@ -44,6 +44,16 @@ def write_run_record(path: Path, *, executor: str, registry: Path) -> None:
     )
 
 
+def remove_run_record(path: Path) -> None:
+    """Remove the record durably, before anything it points at is removed."""
+    path.unlink(missing_ok=True)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def read_run_record(path: Path) -> RunRecord | None:
     """Return the record at ``path``, or None when the run left nothing behind."""
     if not path.exists():
@@ -117,10 +127,10 @@ def _acquire(lock: Path) -> int:
 
 
 def _excludes_others(lock: Path) -> bool:
-    """Whether the lock just taken keeps a second holder out.
+    """Whether the lock just taken keeps a second holder on this host out.
 
-    Some filesystems, such as network mounts and container bind mounts, accept
-    a lock without enforcing it, which would let two owners act at once.
+    Some filesystems grant a lock without enforcing it, which would let two
+    owners act at once. This cannot tell whether other hosts see the lock.
     """
     import fcntl
 

@@ -169,7 +169,8 @@ class DockerLauncherTests(unittest.TestCase):
 
             (run,) = [c for c in calls if c[:2] == ["docker", "run"]]
             name = run[run.index("--name") + 1]
-            self.assertEqual(calls[-1], ["docker", "kill", name])
+            # rm -f also removes a container created but never started.
+            self.assertEqual(calls[-1], ["docker", "rm", "-f", name])
 
     def test_self_hosted_runtime_uses_the_server_unix_identity(self) -> None:
         launcher = DockerTaskEnvironmentLauncher()

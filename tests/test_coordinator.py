@@ -219,8 +219,13 @@ def test_sighup_cancels_like_sigterm():
 
     backend = HungUpBackend(capacity=1)
     recorder = Recorder()
-    with pytest.raises(KeyboardInterrupt, match="SIGHUP"):
-        coordinate(items=items([("A", [])]), backend=backend, listener=recorder)
+    # Whatever the test runner inherited (nohup ignores SIGHUP).
+    previous = signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    try:
+        with pytest.raises(KeyboardInterrupt, match="SIGHUP"):
+            coordinate(items=items([("A", [])]), backend=backend, listener=recorder)
+    finally:
+        signal.signal(signal.SIGHUP, previous)
     assert backend.cancelled
     assert recorder.events[-1] == ("stopped", None, ["A"], True)
 
