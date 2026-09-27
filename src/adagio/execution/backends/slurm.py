@@ -114,19 +114,31 @@ _FINISHED = frozenset(
     }
 )
 _EXIT_CODE = re.compile(r"\d+:\d+")
-# sbatch reports the controller's refusal as "Batch job submission failed:
-# <reason>". Communication failures use the same prefix but leave it unknown
-# whether the controller created the job, so they never count as a refusal.
-_SUBMISSION_REFUSED = "batch job submission failed:"
-_UNCERTAIN_SUBMISSION = (
-    "timed out",
-    "unable to contact",
-    "zero bytes",
-    "communication",
-    "connection",
-    "temporarily",
-    "standby",
-    "retry",
+# sbatch reports every failure as "Batch job submission failed: <reason>",
+# including failures reading the controller's reply after it may have created
+# the job. Only these reasons are the controller refusing the request outright;
+# anything else leaves the submission unconfirmed.
+_SUBMISSION_FAILED = re.compile(r"batch job submission failed:\s*(.+)", re.IGNORECASE)
+_REFUSALS = (
+    "invalid partition name specified",
+    "no partition specified or system default partition",
+    "invalid account or account/partition combination specified",
+    "invalid qos specification",
+    "requested time limit is invalid",
+    "requested node configuration is not available",
+    "requested partition configuration not available now",
+    "memory required by task is not available",
+    "job violates accounting/qos policy",
+    "invalid feature specification",
+    "requested reservation is invalid",
+    "invalid license specification",
+    "invalid generic resource (gres) specification",
+    "invalid wckey specification",
+    "more processors requested than permitted",
+    "node count specification invalid",
+    "cpu count specification invalid",
+    "user's group not permitted to use this partition",
+    "access/permission denied",
 )
 _JOB_NAME = re.compile(r"adagio-[0-9a-f]{32}")
 
@@ -191,10 +203,10 @@ class SlurmScheduler:
         return JobRef(match.group(1), match.group(2))
 
     def rejected(self, error: SchedulerCommandError) -> bool:
-        text = error.stderr.lower()
-        return _SUBMISSION_REFUSED in text and not any(
-            phrase in text for phrase in _UNCERTAIN_SUBMISSION
-        )
+        reasons = [
+            reason.strip().lower() for reason in _SUBMISSION_FAILED.findall(error.stderr)
+        ]
+        return bool(reasons) and all(reason.startswith(_REFUSALS) for reason in reasons)
 
     def statuses(
         self, jobs: Sequence[JobRef], run: CommandRunner
@@ -203,8 +215,9 @@ class SlurmScheduler:
         for cluster, group in _by_cluster(jobs):
             cluster_args = [f"--clusters={cluster}"] if cluster else []
             ids = [job.job_id for job in group]
+            failure: Exception | None = None
+            queued: dict[str, str] = {}
             try:
-                queued: dict[str, str] = {}
                 for line in run(
                     [
                         "squeue",
@@ -217,11 +230,16 @@ class SlurmScheduler:
                     job_id, _, state = line.strip().partition("|")
                     if job_id in ids:
                         queued[job_id] = state
-                # A finished job leaves the queue, or lingers there without an
-                # exit code; only accounting says how its allocation ended.
-                accounting: dict[str, tuple[str, str]] = {}
-                finished = [i for i in ids if queued.get(i) not in _QUEUED | _RUNNING]
-                if finished:
+            except SCHEDULER_ERRORS as error:
+                # squeue fails outright once a job has left the controller;
+                # accounting still knows how it ended.
+                failure = error
+            # A finished job leaves the queue, or lingers there without an exit
+            # code; only accounting says how its allocation ended.
+            accounting: dict[str, tuple[str, str]] = {}
+            finished = [i for i in ids if queued.get(i) not in _QUEUED | _RUNNING]
+            if finished:
+                try:
                     for line in run(
                         [
                             "sacct",
@@ -239,13 +257,14 @@ class SlurmScheduler:
                                 parts[1].split()[0].rstrip("+"),
                                 parts[2],
                             )
-            except SCHEDULER_ERRORS as error:
-                for job in group:
-                    results[job] = SchedulerStatus(None, str(error))
-                continue
+                except SCHEDULER_ERRORS as error:
+                    failure = error
             for job in group:
                 state, code = accounting.get(job.job_id, (queued.get(job.job_id), None))
-                results[job] = _status(state, code)
+                status = _status(state, code)
+                if status.state is None and failure is not None:
+                    status = SchedulerStatus(None, str(failure))
+                results[job] = status
         return results
 
     def cancel_commands(self, jobs: Sequence[JobRef]) -> list[list[str]]:

@@ -286,3 +286,24 @@ def test_a_failure_while_waiting_blames_no_item():
             items=items([("A", [])]), backend=BrokenBackend(capacity=1), listener=recorder
         )
     assert recorder.events[-1] == ("stopped", None, ["A"], False)
+
+
+def test_a_second_sigterm_does_not_interrupt_cancellation():
+    import os
+    import signal
+
+    class SignalledBackend(QueueBackend):
+        def wait(self, handles):
+            raise KeyboardInterrupt("Run interrupted by SIGTERM.")
+
+        def cancel(self):
+            os.kill(os.getpid(), signal.SIGTERM)  # the supervisor signals again
+            self.cancelled = True
+            return []
+
+    before = signal.getsignal(signal.SIGTERM)
+    backend = SignalledBackend(capacity=1)
+    with pytest.raises(KeyboardInterrupt):
+        coordinate(items=items([("A", [])]), backend=backend, listener=Recorder())
+    assert backend.cancelled
+    assert signal.getsignal(signal.SIGTERM) == before

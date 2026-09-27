@@ -438,11 +438,13 @@ def cancel_outstanding(
         for job in found:
             registry.record_found(attempt_id, job_id=job.job_id)
             jobs[job] = attempt_id
+    cancel_failures: list[str] = []
     for argv in scheduler.cancel_commands(list(jobs)):
         try:
             run(argv)
         except SCHEDULER_ERRORS as error:
-            errors.append(f"{scheduler.name} cancellation failed: {error}")
+            # Often the job already ended; only confirmation below decides.
+            cancel_failures.append(f"{scheduler.name} cancellation failed: {error}")
     remaining = list(jobs)
     deadline = clock() + confirm_for
     while remaining and clock() < deadline:
@@ -460,6 +462,7 @@ def cancel_outstanding(
         if remaining:
             sleep(0.5)
     if remaining:
+        errors.extend(cancel_failures)
         errors.append(
             f"Cancellation not confirmed for {scheduler.name} jobs "
             f"{', '.join(job.job_id for job in remaining)}. Registry: {registry.path}."

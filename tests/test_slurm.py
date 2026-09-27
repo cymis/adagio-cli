@@ -374,14 +374,86 @@ def test_a_rejected_submission_is_reported_plainly_and_leaves_nothing(tmp_path):
         "sbatch: error: Batch job submission failed: Unable to contact slurm controller (connect failure)",
         "sbatch: error: Batch job submission failed: Zero Bytes were transmitted or received",
         "sbatch: error: Slurm temporarily unable to accept job, sleeping and retrying",
+        # Failures reading or verifying the controller's reply: the job may exist.
+        "sbatch: error: Batch job submission failed: Message receive failure",
+        "sbatch: error: Batch job submission failed: Header lengths are longer than data received",
+        "sbatch: error: Batch job submission failed: Unexpected message received",
+        "sbatch: error: Batch job submission failed: Insane message length",
+        "sbatch: error: Batch job submission failed: Protocol authentication error",
+        "sbatch: error: Batch job submission failed: Invalid authentication credential",
+        "sbatch: error: Batch job submission failed: Interrupted system call",
+        # A refusal and a lost reply together are still uncertain.
+        "sbatch: error: Batch job submission failed: Invalid qos specification\n"
+        "sbatch: error: Batch job submission failed: Message receive failure",
+        "sbatch: error: some local problem",
     ],
 )
-def test_communication_failures_are_not_rejections(tmp_path, stderr):
-    backend, workspace = batch_backend(tmp_path, Commands([(1, "", stderr)]))
+def test_anything_but_an_explicit_refusal_stays_unconfirmed(tmp_path, stderr):
+    commands = Commands([(1, "", stderr), ""])
+    backend, workspace = batch_backend(tmp_path, commands)
     with pytest.raises(RuntimeError, match="not retried"):
         submit(backend, workspace)
     (entry,) = json.loads(backend.registry.path.read_text())["attempts"].values()
     assert entry["state"] == "unconfirmed"
+    # Cleanup looks the job up by its unique name and keeps reporting it.
+    (error,) = backend.cancel()
+    assert commands.calls[1][2] == f"--name={entry['job_name']}"
+    assert "was not confirmed" in error
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "Invalid partition name specified",
+        "Invalid account or account/partition combination specified",
+        "Invalid qos specification",
+        "Requested time limit is invalid (missing or exceeds some limit)",
+        "Requested node configuration is not available",
+        "Memory required by task is not available",
+        "Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)",
+        "Access/permission denied",
+    ],
+)
+def test_explicit_refusals_are_rejections(tmp_path, reason):
+    stderr = f"sbatch: error: Batch job submission failed: {reason}"
+    backend, workspace = batch_backend(tmp_path, Commands([(1, "", stderr)]))
+    with pytest.raises(RuntimeError, match="Slurm rejected"):
+        submit(backend, workspace)
+    (entry,) = json.loads(backend.registry.path.read_text())["attempts"].values()
+    assert entry["state"] == "rejected"
+
+
+def test_accounting_is_asked_even_when_the_queue_lookup_fails(tmp_path):
+    # squeue exits 1 for a job that already left the controller.
+    invalid = (1, "", "slurm_load_jobs error: Invalid job id specified")
+    commands = Commands(["123", invalid, "123|COMPLETED|0:0"])
+    backend, workspace = batch_backend(tmp_path, commands)
+    handle, _ = submit(backend, workspace)
+    backend.wait([handle])
+    assert handle.state is JobState.SUCCEEDED
+    assert commands.calls[2][0] == "sacct"
+
+
+def test_a_failed_scancel_is_harmless_once_the_end_is_confirmed(tmp_path):
+    registry = SubmissionRegistry.create(tmp_path, executor="slurm")
+    registry.record_intent("a", job_name="adagio-" + "a" * 32)
+    registry.record_submitted("a", job_id="123", cluster=None)
+    commands = Commands(
+        [
+            (1, "", "scancel: error: Kill job error on job id 123: Job/step already completed"),
+            "",  # squeue
+            "123|COMPLETED|0:0",  # sacct confirms the job ended
+        ]
+    )
+    from adagio.execution.backends import batch
+
+    errors = batch.cancel_outstanding(
+        registry,
+        SlurmScheduler(),
+        batch.make_command_runner(SlurmScheduler, runner=commands),
+        sleep=lambda _: None,
+    )
+    assert errors == []
 
 
 def test_cleanup_reports_what_it_cannot_confirm(tmp_path):

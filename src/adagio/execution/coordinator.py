@@ -130,6 +130,9 @@ def coordinate(
                 )
     except BaseException as error:
         canceled = isinstance(error, KeyboardInterrupt)
+        # Supervisors often signal the whole process group more than once; a
+        # second SIGTERM must not abandon the cancellation it asked for.
+        _ignore_sigterm()
         cleanup_errors = backend.cancel()
         listener.stopped(
             error,
@@ -145,6 +148,11 @@ def coordinate(
         raise
     finally:
         restore_sigterm()
+
+
+def _ignore_sigterm() -> None:
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 
 def _interrupt_on_sigterm() -> Callable[[], None]:
