@@ -1,6 +1,8 @@
 """The commands a supervising runtime calls: ``capabilities`` and ``cleanup``."""
 
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -109,3 +111,29 @@ def test_a_closed_stdin_terminates_the_run_and_its_tasks(tmp_path):
             break
         time.sleep(0.05)
     assert marker.read_text() == "stopped"
+
+
+def test_a_run_already_stopping_is_not_signalled_again(tmp_path):
+    marker = tmp_path / "task-stopped"
+    # The run ignores SIGTERM while it cancels, as the coordinator does.
+    script = WATCHED.replace(
+        "signal.signal(signal.SIGTERM, stop)",
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(marker)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        assert process.stdout.readline() == "b''\n"
+        assert process.stdout.readline() == "task running\n"
+        process.stdin.close()
+        time.sleep(1)
+        # Its cleanup, and the task's, are left to finish undisturbed.
+        assert process.poll() is None and not marker.exists()
+    finally:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()

@@ -105,7 +105,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         help=(
             "File to record work this run leaves outside its process tree, such "
             "as scheduler jobs. If the run is killed, `adagio cleanup` with the "
-            "same path, on the same host, cancels that work. Keep it on local disk."
+            "same path, on the same host, cancels that work."
         ),
     )
     parser.add_argument(

@@ -337,21 +337,25 @@ def _stop_container(name: str) -> None:
     their own session, so a further signal to the run's process group cannot
     cut them short.
     """
-    for argv in (
-        ["docker", "stop", "--signal=SIGINT", "-t", "10", name],
-        ["docker", "rm", "-f", name],
-    ):
-        try:
-            subprocess.run(
-                argv,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
-                start_new_session=True,
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
+    try:
+        _docker_quietly(["docker", "stop", "--signal=SIGINT", "-t", "10", name])
+    finally:
+        # Even when a second Ctrl-C cuts the graceful stop short.
+        _docker_quietly(["docker", "rm", "-f", name])
+
+
+def _docker_quietly(argv: list[str]) -> None:
+    try:
+        subprocess.run(
+            argv,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _resolve_image_digest(*, reference: str) -> str | None:

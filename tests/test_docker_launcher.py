@@ -151,8 +151,11 @@ class DockerLauncherTests(unittest.TestCase):
             )
             calls = []
 
+            sessions = {}
+
             def fake_run(cmd, *args, **kwargs):  # noqa: ANN001
                 calls.append(cmd)
+                sessions[tuple(cmd[:2])] = kwargs.get("start_new_session")
                 if cmd[:2] == ["docker", "run"]:
                     raise KeyboardInterrupt  # the run was stopped mid-task
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -178,6 +181,10 @@ class DockerLauncherTests(unittest.TestCase):
                     ["docker", "rm", "-f", name],
                 ],
             )
+            # Out of the run's process group, so a later signal to it cannot
+            # cut the cleanup short.
+            self.assertTrue(sessions[("docker", "stop")])
+            self.assertTrue(sessions[("docker", "rm")])
 
     def test_self_hosted_runtime_uses_the_server_unix_identity(self) -> None:
         launcher = DockerTaskEnvironmentLauncher()

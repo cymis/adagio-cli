@@ -10,7 +10,8 @@ scheduler gets the same guarantees:
 * each submission is recorded before the scheduler is asked, and a submission
   whose reply is lost is never retried;
 * a job that disappears from the scheduler is never taken as success, and a
-  scheduler that cannot be reached is waited out rather than failing tasks;
+  scheduler that cannot be reached is waited on for up to the outage timeout
+  before its tasks fail;
 * polling backs off while nothing changes;
 * every job is looked up and cancelled by its run-unique name, never by a
   bare job id, which the scheduler reuses;

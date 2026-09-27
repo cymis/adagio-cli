@@ -8,8 +8,8 @@ The contents are private to the CLI: supervisors only pass the path around.
 Exactly one process owns a run at a time: the CLI running it, or a cleanup
 after the CLI has died. Ownership is a lock on ``PATH.lock``, which the kernel
 releases however its holder dies, so a lock nobody holds proves the owner is
-gone. The record must therefore live on local disk, and cleanup must run on
-the same host as the run: other hosts may not see the lock.
+gone. Cleanup must run on the same host as the run: other hosts may not see
+the lock.
 """
 
 from __future__ import annotations
@@ -47,11 +47,14 @@ def write_run_record(path: Path, *, executor: str, registry: Path) -> None:
 def remove_run_record(path: Path) -> None:
     """Remove the record durably, before anything it points at is removed."""
     path.unlink(missing_ok=True)
-    directory = os.open(path.parent, os.O_RDONLY)
     try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError:
+        pass  # The record is gone; durability is best effort.
 
 
 def read_run_record(path: Path) -> RunRecord | None:
@@ -105,8 +108,8 @@ def _acquire(lock: Path) -> int:
         except OSError as error:
             os.close(descriptor)
             raise RuntimeError(
-                f"Cannot lock {lock}: {error}. The run record must be on a local "
-                "filesystem that supports file locks."
+                f"Cannot lock {lock}: {error}. The run record needs a filesystem "
+                "that supports file locks."
             ) from error
         # A previous owner may have removed the lock file between our open and
         # our lock; only a lock on the file still at that path counts.
@@ -117,20 +120,28 @@ def _acquire(lock: Path) -> int:
         if not current:
             os.close(descriptor)
             continue
-        if not _excludes_others(lock):
+        try:
+            excluded = _excludes_others(lock)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        if not excluded:
             os.close(descriptor)
             raise RuntimeError(
-                f"{lock.parent} does not enforce file locks. The run record must "
-                "be on a local filesystem that does."
+                f"{lock.parent} does not enforce file locks between processes, "
+                "which the run record needs."
             )
         return descriptor
 
 
 def _excludes_others(lock: Path) -> bool:
-    """Whether the lock just taken keeps a second holder on this host out.
+    """Whether the lock just taken keeps a second holder out.
 
     Some filesystems grant a lock without enforcing it, which would let two
-    owners act at once. This cannot tell whether other hosts see the lock.
+    owners act at once. A filesystem that gave these locks per-process
+    semantics would grant the second descriptor here too, so it is refused as
+    well, which is the safe answer. This cannot tell whether other hosts see
+    the lock.
     """
     import fcntl
 

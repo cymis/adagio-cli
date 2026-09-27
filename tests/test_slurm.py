@@ -355,7 +355,7 @@ def test_a_run_record_has_one_owner(tmp_path):
 def test_a_filesystem_that_ignores_locks_is_refused(tmp_path, monkeypatch):
     import fcntl
 
-    # As on network and container bind mounts: every lock is granted.
+    # As on a filesystem that grants every lock without enforcing it.
     monkeypatch.setattr(fcntl, "flock", lambda descriptor, operation: None)
     with pytest.raises(RuntimeError, match="does not enforce file locks"):
         with owning_run(tmp_path / "run-record.json"):

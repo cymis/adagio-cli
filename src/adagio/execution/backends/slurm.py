@@ -1,7 +1,9 @@
 """Slurm for the batch backend: sbatch, squeue, sacct and scancel.
 
-Slurm reuses job ids, so ``squeue`` and ``scancel`` always name the job as
-well: given both a name and an id, Slurm matches only a job with both.
+Slurm reuses job ids, so every lookup and cancellation selects jobs by their
+run-unique name. sacct and scancel are also given the id when it is known, and
+Slurm then matches only a job with both; squeue rows are matched to the id
+here.
 """
 
 from __future__ import annotations
@@ -315,7 +317,7 @@ class SlurmScheduler:
                 key, _, value = line.partition("=")
                 match = re.search(r"\bttl=(\d+)", value)
                 if key.strip() == "AuthInfo" and match:
-                    ttl = int(match.group(1))
+                    ttl = int(match.group(1)) or ttl  # 0 means MUNGE's default
         except SCHEDULER_ERRORS:
             pass
         return ttl + 60.0
