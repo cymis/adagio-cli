@@ -162,6 +162,8 @@ def _interrupt_on_sigterm() -> Callable[[], None]:
     previous = signal.getsignal(signal.SIGTERM)
 
     def interrupt(signum: int, frame: Any) -> None:
+        # Ignore repeats at once, before anything can interrupt the cleanup.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         raise KeyboardInterrupt("Run interrupted by SIGTERM.")
 
     signal.signal(signal.SIGTERM, interrupt)

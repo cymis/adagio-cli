@@ -24,7 +24,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
@@ -74,6 +74,9 @@ class BatchExecutorConfig(BaseModel):
 class JobRef:
     job_id: str
     cluster: str | None = None
+    #: The run-unique name the job was submitted under. Schedulers reuse job
+    #: ids, so status lookups match on it; identity is the id and cluster.
+    name: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -297,7 +300,7 @@ class BatchBackend:
             log_path=str(prepared.log_path),
         )
         try:
-            job = self.scheduler.parse_submission(self._run(argv))
+            reply = self.scheduler.parse_submission(self._run(argv))
         except BaseException as error:
             self._stopped = True
             if isinstance(error, SchedulerCommandError) and self.scheduler.rejected(
@@ -319,6 +322,7 @@ class BatchBackend:
                 "It was not retried; if a job with that name exists, cancel it. "
                 f"Registry: {registry.path}."
             ) from error
+        job = JobRef(reply.job_id, reply.cluster, job_name)
         registry.record_submitted(
             prepared.attempt_id, job_id=job.job_id, cluster=job.cluster
         )
@@ -420,7 +424,9 @@ def cancel_outstanding(
     jobs: dict[JobRef, str] = {}
     for attempt_id, entry in registry.outstanding():
         if entry.get("job_id"):
-            jobs[JobRef(entry["job_id"], entry.get("cluster"))] = attempt_id
+            jobs[JobRef(entry["job_id"], entry.get("cluster"), entry["job_name"])] = (
+                attempt_id
+            )
             continue
         try:
             found = scheduler.find_jobs(entry["job_name"], run)
@@ -437,7 +443,7 @@ def cancel_outstanding(
             )
         for job in found:
             registry.record_found(attempt_id, job_id=job.job_id)
-            jobs[job] = attempt_id
+            jobs[JobRef(job.job_id, job.cluster, entry["job_name"])] = attempt_id
     cancel_failures: list[str] = []
     for argv in scheduler.cancel_commands(list(jobs)):
         try:

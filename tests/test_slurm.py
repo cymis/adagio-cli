@@ -432,6 +432,8 @@ def test_accounting_is_asked_even_when_the_queue_lookup_fails(tmp_path):
     backend.wait([handle])
     assert handle.state is JobState.SUCCEEDED
     assert commands.calls[2][0] == "sacct"
+    # Only our job: an older job that reused the id has another name.
+    assert f"--name={handle.job.name}" in commands.calls[2]
 
 
 def test_a_failed_scancel_is_harmless_once_the_end_is_confirmed(tmp_path):

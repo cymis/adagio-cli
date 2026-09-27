@@ -235,9 +235,12 @@ class SlurmScheduler:
                 # accounting still knows how it ended.
                 failure = error
             # A finished job leaves the queue, or lingers there without an exit
-            # code; only accounting says how its allocation ended.
+            # code; only accounting says how its allocation ended. Job ids are
+            # reused, so accounting is asked by our run-unique names as well.
             accounting: dict[str, tuple[str, str]] = {}
             finished = [i for i in ids if queued.get(i) not in _QUEUED | _RUNNING]
+            names = [job.name for job in group if job.job_id in finished]
+            name_args = [f"--name={','.join(names)}"] if all(names) else []
             if finished:
                 try:
                     for line in run(
@@ -248,6 +251,7 @@ class SlurmScheduler:
                             "--allocations",
                             f"--jobs={','.join(finished)}",
                             "--format=JobIDRaw,State,ExitCode",
+                            *name_args,
                             *cluster_args,
                         ]
                     ).splitlines():
