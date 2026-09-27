@@ -254,7 +254,7 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 "Docker is required for task environment execution but was not found in PATH."
             ) from exc
         except BaseException:
-            _kill_container(container_name)
+            _stop_container(container_name)
             raise
         run_seconds = time.monotonic() - run_started
         timings = {"pull_seconds": pull_seconds, "run_seconds": run_seconds}
@@ -328,24 +328,30 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         )
 
 
-def _kill_container(name: str) -> None:
+def _stop_container(name: str) -> None:
     """Stop and remove a task's container after its run was interrupted.
 
-    Best effort. ``rm -f`` also removes a container that was created but never
-    started. It runs in its own session, so a further signal to the run's
-    process group cannot cut it short.
+    Best effort. The task first gets Ctrl-C and ten seconds to stop cleanly,
+    as it would in a terminal; ``rm -f`` then removes whatever is left,
+    including a container that was created but never started. Both run in
+    their own session, so a further signal to the run's process group cannot
+    cut them short.
     """
-    try:
-        subprocess.run(
-            ["docker", "rm", "-f", name],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-            start_new_session=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
+    for argv in (
+        ["docker", "stop", "--signal=SIGINT", "-t", "10", name],
+        ["docker", "rm", "-f", name],
+    ):
+        try:
+            subprocess.run(
+                argv,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                start_new_session=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def _resolve_image_digest(*, reference: str) -> str | None:

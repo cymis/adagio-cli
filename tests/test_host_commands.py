@@ -104,6 +104,8 @@ def test_a_closed_stdin_terminates_the_run_and_its_tasks(tmp_path):
     assert time.monotonic() - started < 5
     # The running task was signalled too, as the supervisor would have.
     deadline = time.monotonic() + 5
-    while not marker.exists() and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        if marker.exists() and marker.read_text() == "stopped":
+            break
         time.sleep(0.05)
     assert marker.read_text() == "stopped"
