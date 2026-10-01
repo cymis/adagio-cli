@@ -81,6 +81,9 @@ class TaskEnvironmentResolver(Protocol):
 class TaskEnvironmentLauncher(Protocol):
     kind: str
 
+    def preflight(self, *, environment: TaskEnvironmentSpec) -> None:
+        """Raise an actionable error if this runtime cannot start a task."""
+
     def launch(
         self,
         *,

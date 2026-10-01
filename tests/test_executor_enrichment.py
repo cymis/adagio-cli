@@ -131,9 +131,10 @@ class ExecutorEnrichmentTests(unittest.TestCase):
                 monitor=monitor,
             )
 
-            def fake_run(cmd, check, stdout, stderr, text):  # noqa: ANN001
-                # The image-inspect (present check), digest lookup, and the run
-                # all funnel through subprocess.run. Distinguish by argv.
+            def fake_run(cmd, **kwargs):  # noqa: ANN001
+                # Preflight, image inspection, and execution share subprocess.run.
+                if cmd[:2] == ["docker", "info"]:
+                    return subprocess.CompletedProcess(cmd, 0, "27.0\n", "")
                 if "inspect" in cmd and "--format" in cmd:
                     return subprocess.CompletedProcess(
                         cmd, 0, "ghcr.io/x/demux@sha256:abc123\n", ""

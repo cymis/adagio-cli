@@ -36,6 +36,29 @@ from .task_contract import (
 class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
     kind = "conda"
 
+    def preflight(self, *, environment: TaskEnvironmentSpec) -> None:
+        reference = _conda_prefix(environment=environment)
+        executable = _resolve_conda_executable(
+            options=dict(environment.options or {}), prefix=reference
+        )
+        if not os.access(executable, os.X_OK):
+            raise RuntimeError(
+                f"Conda is not executable: {executable}. Check its permissions "
+                "or set conda_executable in the runtime config, then retry."
+            )
+        if not Path(reference).is_dir():
+            raise RuntimeError(
+                f"Conda environment not found: {reference}. Create the environment "
+                "or select an existing environment in the runtime config, then retry."
+            )
+        python = Path(_conda_python_executable(reference=reference))
+        if not python.is_file() or not os.access(python, os.X_OK):
+            raise RuntimeError(
+                f"Conda environment has no executable Python interpreter: {python}. "
+                "Install Python in this environment or select the correct "
+                "environment in the runtime config, then retry."
+            )
+
     def launch(
         self,
         *,
@@ -226,7 +249,11 @@ def _resolve_conda_executable(*, options: dict[str, Any], prefix: str) -> str:
     if isinstance(configured, str) and configured.strip():
         resolved = _resolve_executable(configured.strip())
         if resolved is None:
-            raise SystemExit(f"Configured conda executable not found: {configured}")
+            raise SystemExit(
+                f"Configured conda executable not found: {configured}. "
+                "Set conda_executable to an installed Conda executable in the "
+                "runtime config, then retry."
+            )
         return resolved
 
     for env_var in ("ADAGIO_CONDA_EXE", "CONDA_EXE"):

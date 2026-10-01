@@ -43,6 +43,22 @@ The environment must already exist and contain QIIME 2 plus the plugins needed
 by the pipeline. Adagio enters it with `conda run`; it does not create or manage
 the environment.
 
+Immediately before each task launch, Adagio runs a lightweight preflight for
+that task's selected runtime:
+
+- Docker: the command is available and the Docker daemon responds (10-second timeout).
+- Conda: the Conda executable, environment directory, and Python interpreter exist
+  and are executable where applicable.
+- Apptainer: Apptainer or Singularity is on PATH and the local `.sif` image is readable.
+
+A failed check stops the task before pulling an image or launching its process,
+with a message explaining how to retry. Only environments actually used by the
+run are checked. These checks do not validate installed plugins, image contents,
+or every possible runtime failure.
+
+Runtime launchers provide a `preflight(environment=...)` hook through the existing
+launcher registry. New launchers can add a check without changing the executor.
+
 ## Task resource requests
 
 A runtime config can also declare the requested shape of each task execution:

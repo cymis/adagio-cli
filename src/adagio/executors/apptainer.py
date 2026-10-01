@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import time
@@ -40,6 +41,15 @@ from .task_contract import (
 
 class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
     kind = "apptainer"
+
+    def preflight(self, *, environment: TaskEnvironmentSpec) -> None:
+        _resolve_runtime_executable()
+        image_path = _resolve_sif_image(environment.reference)
+        if not os.access(image_path, os.R_OK):
+            raise RuntimeError(
+                f"Apptainer image is not readable: {image_path}. "
+                "Check its permissions or select a readable .sif image, then retry."
+            )
 
     def launch(
         self,
@@ -269,7 +279,14 @@ def _resolve_sif_image(reference: str) -> Path:
             f"Apptainer task environments require a local .sif image path, got {reference!r}."
         )
     if not image_path.exists():
-        raise RuntimeError(f"Apptainer image not found: {image_path}")
+        raise RuntimeError(
+            f"Apptainer image not found: {image_path}. "
+            "Download the image or select an existing .sif file in the runtime config, "
+            "then retry."
+        )
     if not image_path.is_file():
-        raise RuntimeError(f"Apptainer image is not a file: {image_path}")
+        raise RuntimeError(
+            f"Apptainer image is not a file: {image_path}. "
+            "Select a .sif file in the runtime config, then retry."
+        )
     return image_path

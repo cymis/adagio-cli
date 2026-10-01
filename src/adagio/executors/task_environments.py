@@ -25,6 +25,7 @@ from .base import (
 from .cache_support import ExecutionCacheConfig
 from .common import prune_to_targets, task_label
 from .path_utils import resolve_output_destination
+from .preflight import preflight_environment
 from .serial_runner import SerialExecutionState, TaskOutcome, run_serial_pipeline
 from .signature import compute_input_signature, environment_reference
 from .task_contract import (
@@ -600,6 +601,11 @@ def _launch(launcher, **kwargs):  # noqa: ANN001, ANN003
     against the older signature do not accept them; filter to the callable's
     real parameters so those keep working unchanged.
     """
+    preflight_environment(
+        launcher,
+        environment=kwargs["environment"],
+        task_id=kwargs["request"].task.id,
+    )
     try:
         signature = inspect.signature(launcher.launch)
     except (TypeError, ValueError):

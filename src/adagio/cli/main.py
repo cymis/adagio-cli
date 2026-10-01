@@ -15,6 +15,7 @@ from ..app.parsers.pipeline import Output as OutputSpec
 from ..app.parsers.pipeline import Parameter as ParamSpec
 from ..app.parsers.pipeline import parse_inputs, parse_outputs, parse_parameters
 from ..executors.cache_support import CACHE_DIR_HELP, REUSE_HELP, resolve_cache_dir_path
+from ..executors.preflight import RuntimePreflightError
 from .args import ShowParamsMode, extract_flag_value, promote_positional_pipeline
 from .config import load_run_config
 from .dynamic import build_dynamic_run
@@ -32,6 +33,15 @@ console = Console()
 
 
 def main(argv: list[str] | None = None) -> None:
+    try:
+        _main(argv)
+    except RuntimePreflightError as exc:
+        # The coordinator has already reported the failed node. Availability
+        # errors need an actionable message, not a Python traceback in the UI.
+        raise SystemExit(str(exc)) from None
+
+
+def _main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
 
     if argv and argv[0] == "exec-task":

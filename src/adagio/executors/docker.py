@@ -57,6 +57,41 @@ def _host_platform_default() -> str | None:
 class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
     kind = "docker"
 
+    def preflight(self, *, environment: TaskEnvironmentSpec) -> None:
+        try:
+            result = subprocess.run(
+                ["docker", "info", "--format", "{{.ServerVersion}}"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Docker was not found. Install Docker and make sure the docker "
+                "command is on PATH for the Adagio runtime, then retry."
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "Docker did not respond within 10 seconds. Start or restart "
+                "Docker Desktop or the Docker service, wait until it is ready, "
+                "then retry."
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                "The Docker command could not be run. Check its installation "
+                "and executable permissions, then retry. " + str(exc)
+            ) from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(
+                "Cannot connect to Docker. Start Docker Desktop or the Docker "
+                "service and wait until it is ready, then retry. If Docker is "
+                "already running, check the selected Docker context and the "
+                "Adagio runtime's permission to access Docker."
+                + (f"\nDocker reported: {detail}" if detail else "")
+            )
+
     def launch(
         self,
         *,
