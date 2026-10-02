@@ -68,34 +68,37 @@ class TaskExecMetadataTests(unittest.TestCase):
                 "params": {},
                 "metadata_column_kwargs": {},
                 "outputs": {"denoising_stats": str(archive_destination)},
-                "metadata_outputs": {
-                    "denoising_stats": str(metadata_destination)
-                },
+                "metadata_outputs": {"denoising_stats": str(metadata_destination)},
                 "result_manifest": str(manifest),
                 "cache_path": None,
                 "recycle_pool": None,
             }
 
-            with patch.dict(
-                sys.modules,
-                {"qiime2": qiime2, "qiime2.sdk": qiime2_sdk},
-            ), patch(
-                "adagio.cli.task_exec.action_output_context",
-                side_effect=nullcontext,
+            with (
+                patch.dict(
+                    sys.modules,
+                    {"qiime2": qiime2, "qiime2.sdk": qiime2_sdk},
+                ),
+                patch(
+                    "adagio.cli.task_exec.action_output_context",
+                    side_effect=nullcontext,
+                ),
             ):
                 _run_task(spec)
 
             self.assertTrue(Path(f"{archive_destination}.qza").is_file())
             self.assertTrue(metadata_destination.is_file())
+            payload = read_json_file(manifest)
+            timings = payload.pop("timings")
+            self.assertGreaterEqual(timings["output_save_seconds"], 0)
+            self.assertGreaterEqual(
+                timings["worker_seconds"], timings["action_seconds"]
+            )
             self.assertEqual(
-                read_json_file(manifest),
+                payload,
                 {
-                    "outputs": {
-                        "denoising_stats": f"{archive_destination}.qza"
-                    },
-                    "metadata_outputs": {
-                        "denoising_stats": str(metadata_destination)
-                    },
+                    "outputs": {"denoising_stats": f"{archive_destination}.qza"},
+                    "metadata_outputs": {"denoising_stats": str(metadata_destination)},
                     "reused": False,
                 },
             )

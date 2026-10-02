@@ -25,9 +25,9 @@ from .container_support import (
     print_filtered_container_stderr,
     python_warning_env_flags,
     record_container_output,
-    signal_task_running,
     with_mounts,
 )
+from .telemetry import execution_timings, relay_task_progress
 from .task_contract import (
     parse_result_manifest,
     build_task_spec,
@@ -89,8 +89,11 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             for name, path in (request.metadata_outputs or {}).items()
         }
 
-        manifest_path = result_manifest_path(task_id=task.id, work_path=request.work_path)
+        manifest_path = result_manifest_path(
+            task_id=task.id, work_path=request.work_path
+        )
         spec_path = task_spec_path(task_id=task.id, work_path=request.work_path)
+        progress_path = request.work_path / f"{spec_path.stem}_progress.jsonl"
         task_spec = build_task_spec(
             plugin=task.plugin,
             action=task.action,
@@ -111,6 +114,7 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 else None
             ),
             recycle_pool=request.recycle_pool,
+            progress_path=containerize_path(progress_path),
         )
         write_json_file(spec_path, task_spec)
 
@@ -173,19 +177,25 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         runtime_job_id = os.getenv("RUNTIME_JOB_ID")
         if runtime_job_id:
             command.extend(["--label", f"adagio.job_id={runtime_job_id}"])
-        command.extend([
-            environment.reference,
-            "python",
-            "-m",
-            "adagio.cli.task_exec",
-            "--task",
-            containerize_path(spec_path),
-        ])
+        command.extend(
+            [
+                environment.reference,
+                "python",
+                "-m",
+                "adagio.cli.task_exec",
+                "--task",
+                containerize_path(spec_path),
+            ]
+        )
 
         host_paths = [request.cwd, request.work_path, python_root]
         for value in (
             list(request.archive_inputs.values())
-            + [item for values in request.archive_collection_inputs.values() for item in values]
+            + [
+                item
+                for values in request.archive_collection_inputs.values()
+                for item in values
+            ]
             + list(request.metadata_inputs.values())
         ):
             if is_uri(value):
@@ -233,22 +243,23 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             monitor.starting_container(
                 task_id=event_task_id, image_ref=environment.reference
             )
-        signal_task_running(monitor=monitor, event_task_id=event_task_id)
         run_started = time.monotonic()
         try:
-            result = subprocess.run(
-                command,
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            with relay_task_progress(
+                path=progress_path, monitor=monitor, task_id=event_task_id
+            ):
+                result = subprocess.run(
+                    command,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                run_seconds = time.monotonic() - run_started
         except FileNotFoundError as exc:
             raise SystemExit(
                 "Docker is required for task environment execution but was not found in PATH."
             ) from exc
-        run_seconds = time.monotonic() - run_started
-        timings = {"pull_seconds": pull_seconds, "run_seconds": run_seconds}
 
         # Capture container output to a per-task log; keep the console clean on
         # success and surface it only when the task fails.
@@ -284,6 +295,9 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             )
 
         output_manifest = read_json_file(manifest_path)
+        timings = execution_timings(
+            output_manifest, run_seconds=run_seconds, pull_seconds=pull_seconds
+        )
         reported_outputs, reported_metadata_outputs, reused = parse_result_manifest(
             output_manifest
         )
@@ -301,8 +315,7 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             actual_path = reported_metadata_outputs.get(output_name)
             if not isinstance(actual_path, str):
                 raise RuntimeError(
-                    f"Task {task.id!r} did not report metadata view "
-                    f"{output_name!r}."
+                    f"Task {task.id!r} did not report metadata view {output_name!r}."
                 )
             metadata_outputs[output_name] = str(host_path_from_container(actual_path))
 

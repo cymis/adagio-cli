@@ -20,8 +20,8 @@ from .container_support import (
     print_filtered_container_stderr,
     python_warning_env_assignments,
     record_container_output,
-    signal_task_running,
 )
+from .telemetry import execution_timings, relay_task_progress
 from .task_contract import (
     build_task_spec,
     container_log_path,
@@ -51,6 +51,7 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             task_id=task.id, work_path=request.work_path
         )
         spec_path = task_spec_path(task_id=task.id, work_path=request.work_path)
+        progress_path = request.work_path / f"{spec_path.stem}_progress.jsonl"
         task_spec = build_task_spec(
             plugin=task.plugin,
             action=task.action,
@@ -70,6 +71,7 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             result_manifest=str(manifest_path),
             cache_path=request.cache_path,
             recycle_pool=request.recycle_pool,
+            progress_path=str(progress_path),
         )
         write_json_file(spec_path, task_spec)
 
@@ -104,25 +106,27 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             # Conda has no image to pull; the environment is already resolved on
             # the host, so we jump straight to the container-start phase.
             monitor.starting_container(task_id=event_task_id, image_ref=reference)
-        signal_task_running(monitor=monitor, event_task_id=event_task_id)
         run_started = time.monotonic()
         try:
-            result = subprocess.run(
-                command,
-                check=False,
-                cwd=request.cwd,
-                env=_subprocess_env(python_root=python_root),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            with relay_task_progress(
+                path=progress_path, monitor=monitor, task_id=event_task_id
+            ):
+                result = subprocess.run(
+                    command,
+                    check=False,
+                    cwd=request.cwd,
+                    env=_subprocess_env(python_root=python_root),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                run_seconds = time.monotonic() - run_started
         except FileNotFoundError as exc:
             raise SystemExit(
                 "Conda is required for conda task environment execution but was "
                 "not found in PATH. Set ADAGIO_CONDA_EXE or conda_executable in "
                 "the runtime config."
             ) from exc
-        run_seconds = time.monotonic() - run_started
 
         # Persist the conda subprocess output to a per-task log so it matches the
         # docker/apptainer launchers and can be copied out by ``--log-dir``.
@@ -160,6 +164,7 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             )
 
         output_manifest = read_json_file(manifest_path)
+        timings = execution_timings(output_manifest, run_seconds=run_seconds)
         reported_outputs, reported_metadata_outputs, reused = parse_result_manifest(
             output_manifest
         )
@@ -177,8 +182,7 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             actual_path = reported_metadata_outputs.get(output_name)
             if not isinstance(actual_path, str):
                 raise RuntimeError(
-                    f"Task {task.id!r} did not report metadata view "
-                    f"{output_name!r}."
+                    f"Task {task.id!r} did not report metadata view {output_name!r}."
                 )
             metadata_outputs[output_name] = actual_path
 
@@ -190,7 +194,7 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             exit_code=result.returncode,
             image_ref=reference,
             log_path=str(log_path),
-            timings={"run_seconds": run_seconds},
+            timings=timings,
         )
 
 

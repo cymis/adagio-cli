@@ -1,6 +1,7 @@
 import inspect
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -477,6 +478,12 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         # Per-node input signature (design §1.5): content-hash file inputs, hash
         # the resolved params, and pin the environment reference. Best-effort:
         # never let signature computation fail a task.
+        if state.monitor is not None:
+            state.monitor.update_task_phase(
+                task_id=task.id,
+                phase="preparing_cache" if request.recycle_pool else "preparing",
+            )
+        signature_started = time.monotonic()
         input_signature: str | None = None
         try:
             signature_inputs: dict[str, object] = {}
@@ -495,6 +502,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         except Exception:  # noqa: BLE001
             input_signature = None
 
+        signature_seconds = time.monotonic() - signature_started
         result = _launch(
             launcher,
             environment=environment,
@@ -532,7 +540,10 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         if result.image_digest is not None:
             enrichment["image_digest"] = result.image_digest
         if result.timings is not None:
-            enrichment["timings"] = dict(result.timings)
+            enrichment["timings"] = {
+                **result.timings,
+                "input_signature_seconds": signature_seconds,
+            }
             # Minimal resources block (design §4.2 NodeResources): wall time is
             # the only value the host can measure honestly for every launcher.
             # peak_rss/cpu/disk stay unset until in-container measurement lands.

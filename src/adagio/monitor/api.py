@@ -50,6 +50,10 @@ class Monitor:
         """
         return None
 
+    def update_task_phase(self, *, task_id: str, phase: str) -> None:
+        """Report what a task is doing, independently of subtask progress."""
+        return None
+
     def advance_task(
         self, *, task_id: str, advance: int = 1, message: str | None = None
     ) -> None:

@@ -1,5 +1,6 @@
 import shutil
 import tempfile
+import time
 import traceback
 import typing as t
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from .container_support import is_uri
 from .common import plan_execution_order, prune_to_targets, task_label
 from .path_utils import InputSource, resolve_host_input, resolve_host_path
 from .task_contract import container_log_path
+from .telemetry import append_timing_summary
 
 CONTAINER_SUBTASK_COUNT = 1
 
@@ -135,9 +137,7 @@ def run_serial_pipeline(
         # still require every signature output.
         if state.target_ids:
             producer_task_of_output = {
-                output.id: task.id
-                for task in tasks
-                for output in task.outputs.values()
+                output.id: task.id for task in tasks for output in task.outputs.values()
             }
             state.expected_output_ids = {
                 out.id
@@ -158,6 +158,7 @@ def run_serial_pipeline(
                 try:
                     outcome = _coerce_outcome(resolve_task(task, state, console))
                     _persist_task_log(state=state, task_id=task.id, outcome=outcome)
+                    publish_started = time.monotonic()
                     finish_outputs(
                         sig=sig,
                         arguments=arguments,
@@ -165,6 +166,17 @@ def run_serial_pipeline(
                         monitor=active_monitor,
                         require_all=False,
                     )
+                    if "timings" in outcome.enrichment:
+                        timings = outcome.enrichment["timings"]
+                        timings["output_publish_seconds"] = (
+                            time.monotonic() - publish_started
+                        )
+                        if outcome.enrichment.get("log_path"):
+                            append_timing_summary(
+                                log_path=outcome.enrichment["log_path"],
+                                timings=timings,
+                                reused=outcome.reused,
+                            )
                     active_monitor.advance_task(task_id=task.id, advance=1)
                     active_monitor.finish_task(
                         task_id=task.id,

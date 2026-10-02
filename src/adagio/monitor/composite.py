@@ -47,6 +47,10 @@ class CompositeMonitor(Monitor):
         for monitor in self._monitors:
             monitor.start_task(task_id=task_id, **details)
 
+    def update_task_phase(self, *, task_id: str, phase: str) -> None:
+        for monitor in self._monitors:
+            monitor.update_task_phase(task_id=task_id, phase=phase)
+
     def advance_task(
         self, *, task_id: str, advance: int = 1, message: str | None = None
     ) -> None:

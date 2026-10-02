@@ -155,7 +155,9 @@ class LogDirCopyTests(unittest.TestCase):
                 )
                 log_path.write_text("container output\n", encoding="utf-8")
                 captured["work_log"] = log_path
-                return TaskOutcome(reused=False, enrichment={})
+                return TaskOutcome(
+                    reused=True, enrichment={"timings": {"action_seconds": 0.0, "cache_index_seconds": 0.25}}
+                )
 
             def finish_outputs(*, sig, arguments, state, monitor, require_all):  # noqa: ANN001
                 del sig, arguments, state, monitor, require_all
@@ -170,9 +172,11 @@ class LogDirCopyTests(unittest.TestCase):
 
             persisted = log_dir / "task-1_container.log"
             self.assertTrue(persisted.exists())
-            self.assertEqual(
-                persisted.read_text(encoding="utf-8"), "container output\n"
-            )
+            contents = persisted.read_text(encoding="utf-8")
+            self.assertTrue(contents.startswith("container output\n"))
+            self.assertIn("Reused cached result: true", contents)
+            self.assertIn("cache_index_seconds: 0.250000", contents)
+            self.assertIn("output_publish_seconds:", contents)
             # The original (temp) log is gone after teardown; the copy survives.
             self.assertFalse(captured["work_log"].exists())
 

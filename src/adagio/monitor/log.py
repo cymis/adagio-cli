@@ -29,6 +29,10 @@ class LogMonitor(Monitor):
         del details
         self._console.log(f"started task id={task_id}")
 
+    def update_task_phase(self, *, task_id: str, phase: str) -> None:
+        """Log the worker-reported execution phase."""
+        self._console.log(f"task id={task_id} phase={phase}")
+
     def advance_task(
         self, *, task_id: str, advance: int = 1, message: str | None = None
     ) -> None:
