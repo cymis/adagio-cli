@@ -137,7 +137,9 @@ def run_serial_pipeline(
         # still require every signature output.
         if state.target_ids:
             producer_task_of_output = {
-                output.id: task.id for task in tasks for output in task.outputs.values()
+                output.id: task.id
+                for task in tasks
+                for output in task.outputs.values()
             }
             state.expected_output_ids = {
                 out.id

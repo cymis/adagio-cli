@@ -214,6 +214,8 @@ Artifact.import_data('FeatureTable[Frequency]', biom.Table(data, features, sampl
                 if event["task_id"] == task["task_id"]
             ]
             cached = name.startswith("warm")
+            assert phases[0] == "preparing"
+            assert phases.count("preparing_cache") == (1 if reuse else 0)
             assert task["status"] == ("cached" if cached else "completed"), task
             assert task["reused"] is cached
             if cached:
@@ -225,6 +227,7 @@ Artifact.import_data('FeatureTable[Frequency]', biom.Table(data, features, sampl
                 assert task["timings"]["action_seconds"] > 0
             if not reuse:
                 assert "checking_cache" not in phases and "using_cache" not in phases
+                assert not any(key.startswith("cache_") for key in task["timings"])
             log = Path(task["log_path"]).read_text()
             assert "Adagio task timings" in log
             assert "input_signature_seconds:" in log

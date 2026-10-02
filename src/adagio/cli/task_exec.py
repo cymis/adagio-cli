@@ -52,14 +52,10 @@ def _run_task(spec: dict[str, Any]) -> None:
     archive_input_materializations: dict[str, dict[str, Any]] = spec.get(
         "archive_input_materializations", {}
     )
-    archive_collection_inputs: dict[str, list[str]] = spec.get(
-        "archive_collection_inputs", {}
-    )
+    archive_collection_inputs: dict[str, list[str]] = spec.get("archive_collection_inputs", {})
     metadata_inputs: dict[str, str] = spec.get("metadata_inputs", {})
     params: dict[str, Any] = spec.get("params", {})
-    metadata_column_kwargs: dict[str, dict[str, str]] = spec.get(
-        "metadata_column_kwargs", {}
-    )
+    metadata_column_kwargs: dict[str, dict[str, str]] = spec.get("metadata_column_kwargs", {})
     outputs: dict[str, str] = spec["outputs"]
     metadata_outputs: dict[str, str] = spec.get("metadata_outputs", {})
     result_manifest: str | None = spec.get("result_manifest")
@@ -134,20 +130,19 @@ def _run_task(spec: dict[str, Any]) -> None:
 
         if recycle_pool is not None:
             telemetry.phase("checking_cache")
-        lookup_started = time.monotonic()
-        with telemetry.measure("cache_pool_seconds"):
-            recycle_context = (
-                cache.create_pool(key=recycle_pool, reuse=True)
-                if recycle_pool is not None and cache is not None
-                else nullcontext()
-            )
+            lookup_started = time.monotonic()
+            with telemetry.measure("cache_pool_seconds"):
+                recycle_context = cache.create_pool(key=recycle_pool, reuse=True)
+        else:
+            recycle_context = nullcontext()
         with recycle_context:
             cached_results = _load_cached_results(
                 cache=cache, action=action, kwargs=kwargs, telemetry=telemetry
             )
-            telemetry.timings["cache_lookup_seconds"] = (
-                time.monotonic() - lookup_started
-            )
+            if recycle_pool is not None:
+                telemetry.timings["cache_lookup_seconds"] = (
+                    time.monotonic() - lookup_started
+                )
             if cached_results is not None:
                 reused = True
                 results = cached_results

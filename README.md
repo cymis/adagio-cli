@@ -106,8 +106,10 @@ automatically.
 
 ## Cache progress and diagnostics
 
-A task reports **Preparing cache lookup** while resolving and loading inputs,
-then **Checking cache**. A hit reports **Using cached result** while restoring
+A task reports **Preparing task** during host-side setup, including input
+hashing, then the environment's download/start phases. Inside the environment,
+it reports **Preparing cache lookup** while resolving and loading inputs, then
+**Checking cache**. A hit reports **Using cached result** while restoring
 and saving that result, and finishes as **Reused cached result**. Only a miss
 reports **Running action**. Tasks with reuse disabled report **Preparing task**
 then **Running action**. Environment startup remains visible separately.
@@ -135,6 +137,7 @@ log viewer exposes the same breakdown. Useful fields, in seconds:
 
 Totals overlap their component stages: do not add every field together. Missing
 fields mean the stage was not measured (including older worker manifests).
+Tasks with reuse disabled omit the cache-stage timing fields.
 These are timings of successful tasks, not a profiler for failed actions.
 No cache identity, validation, or reuse policy is changed.
 

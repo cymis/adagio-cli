@@ -481,7 +481,7 @@ class TaskEnvironmentExecutor(PipelineExecutor):
         if state.monitor is not None:
             state.monitor.update_task_phase(
                 task_id=task.id,
-                phase="preparing_cache" if request.recycle_pool else "preparing",
+                phase="preparing",
             )
         signature_started = time.monotonic()
         input_signature: str | None = None

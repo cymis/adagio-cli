@@ -118,11 +118,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         host_paths = [request.cwd, request.work_path, python_root]
         for value in (
             list(request.archive_inputs.values())
-            + [
-                item
-                for values in request.archive_collection_inputs.values()
-                for item in values
-            ]
+            + [item for values in request.archive_collection_inputs.values() for item in values]
             + list(request.metadata_inputs.values())
         ):
             if is_uri(value):
@@ -235,7 +231,8 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             actual_path = reported_metadata_outputs.get(output_name)
             if not isinstance(actual_path, str):
                 raise RuntimeError(
-                    f"Task {task.id!r} did not report metadata view {output_name!r}."
+                    f"Task {task.id!r} did not report metadata view "
+                    f"{output_name!r}."
                 )
             metadata_outputs[output_name] = str(host_path_from_container(actual_path))
 

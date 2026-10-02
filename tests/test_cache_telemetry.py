@@ -148,14 +148,17 @@ def test_miss_announces_running_only_after_lookup(worker):
     assert result["timings"]["action_seconds"] == 6
 
 
-def test_disabled_reuse_does_not_claim_to_check_cache(worker):
+@pytest.mark.parametrize("cache_enabled", [True, False])
+def test_disabled_reuse_does_not_claim_to_check_cache(worker, cache_enabled):
     spec, calls, _ = worker
     spec["recycle_pool"] = None
+    if not cache_enabled:
+        spec["cache_path"] = None
     phases, result = execute(spec)
     assert phases == ["preparing", "running", "saving"]
     assert len(calls) == 1
     assert result["reused"] is False
-    assert "cache_index_seconds" not in result["timings"]
+    assert not any(name.startswith("cache_") for name in result["timings"])
 
 
 def test_missing_cached_output_falls_back_to_action(worker):

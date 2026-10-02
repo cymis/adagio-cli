@@ -68,21 +68,20 @@ class TaskExecMetadataTests(unittest.TestCase):
                 "params": {},
                 "metadata_column_kwargs": {},
                 "outputs": {"denoising_stats": str(archive_destination)},
-                "metadata_outputs": {"denoising_stats": str(metadata_destination)},
+                "metadata_outputs": {
+                    "denoising_stats": str(metadata_destination)
+                },
                 "result_manifest": str(manifest),
                 "cache_path": None,
                 "recycle_pool": None,
             }
 
-            with (
-                patch.dict(
-                    sys.modules,
-                    {"qiime2": qiime2, "qiime2.sdk": qiime2_sdk},
-                ),
-                patch(
-                    "adagio.cli.task_exec.action_output_context",
-                    side_effect=nullcontext,
-                ),
+            with patch.dict(
+                sys.modules,
+                {"qiime2": qiime2, "qiime2.sdk": qiime2_sdk},
+            ), patch(
+                "adagio.cli.task_exec.action_output_context",
+                side_effect=nullcontext,
             ):
                 _run_task(spec)
 
@@ -97,8 +96,12 @@ class TaskExecMetadataTests(unittest.TestCase):
             self.assertEqual(
                 payload,
                 {
-                    "outputs": {"denoising_stats": f"{archive_destination}.qza"},
-                    "metadata_outputs": {"denoising_stats": str(metadata_destination)},
+                    "outputs": {
+                        "denoising_stats": f"{archive_destination}.qza"
+                    },
+                    "metadata_outputs": {
+                        "denoising_stats": str(metadata_destination)
+                    },
                     "reused": False,
                 },
             )

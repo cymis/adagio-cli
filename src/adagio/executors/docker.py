@@ -89,9 +89,7 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             for name, path in (request.metadata_outputs or {}).items()
         }
 
-        manifest_path = result_manifest_path(
-            task_id=task.id, work_path=request.work_path
-        )
+        manifest_path = result_manifest_path(task_id=task.id, work_path=request.work_path)
         spec_path = task_spec_path(task_id=task.id, work_path=request.work_path)
         progress_path = request.work_path / f"{spec_path.stem}_progress.jsonl"
         task_spec = build_task_spec(
@@ -177,25 +175,19 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         runtime_job_id = os.getenv("RUNTIME_JOB_ID")
         if runtime_job_id:
             command.extend(["--label", f"adagio.job_id={runtime_job_id}"])
-        command.extend(
-            [
-                environment.reference,
-                "python",
-                "-m",
-                "adagio.cli.task_exec",
-                "--task",
-                containerize_path(spec_path),
-            ]
-        )
+        command.extend([
+            environment.reference,
+            "python",
+            "-m",
+            "adagio.cli.task_exec",
+            "--task",
+            containerize_path(spec_path),
+        ])
 
         host_paths = [request.cwd, request.work_path, python_root]
         for value in (
             list(request.archive_inputs.values())
-            + [
-                item
-                for values in request.archive_collection_inputs.values()
-                for item in values
-            ]
+            + [item for values in request.archive_collection_inputs.values() for item in values]
             + list(request.metadata_inputs.values())
         ):
             if is_uri(value):
@@ -315,7 +307,8 @@ class DockerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             actual_path = reported_metadata_outputs.get(output_name)
             if not isinstance(actual_path, str):
                 raise RuntimeError(
-                    f"Task {task.id!r} did not report metadata view {output_name!r}."
+                    f"Task {task.id!r} did not report metadata view "
+                    f"{output_name!r}."
                 )
             metadata_outputs[output_name] = str(host_path_from_container(actual_path))
 

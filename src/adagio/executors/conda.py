@@ -182,7 +182,8 @@ class CondaTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             actual_path = reported_metadata_outputs.get(output_name)
             if not isinstance(actual_path, str):
                 raise RuntimeError(
-                    f"Task {task.id!r} did not report metadata view {output_name!r}."
+                    f"Task {task.id!r} did not report metadata view "
+                    f"{output_name!r}."
                 )
             metadata_outputs[output_name] = actual_path
 
