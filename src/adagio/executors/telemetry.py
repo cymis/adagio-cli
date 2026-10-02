@@ -78,6 +78,9 @@ def relay_task_progress(
         try:
             with path.open(encoding="utf-8") as stream:
                 while True:
+                    # Once stopping begins, make one final pass over the file.
+                    # EOF read before the stop signal can precede a final write.
+                    draining = stopped.is_set()
                     position = stream.tell()
                     line = stream.readline()
                     if line.endswith("\n"):
@@ -90,7 +93,7 @@ def relay_task_progress(
                         continue
                     # A writer may still be midway through a line.
                     stream.seek(position)
-                    if stopped.is_set():
+                    if draining:
                         return
                     stopped.wait(0.1)
         except Exception:

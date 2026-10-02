@@ -253,6 +253,49 @@ def test_worker_and_environment_times_are_separate_and_legacy_manifests_work():
     assert timings["pull_seconds"] == 2
 
 
+def test_relay_drains_a_final_write_after_reader_reaches_eof(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from adagio.executors import telemetry
+
+    path = tmp_path / "phases.jsonl"
+    at_eof = threading.Event()
+    stopped = threading.Event()
+    seen = []
+    original_open = Path.open
+
+    class RecordingMonitor(Monitor):
+        def update_task_phase(self, *, task_id, phase):
+            seen.append(phase)
+
+    @contextmanager
+    def pause_at_eof(self, mode="r", *args, **kwargs):
+        with original_open(self, mode, *args, **kwargs) as stream:
+            if self != path or mode != "r":
+                yield stream
+                return
+
+            def readline():
+                line = stream.readline()
+                if not line and not at_eof.is_set():
+                    at_eof.set()
+                    assert stopped.wait(2)
+                return line
+
+            yield SimpleNamespace(tell=stream.tell, seek=stream.seek, readline=readline)
+
+    monkeypatch.setattr(Path, "open", pause_at_eof)
+    monkeypatch.setattr(
+        telemetry,
+        "threading",
+        SimpleNamespace(Event=lambda: stopped, Thread=threading.Thread),
+    )
+    with relay_task_progress(path=path, monitor=RecordingMonitor(), task_id="node"):
+        assert at_eof.wait(2)
+        TaskTelemetry(str(path)).phase("using_cache")
+    assert seen == ["using_cache"]
+
+
 @pytest.mark.parametrize("kind", ["docker", "conda", "apptainer"])
 def test_launchers_relay_cache_hit_and_preserve_worker_timings(
     tmp_path, monkeypatch, kind
