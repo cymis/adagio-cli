@@ -1,6 +1,7 @@
 import collections
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import Any, cast
+from itertools import product
+from typing import Any
 
 DEFAULT_SCHEMA_VERSION = "0.1.0"
 PRIVATE_QIIME_ACTION_PREFIXES = ("_", "-")
@@ -20,9 +21,9 @@ def _plugin_display_name(plugin: Any, plugin_name: str) -> str:
 def build_plugin_metadata(plugin: Any, plugin_name: str) -> dict[str, str]:
     """Return QAPI metadata shared by plugin listings and full payloads."""
     short_description = str(getattr(plugin, "short_description", "") or "").strip()
-    description = short_description or str(
-        getattr(plugin, "description", "") or ""
-    ).strip()
+    description = (
+        short_description or str(getattr(plugin, "description", "") or "").strip()
+    )
     return {
         "display_name": _plugin_display_name(plugin, plugin_name),
         "description": description,
@@ -110,6 +111,50 @@ def _build_convert_to_metadata_action(
         ],
         "adagio_builtin": "metadata_transformer",
     }
+
+
+def _semantic_type_basenames(ast: dict[str, Any]) -> list[str]:
+    """Expand a semantic-type AST into concrete artifact-class keys."""
+    if ast.get("type") == "union":
+        return [
+            basename
+            for member in ast.get("members", [])
+            for basename in _semantic_type_basenames(member)
+        ]
+
+    name = ast.get("name")
+    if not isinstance(name, str):
+        return []
+
+    fields = ast.get("fields", [])
+    if not fields:
+        return [name]
+
+    field_basenames = [_semantic_type_basenames(field) for field in fields]
+    if any(not basenames for basenames in field_basenames):
+        return []
+
+    return [
+        f"{name}[{', '.join(field_names)}]" for field_names in product(*field_basenames)
+    ]
+
+
+def _add_metadata_flag(
+    ast: dict[str, Any],
+    has_metadata_transformation: Callable[[str], bool],
+) -> dict[str, Any]:
+    """Annotate an AST when every possible artifact type can become Metadata."""
+    basenames = _semantic_type_basenames(ast)
+    if not basenames:
+        return ast
+
+    try:
+        ast["has_metadata"] = all(
+            has_metadata_transformation(basename) for basename in basenames
+        )
+    except Exception:
+        ast["has_metadata"] = False
+    return ast
 
 
 def _private_qiime_action_id(action_key: object, action: Any) -> str | None:
@@ -206,26 +251,14 @@ def generate_qapi_payload(
 
         return qiime_type
 
-    def ast_to_basename(ast: dict[str, Any]) -> str:
-        if not ast.get("fields"):
-            return cast(str, ast["name"])
-
-        fields = [
-            ast_to_basename(field)
-            for field in cast(list[dict[str, Any]], ast["fields"])
-        ]
-        return f"{ast['name']}[{', '.join(fields)}]"
-
     def add_metadata_flag(ast: dict[str, Any]) -> dict[str, Any]:
-        try:
-            key = ast_to_basename(ast)
+        def has_metadata_transformation(key: str) -> bool:
             artifact_class = plugin_manager.artifact_classes[key]
             from_type = transform.ModelType.from_view_type(artifact_class.format)
             to_type = transform.ModelType.from_view_type(qiime2.Metadata)
-            ast["has_metadata"] = from_type.has_transformation(to_type)
-        except Exception:
-            return ast
-        return ast
+            return from_type.has_transformation(to_type)
+
+        return _add_metadata_flag(ast, has_metadata_transformation)
 
     def iter_metadata_transformer_source_types() -> Iterator[
         tuple[str, dict[str, Any]]
@@ -294,7 +327,11 @@ def generate_qapi_payload(
         except Exception:
             importable_format_records = {}
 
-        examples = getattr(artifact_class, "examples", {}) if artifact_class is not None else {}
+        examples = (
+            getattr(artifact_class, "examples", {})
+            if artifact_class is not None
+            else {}
+        )
         return {
             "type": repr(semantic_type),
             "ast": flatten_type_maps(semantic_type).to_ast(),
@@ -307,7 +344,9 @@ def generate_qapi_payload(
                 format_record_payload(name, record)
                 for name, record in sorted(importable_format_records.items())
             ],
-            "examples": sorted(str(name) for name in getattr(examples, "keys", lambda: [])()),
+            "examples": sorted(
+                str(name) for name in getattr(examples, "keys", lambda: [])()
+            ),
         }
 
     def optional_desc(value: Any) -> str | None:

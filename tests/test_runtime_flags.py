@@ -18,6 +18,22 @@ _SPEC = {
     "graph": [],
 }
 
+_TARGET_SPEC = {
+    **_SPEC,
+    "graph": [
+        {
+            "id": node_id,
+            "kind": "plugin-action",
+            "plugin": "p",
+            "action": "a",
+            "inputs": {},
+            "parameters": {},
+            "outputs": {},
+        }
+        for node_id in ("n1", "n2", "n3")
+    ],
+}
+
 
 class _CapturingExecutor:
     mode_label = "test"
@@ -60,12 +76,12 @@ class RuntimeFlagsTests(unittest.TestCase):
         self.assertEqual(arguments.outputs, "/jobs/current/outputs")
         self.assertEqual(arguments.publish, {"table": "/exports/table.qza"})
 
-    def _run(self, extra_argv, config_payload):
+    def _run(self, extra_argv, config_payload, *, spec_payload=_SPEC):
         console = Console()
         executor = _CapturingExecutor()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            spec = _write(root, "spec.json", _SPEC)
+            spec = _write(root, "spec.json", spec_payload)
             config = _write(root, "config", config_payload)
             cache = root / "cache"
             outputs = root / "outputs"
@@ -137,6 +153,7 @@ class RuntimeFlagsTests(unittest.TestCase):
         call = self._run(
             ["--log-dir", "/tmp/adagio-logs", "--targets", "n1, n2 ,n3"],
             {"version": 1},
+            spec_payload=_TARGET_SPEC,
         )
         self.assertEqual(call["log_dir"], "/tmp/adagio-logs")
         self.assertEqual(call["target_ids"], {"n1", "n2", "n3"})

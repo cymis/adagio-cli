@@ -7,11 +7,13 @@ import os
 import re
 import sys
 import tempfile
+import time
 import warnings
 import zipfile
 from pathlib import Path
 from typing import Any
 
+from adagio.executors.telemetry import TaskTelemetry
 from adagio.executors.task_contract import (
     DATA_IMPORT_PLUGIN,
     build_result_manifest,
@@ -34,8 +36,11 @@ def run_task_exec(argv: list[str]) -> None:
 
 
 def _run_task(spec: dict[str, Any]) -> None:
+    telemetry = TaskTelemetry(spec.get("progress_path"))
+    telemetry.phase("preparing_cache" if spec.get("recycle_pool") else "preparing")
+    setup_started = time.monotonic()
     if spec.get("plugin") == DATA_IMPORT_PLUGIN:
-        _run_data_import(spec)
+        _run_data_import(spec, telemetry=telemetry)
         return
 
     from qiime2 import Artifact, Cache, Metadata
@@ -52,6 +57,7 @@ def _run_task(spec: dict[str, Any]) -> None:
     params: dict[str, Any] = spec.get("params", {})
     metadata_column_kwargs: dict[str, dict[str, str]] = spec.get("metadata_column_kwargs", {})
     outputs: dict[str, str] = spec["outputs"]
+    metadata_outputs: dict[str, str] = spec.get("metadata_outputs", {})
     result_manifest: str | None = spec.get("result_manifest")
     cache_path: str | None = spec.get("cache_path")
     recycle_pool: str | None = spec.get("recycle_pool")
@@ -78,75 +84,99 @@ def _run_task(spec: dict[str, Any]) -> None:
     cache_context = cache if cache is not None else nullcontext()
     reused = False
 
+    telemetry.timings["plugin_setup_seconds"] = time.monotonic() - setup_started
     with cache_context:
         kwargs: dict[str, Any] = {}
 
-        for name, path in archive_inputs.items():
-            loaded = _load_archive_input(
-                action=action,
-                input_name=name,
-                path=path,
-                materialization=archive_input_materializations.get(name),
-            )
-            kwargs[name] = _cache_loaded_input(cache=cache, value=loaded)
+        with telemetry.measure("input_loading_seconds"):
+            for name, path in archive_inputs.items():
+                loaded = _load_archive_input(
+                    action=action,
+                    input_name=name,
+                    path=path,
+                    materialization=archive_input_materializations.get(name),
+                )
+                kwargs[name] = _cache_loaded_input(cache=cache, value=loaded)
 
-        for name, paths in archive_collection_inputs.items():
-            kwargs[name] = [
-                _cache_loaded_input(cache=cache, value=Artifact.load(path))
-                for path in paths
-            ]
+            for name, paths in archive_collection_inputs.items():
+                kwargs[name] = [
+                    _cache_loaded_input(cache=cache, value=Artifact.load(path))
+                    for path in paths
+                ]
 
-        loaded_metadata: dict[str, Metadata] = {}
-        for name, path in metadata_inputs.items():
-            if zipfile.is_zipfile(path):
-                loaded_metadata[name] = Artifact.load(path).view(Metadata)
-            else:
-                loaded_metadata[name] = Metadata.load(path)
+            loaded_metadata: dict[str, Metadata] = {}
+            for name, path in metadata_inputs.items():
+                if zipfile.is_zipfile(path):
+                    loaded_metadata[name] = Artifact.load(path).view(Metadata)
+                else:
+                    loaded_metadata[name] = Metadata.load(path)
 
-        for param_name, col_spec in metadata_column_kwargs.items():
-            source_name: str = col_spec["source"]
-            column_name: str = col_spec["column"]
-            metadata = loaded_metadata.pop(source_name)
-            kwargs[param_name] = metadata.get_column(column_name)
+            for param_name, col_spec in metadata_column_kwargs.items():
+                source_name: str = col_spec["source"]
+                column_name: str = col_spec["column"]
+                metadata = loaded_metadata.pop(source_name)
+                kwargs[param_name] = metadata.get_column(column_name)
 
-        for name, metadata in loaded_metadata.items():
-            kwargs[name] = metadata
+            for name, metadata in loaded_metadata.items():
+                kwargs[name] = metadata
 
-        for name, value in params.items():
-            kwargs[name] = _coerce_param(action=action, name=name, value=value)
+            for name, value in params.items():
+                kwargs[name] = _coerce_param(action=action, name=name, value=value)
 
-        _materialize_default_parameters(action=action, kwargs=kwargs)
+            _materialize_default_parameters(action=action, kwargs=kwargs)
 
         if recycle_pool is not None and cache is None:
             raise ValueError("A recycle pool requires a configured cache path.")
 
-        recycle_context = (
-            cache.create_pool(key=recycle_pool, reuse=True)
-            if recycle_pool is not None and cache is not None
-            else nullcontext()
-        )
+        if recycle_pool is not None:
+            telemetry.phase("checking_cache")
+            lookup_started = time.monotonic()
+            with telemetry.measure("cache_pool_seconds"):
+                recycle_context = cache.create_pool(key=recycle_pool, reuse=True)
+        else:
+            recycle_context = nullcontext()
         with recycle_context:
-            cached_results = _load_cached_results(cache=cache, action=action, kwargs=kwargs)
+            cached_results = _load_cached_results(
+                cache=cache, action=action, kwargs=kwargs, telemetry=telemetry
+            )
+            if recycle_pool is not None:
+                telemetry.timings["cache_lookup_seconds"] = (
+                    time.monotonic() - lookup_started
+                )
             if cached_results is not None:
                 reused = True
                 results = cached_results
             else:
-                with action_output_context():
+                telemetry.phase("running")
+                with telemetry.measure("action_seconds"), action_output_context():
                     results = action(**kwargs)
 
-    saved_outputs: dict[str, str] = {}
-    for name, dest_path in outputs.items():
-        artifact = getattr(results, name)
-        saved_outputs[name] = artifact.save(dest_path)
+    if not reused:
+        telemetry.phase("saving")
+    with telemetry.measure("output_save_seconds"):
+        saved_outputs: dict[str, str] = {}
+        for name, dest_path in outputs.items():
+            artifact = getattr(results, name)
+            saved_outputs[name] = artifact.save(dest_path)
+
+        saved_metadata_outputs: dict[str, str] = {}
+        for name, dest_path in metadata_outputs.items():
+            artifact = getattr(results, name)
+            saved_metadata_outputs[name] = artifact.view(Metadata).save(dest_path)
 
     if result_manifest:
         write_json_file(
             Path(result_manifest),
-            build_result_manifest(outputs=saved_outputs, reused=reused),
+            build_result_manifest(
+                outputs=saved_outputs,
+                metadata_outputs=saved_metadata_outputs,
+                reused=reused,
+                timings=telemetry.finish(),
+            ),
         )
 
 
-def _run_data_import(spec: dict[str, Any]) -> None:
+def _run_data_import(spec: dict[str, Any], *, telemetry: TaskTelemetry) -> None:
     """Import raw data into a single artifact and save it (no plugin action).
 
     Used to materialize a data-import artifact that is exposed as a pipeline
@@ -170,18 +200,24 @@ def _run_data_import(spec: dict[str, Any]) -> None:
     ((input_name, source_path),) = archive_inputs.items()
     ((output_name, dest_path),) = outputs.items()
 
-    artifact = _load_archive_input(
-        action=None,
-        input_name=input_name,
-        path=source_path,
-        materialization=materializations.get(input_name),
-    )
-    saved = artifact.save(dest_path)
+    telemetry.phase("running")
+    with telemetry.measure("input_loading_seconds"):
+        artifact = _load_archive_input(
+            action=None,
+            input_name=input_name,
+            path=source_path,
+            materialization=materializations.get(input_name),
+        )
+    telemetry.phase("saving")
+    with telemetry.measure("output_save_seconds"):
+        saved = artifact.save(dest_path)
 
     if result_manifest:
         write_json_file(
             Path(result_manifest),
-            build_result_manifest(outputs={output_name: saved}, reused=False),
+            build_result_manifest(
+                outputs={output_name: saved}, reused=False, timings=telemetry.finish()
+            ),
         )
 
 
@@ -325,7 +361,9 @@ def _materialize_default_parameters(*, action: Any, kwargs: dict[str, Any]) -> N
         kwargs[name] = spec.default
 
 
-def _load_cached_results(*, cache: Any, action: Any, kwargs: dict[str, Any]) -> Any:
+def _load_cached_results(
+    *, cache: Any, action: Any, kwargs: dict[str, Any], telemetry: TaskTelemetry
+) -> Any:
     if cache is None:
         return None
 
@@ -333,37 +371,41 @@ def _load_cached_results(*, cache: Any, action: Any, kwargs: dict[str, Any]) -> 
     if named_pool is None:
         return None
 
-    named_pool.create_index()
-    invocation = _build_invocation(action=action, kwargs=kwargs)
+    with telemetry.measure("cache_index_seconds"):
+        named_pool.create_index()
+    with telemetry.measure("cache_match_seconds"):
+        invocation = _build_invocation(action=action, kwargs=kwargs)
     if invocation not in named_pool.index:
         return None
 
-    from qiime2.core.type.util import is_collection_type
-    from qiime2.sdk import ResultCollection, Results
+    telemetry.phase("using_cache")
+    with telemetry.measure("cache_load_seconds"):
+        from qiime2.core.type.util import is_collection_type
+        from qiime2.sdk import ResultCollection, Results
 
-    try:
-        cached_outputs = named_pool.index[invocation]
-        loaded_outputs: dict[str, Any] = {}
-        for name, output_spec in action.signature.outputs.items():
-            if is_collection_type(output_spec.qiime_type):
-                cached_collection = cached_outputs[name]
-                collection_order = list(cached_collection.keys())
-                if not _validate_collection_order(collection_order):
-                    return None
+        try:
+            cached_outputs = named_pool.index[invocation]
+            loaded_outputs: dict[str, Any] = {}
+            for name, output_spec in action.signature.outputs.items():
+                if is_collection_type(output_spec.qiime_type):
+                    cached_collection = cached_outputs[name]
+                    collection_order = list(cached_collection.keys())
+                    if not _validate_collection_order(collection_order):
+                        return None
 
-                collection_order.sort(key=lambda x: x.idx)
-                loaded_collection = ResultCollection()
-                for elem_info in collection_order:
-                    loaded_collection[elem_info.item_name] = named_pool.load(
-                        cached_collection[elem_info]
-                    )
-                loaded_outputs[name] = loaded_collection
-            else:
-                loaded_outputs[name] = named_pool.load(cached_outputs[name])
-    except KeyError:
-        return None
+                    collection_order.sort(key=lambda x: x.idx)
+                    loaded_collection = ResultCollection()
+                    for elem_info in collection_order:
+                        loaded_collection[elem_info.item_name] = named_pool.load(
+                            cached_collection[elem_info]
+                        )
+                    loaded_outputs[name] = loaded_collection
+                else:
+                    loaded_outputs[name] = named_pool.load(cached_outputs[name])
+        except KeyError:
+            return None
 
-    return Results(loaded_outputs.keys(), loaded_outputs.values())
+        return Results(loaded_outputs.keys(), loaded_outputs.values())
 
 
 def _build_invocation(*, action: Any, kwargs: dict[str, Any]) -> Any:

@@ -4,7 +4,11 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from adagio.cli.config import EnvironmentOverride, load_run_config
+from adagio.cli.config import (
+    EnvironmentOverride,
+    TaskResourceRequirements,
+    load_run_config,
+)
 from adagio.executors.base import TaskEnvironmentOverride
 from adagio.executors.defaults import ConfigurableTaskEnvironmentResolver
 from adagio.model.task import PluginActionTask
@@ -26,6 +30,39 @@ def _task(*, name: str | None = None) -> PluginActionTask:
 
 
 class RunConfigTests(unittest.TestCase):
+    def test_load_run_config_accepts_per_task_resource_requirements(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "runtime.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        "",
+                        "[resources.tasks.task-1]",
+                        "cpus = 4",
+                        'memory = "8 GiB"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_run_config(config_path)
+
+        assert config is not None
+        self.assertEqual(config.resources.tasks["task-1"].cpus, 4)
+        self.assertEqual(config.resources.tasks["task-1"].memory, "8 GiB")
+
+    def test_resource_requirements_validate_cpu_and_memory_shape(self) -> None:
+        self.assertEqual(
+            TaskResourceRequirements(cpus=2, memory=" 500 MB ").memory, "500 MB"
+        )
+        with self.assertRaisesRegex(Exception, "greater than or equal to 1"):
+            TaskResourceRequirements(cpus=0)
+        with self.assertRaisesRegex(Exception, "unit-bearing quantity"):
+            TaskResourceRequirements(memory="8")
+        with self.assertRaisesRegex(Exception, "greater than zero"):
+            TaskResourceRequirements(memory="0 GiB")
+
     def test_load_run_config_accepts_apptainer_kind(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "runtime.toml"

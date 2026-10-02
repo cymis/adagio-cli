@@ -8,6 +8,43 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserves artifact-to-metadata capability metadata on polymorphic QAPI
+  outputs when every concrete semantic type supports the conversion.
+
+## 0.1.0 - 2026-09-10
+
+### Added
+
+- Publishes the first non-prerelease build of the Adagio command-line runner,
+  including the task-environment executor and connected Runtime Server support
+  validated during the alpha series.
+
+### Changed
+
+- Marks the package as beta while the command-line interface continues to
+  mature.
+
+## 0.1.0a10 - 2026-09-02
+
+### Added
+
+- Materializes implicit artifact-to-metadata views across task environments.
+- Accepts and validates optional per-task CPU and memory requests in runtime
+  configuration. The current serial executor retains but does not yet apply
+  these requests.
+- Adds the self-hosted Runtime Server execution mode, which runs task containers
+  with the server process's UID/GID and supplementary groups, drops Linux
+  capabilities, and enables `no-new-privileges` when
+  `ADAGIO_ENFORCE_HOST_USER=1`.
+
+### Fixed
+
+- Validates dependencies against the selected execution subgraph so unrelated
+  pipeline inputs do not block selected-node runs.
+- Rejects unknown execution targets rather than silently ignoring them.
+
 ## 0.1.0a6 - 2026-07-18
 
 ### Added

@@ -99,9 +99,17 @@ class RichMonitor(Monitor):
             task = self._task_lookup.get(task_id)
             if task is None:
                 return
-            task.status = "running"
+            task.status = "preparing"
             task.started_at = time.monotonic()
             self._refresh_row(task)
+
+    def update_task_phase(self, *, task_id: str, phase: str) -> None:
+        """Show cache preparation separately from action execution."""
+        with self._lock:
+            task = self._task_lookup.get(task_id)
+            if task is not None:
+                task.status = phase
+                self._refresh_row(task)
 
     def advance_task(
         self, *, task_id: str, advance: int = 1, message: str | None = None
@@ -181,7 +189,14 @@ class RichMonitor(Monitor):
     def _refresh_running_timers(self) -> None:
         """Refresh only the elapsed field for running tasks that advanced."""
         for task in self._task_lookup.values():
-            if task.status != "running":
+            if task.status not in {
+                "preparing",
+                "preparing_cache",
+                "checking_cache",
+                "using_cache",
+                "running",
+                "saving",
+            }:
                 continue
             elapsed_seconds = _elapsed_seconds(task)
             if elapsed_seconds == task.last_rendered_elapsed_seconds:
@@ -256,6 +271,11 @@ def _status_style(status: str) -> tuple[str, str]:
     """Map task state to badge text and color."""
     lookup = {
         "pending": ("PENDING", "yellow"),
+        "preparing": ("PREPARE", "cyan"),
+        "preparing_cache": ("PREPARE", "cyan"),
+        "checking_cache": ("CHECKING", "blue"),
+        "using_cache": ("REUSING", "blue"),
+        "saving": ("SAVING", "cyan"),
         "running": ("RUNNING", "cyan"),
         "completed": ("DONE", "green"),
         "cached": ("CACHED", "blue"),

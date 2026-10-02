@@ -57,20 +57,23 @@ adagio --version
 
 ## Production release
 
-1. Create an annotated tag that matches the package version:
+1. Merge `dev` into `main` and check out the resulting commit on `main`.
+   Production publication rejects tags whose commit is not contained in
+   `origin/main`.
+2. Create an annotated tag that matches the package version:
 
 ```bash
-git tag -a v0.1.0a1 -m "adagio-cli 0.1.0a1"
+git tag -a v0.1.0 -m "adagio-cli 0.1.0"
 ```
 
-2. Push the tag:
+3. Push the tag:
 
 ```bash
-git push origin v0.1.0a1
+git push origin v0.1.0
 ```
 
-3. Approve the pending `pypi` environment deployment in GitHub Actions.
-4. Confirm the package appears on PyPI and installs cleanly:
+4. Approve the pending `pypi` environment deployment in GitHub Actions.
+5. Confirm the package appears on PyPI and installs cleanly:
 
 ```bash
 python -m venv /tmp/adagio-cli-pypi

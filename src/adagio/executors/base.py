@@ -56,6 +56,7 @@ class TaskExecutionRequest:
     archive_input_materializations: Mapping[str, Mapping[str, Any]] | None = None
     cache_path: str | None = None
     recycle_pool: str | None = None
+    metadata_outputs: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ class TaskExecutionResult:
     image_digest: str | None = None
     log_path: str | None = None
     timings: Mapping[str, float] | None = None
+    metadata_outputs: Mapping[str, str] | None = None
 
 
 class TaskEnvironmentResolver(Protocol):

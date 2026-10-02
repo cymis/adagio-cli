@@ -1,5 +1,6 @@
 import shutil
 import tempfile
+import time
 import traceback
 import typing as t
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from .container_support import is_uri
 from .common import plan_execution_order, prune_to_targets, task_label
 from .path_utils import InputSource, resolve_host_input, resolve_host_path
 from .task_contract import container_log_path
+from .telemetry import append_timing_summary
 
 CONTAINER_SUBTASK_COUNT = 1
 
@@ -52,6 +54,7 @@ class SerialExecutionState:
     scope: dict[str, InputSource]
     cache_config: ExecutionCacheConfig | None
     materializations: dict[str, t.Any] = field(default_factory=dict)
+    metadata_views: dict[str, str] = field(default_factory=dict)
     missing_optional_ids: set[str] = field(default_factory=set)
     saved_output_ids: set[str] = field(default_factory=set)
     save_output_started: bool = False
@@ -89,6 +92,9 @@ def run_serial_pipeline(
 ) -> None:
     sig = pipeline.signature
     tasks = list(pipeline.iter_tasks())
+    selected_target_ids = set(target_ids) if target_ids else None
+    if selected_target_ids:
+        tasks = prune_to_targets(execution_plan=tasks, target_ids=selected_target_ids)
     active_monitor = resolve_monitor(console=console, monitor=monitor)
 
     pipeline.validate_graph()
@@ -109,7 +115,7 @@ def run_serial_pipeline(
             scope={},
             cache_config=cache_config,
             log_dir=resolved_log_dir,
-            target_ids=set(target_ids) if target_ids else None,
+            target_ids=selected_target_ids,
             monitor=active_monitor,
         )
         completed_task_ids: set[str] = set()
@@ -131,10 +137,6 @@ def run_serial_pipeline(
             scope=state.scope,
             optional_missing_ids=state.missing_optional_ids,
         )
-        if state.target_ids:
-            execution_plan = prune_to_targets(
-                execution_plan=execution_plan, target_ids=state.target_ids
-            )
         planned_task_ids = {task.id for task in execution_plan}
 
         # A partial run only produces the outputs of its pruned plan, so the
@@ -172,6 +174,7 @@ def run_serial_pipeline(
                     )
                     if persisted_log is not None:
                         outcome.enrichment["log_path"] = persisted_log
+                    publish_started = time.monotonic()
                     finish_outputs(
                         sig=sig,
                         arguments=arguments,
@@ -179,6 +182,17 @@ def run_serial_pipeline(
                         monitor=active_monitor,
                         require_all=False,
                     )
+                    if "timings" in outcome.enrichment:
+                        timings = outcome.enrichment["timings"]
+                        timings["output_publish_seconds"] = (
+                            time.monotonic() - publish_started
+                        )
+                        if outcome.enrichment.get("log_path"):
+                            append_timing_summary(
+                                log_path=outcome.enrichment["log_path"],
+                                timings=timings,
+                                reused=outcome.reused,
+                            )
                     active_monitor.advance_task(task_id=task.id, advance=1)
                     active_monitor.finish_task(
                         task_id=task.id,

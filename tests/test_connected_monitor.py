@@ -42,6 +42,22 @@ class ConnectedMonitorEventTests(unittest.TestCase):
         self.assertEqual(payloads[0]["image_ref"], "img:1")
         self.assertEqual(payloads[1]["event"], "starting_container")
 
+    def test_phases_do_not_conflate_start_or_progress_with_computation(self) -> None:
+        monitor = self._monitor()
+        with patch(
+            "adagio.monitor.connected.urllib.request.urlopen",
+            return_value=_FakeResponse(),
+        ) as urlopen:
+            monitor.start_task(task_id="t1")
+            monitor.update_task_phase(task_id="t1", phase="checking_cache")
+            monitor.update_task_phase(task_id="t1", phase="using_cache")
+            monitor.advance_task(task_id="t1")
+        payloads = _captured_payloads(urlopen.call_args_list)
+        self.assertEqual(payloads[0]["phase"], "preparing")
+        self.assertEqual(payloads[1]["phase"], "checking_cache")
+        self.assertEqual(payloads[2]["phase"], "using_cache")
+        self.assertNotIn("phase", payloads[3])
+
     def test_finish_task_carries_enrichment_fields(self) -> None:
         monitor = self._monitor()
         with patch(

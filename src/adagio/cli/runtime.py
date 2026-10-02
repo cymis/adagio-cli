@@ -32,7 +32,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         prog="adagio runtime",
         description=(
             "Execute a pipeline from spec/config/arguments files. "
-            "The config file may define default, per-plugin, and per-task environment overrides."
+            "The config file may define environment overrides and per-task resource requests."
         ),
     )
     parser.add_argument("--spec", required=True, help="Path to pipeline spec JSON.")
