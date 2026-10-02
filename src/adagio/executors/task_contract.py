@@ -68,8 +68,10 @@ def build_task_spec(
     cache_path: str | None,
     recycle_pool: str | None,
     metadata_outputs: dict[str, str] | None = None,
+    progress_path: str | None = None,
 ) -> dict[str, Any]:
     return {
+        "progress_path": progress_path,
         "plugin": plugin,
         "action": action,
         "archive_inputs": archive_inputs,
@@ -91,8 +93,10 @@ def build_result_manifest(
     outputs: Mapping[str, str],
     reused: bool,
     metadata_outputs: Mapping[str, str] | None = None,
+    timings: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     return {
+        **({"timings": dict(timings)} if timings is not None else {}),
         "outputs": dict(outputs),
         "metadata_outputs": dict(metadata_outputs or {}),
         "reused": reused,

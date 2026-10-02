@@ -34,6 +34,9 @@ class _RecordingMonitor(Monitor):
             ("starting_container", {"task_id": task_id, "image_ref": image_ref})
         )
 
+    def update_task_phase(self, *, task_id, phase):
+        self.events.append((phase, {"task_id": task_id}))
+
 
 class _Resolver:
     def resolve(self, *, task):  # noqa: ANN001
@@ -127,7 +130,9 @@ class ExecutorEnrichmentTests(unittest.TestCase):
                 work_path=work_path,
                 params={},
                 scope={},
-                cache_config=None,
+                cache_config=ExecutionCacheConfig(
+                    cache_dir=root / "cache", recycle_pool="test"
+                ),
                 monitor=monitor,
             )
 
@@ -176,7 +181,7 @@ class ExecutorEnrichmentTests(unittest.TestCase):
         )
 
         emitted = [name for name, _ in monitor.events]
-        self.assertEqual(emitted, ["pulling_image", "starting_container"])
+        self.assertEqual(emitted, ["preparing", "pulling_image", "starting_container"])
 
 
 if __name__ == "__main__":
