@@ -87,8 +87,14 @@ class TaskExecMetadataTests(unittest.TestCase):
 
             self.assertTrue(Path(f"{archive_destination}.qza").is_file())
             self.assertTrue(metadata_destination.is_file())
+            payload = read_json_file(manifest)
+            timings = payload.pop("timings")
+            self.assertGreaterEqual(timings["output_save_seconds"], 0)
+            self.assertGreaterEqual(
+                timings["worker_seconds"], timings["action_seconds"]
+            )
             self.assertEqual(
-                read_json_file(manifest),
+                payload,
                 {
                     "outputs": {
                         "denoising_stats": f"{archive_destination}.qza"
