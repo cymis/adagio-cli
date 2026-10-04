@@ -14,13 +14,123 @@ from adagio.model.task import ConvertToMetadataTask
 from adagio.qapi.build import (
     CONVERT_TO_METADATA_ACTION_ID,
     CONVERT_TO_METADATA_ACTION_NAME,
+    _add_metadata_flag,
     _build_convert_to_metadata_action,
     _iter_public_qiime_actions,
+    _semantic_type_basenames,
     build_plugin_metadata,
 )
 
 
 class QapiBuildTests(unittest.TestCase):
+    def test_semantic_type_basenames_expand_nested_and_top_level_unions(self) -> None:
+        frequency = {
+            "name": "Frequency",
+            "type": "expression",
+            "fields": [],
+            "builtin": False,
+            "predicate": None,
+        }
+        relative_frequency = {
+            "name": "RelativeFrequency",
+            "type": "expression",
+            "fields": [],
+            "builtin": False,
+            "predicate": None,
+        }
+        field_union = {
+            "name": "FeatureTable",
+            "type": "expression",
+            "fields": [
+                {
+                    "type": "union",
+                    "members": [frequency, relative_frequency],
+                }
+            ],
+            "builtin": False,
+            "predicate": None,
+        }
+        top_level_union = {
+            "type": "union",
+            "members": [
+                {
+                    "name": "FeatureTable",
+                    "type": "expression",
+                    "fields": [frequency],
+                    "builtin": False,
+                    "predicate": None,
+                },
+                {
+                    "name": "FeatureTable",
+                    "type": "expression",
+                    "fields": [relative_frequency],
+                    "builtin": False,
+                    "predicate": None,
+                },
+            ],
+        }
+
+        expected = [
+            "FeatureTable[Frequency]",
+            "FeatureTable[RelativeFrequency]",
+        ]
+        self.assertEqual(_semantic_type_basenames(field_union), expected)
+        self.assertEqual(_semantic_type_basenames(top_level_union), expected)
+
+    def test_metadata_flag_requires_every_union_member_to_support_metadata(
+        self,
+    ) -> None:
+        union_ast = {
+            "type": "union",
+            "members": [
+                {
+                    "name": "FeatureTable",
+                    "type": "expression",
+                    "fields": [
+                        {
+                            "name": "Frequency",
+                            "type": "expression",
+                            "fields": [],
+                            "builtin": False,
+                            "predicate": None,
+                        }
+                    ],
+                    "builtin": False,
+                    "predicate": None,
+                },
+                {
+                    "name": "FeatureTable",
+                    "type": "expression",
+                    "fields": [
+                        {
+                            "name": "RelativeFrequency",
+                            "type": "expression",
+                            "fields": [],
+                            "builtin": False,
+                            "predicate": None,
+                        }
+                    ],
+                    "builtin": False,
+                    "predicate": None,
+                },
+            ],
+        }
+
+        _add_metadata_flag(union_ast, lambda _: True)
+        self.assertIs(union_ast["has_metadata"], True)
+
+        _add_metadata_flag(
+            union_ast,
+            lambda basename: basename == "FeatureTable[Frequency]",
+        )
+        self.assertIs(union_ast["has_metadata"], False)
+
+        def unknown_type(_: str) -> bool:
+            raise KeyError("unknown semantic type")
+
+        _add_metadata_flag(union_ast, unknown_type)
+        self.assertIs(union_ast["has_metadata"], False)
+
     def test_plugin_metadata_prefers_short_description_and_humanizes_name(self) -> None:
         metadata = build_plugin_metadata(
             SimpleNamespace(

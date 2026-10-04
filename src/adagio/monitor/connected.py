@@ -91,9 +91,16 @@ class ConnectedMonitor(Monitor):
         self._post(**payload)
 
     def start_task(self, *, task_id: str, **details: Any) -> None:
-        payload: dict[str, Any] = {"event": "task_started", "task_id": task_id}
+        payload: dict[str, Any] = {
+            "event": "task_started",
+            "task_id": task_id,
+            "phase": "preparing",
+        }
         _merge_enrichment(payload, details)
         self._post(**payload)
+
+    def update_task_phase(self, *, task_id: str, phase: str) -> None:
+        self._post(event="task_progress", task_id=task_id, phase=phase)
 
     def advance_task(
         self, *, task_id: str, advance: int = 1, message: str | None = None

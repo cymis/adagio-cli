@@ -24,9 +24,9 @@ from .container_support import (
     print_filtered_container_stderr,
     python_warning_env_assignments,
     record_container_output,
-    signal_task_running,
     with_apptainer_binds,
 )
+from .telemetry import execution_timings, relay_task_progress
 from .task_contract import (
     build_task_spec,
     container_log_path,
@@ -80,6 +80,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             task_id=task.id, work_path=request.work_path
         )
         spec_path = task_spec_path(task_id=task.id, work_path=request.work_path)
+        progress_path = request.work_path / f"{spec_path.stem}_progress.jsonl"
         task_spec = build_task_spec(
             plugin=task.plugin,
             action=task.action,
@@ -100,6 +101,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 else None
             ),
             recycle_pool=request.recycle_pool,
+            progress_path=containerize_path(progress_path),
         )
         write_json_file(spec_path, task_spec)
 
@@ -158,26 +160,26 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
                 console.print(f"[dim]Task environment:[/dim] {label}")
 
         if monitor is not None:
-            monitor.starting_container(
-                task_id=event_task_id, image_ref=str(image_path)
-            )
-        signal_task_running(monitor=monitor, event_task_id=event_task_id)
+            monitor.starting_container(task_id=event_task_id, image_ref=str(image_path))
         run_started = time.monotonic()
         try:
-            result = subprocess.run(
-                command,
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            with relay_task_progress(
+                path=progress_path, monitor=monitor, task_id=event_task_id
+            ):
+                result = subprocess.run(
+                    command,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                run_seconds = time.monotonic() - run_started
         except FileNotFoundError as exc:
             raise SystemExit(
                 "Apptainer/Singularity is required for task environment execution "
                 "but was not found in PATH. Ensure the job environment includes the "
                 "Apptainer binary location."
             ) from exc
-        run_seconds = time.monotonic() - run_started
 
         log_path = container_log_path(task_id=task.id, work_path=request.work_path)
         record_container_output(
@@ -211,6 +213,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             )
 
         output_manifest = read_json_file(manifest_path)
+        timings = execution_timings(output_manifest, run_seconds=run_seconds)
         reported_outputs, reported_metadata_outputs, reused = parse_result_manifest(
             output_manifest
         )
@@ -241,7 +244,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             exit_code=result.returncode,
             image_ref=str(image_path),
             log_path=str(log_path),
-            timings={"run_seconds": run_seconds},
+            timings=timings,
         )
 
 

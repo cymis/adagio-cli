@@ -8,6 +8,20 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+## 0.1.1 - 2026-10-04
+
+### Added
+
+- Reports cache preparation and reuse phases with task timing breakdowns.
+
+### Fixed
+
+- Preserves task logs for failed and reused steps.
+- Drains final progress writes when a worker exits.
+
+- Preserves artifact-to-metadata capability metadata on polymorphic QAPI
+  outputs when every concrete semantic type supports the conversion.
+
 ## 0.1.0 - 2026-09-10
 
 ### Added
