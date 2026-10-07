@@ -272,6 +272,8 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                     state.missing_optional_ids.add(dst.id)
                     continue
                 state.scope[dst.id] = state.scope[src.id]
+                if src.id in state.input_types:
+                    state.input_types[dst.id] = state.input_types[src.id]
             return False
 
         if isinstance(task, ConvertToMetadataTask):
@@ -453,6 +455,11 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             work_path=state.work_path,
         )
         request = TaskExecutionRequest(
+            remote_input_types={
+                name: state.input_types[src.id]
+                for name, src in task.inputs.items()
+                if src.kind == "archive" and src.id in state.input_types
+            },
             task=task,
             cwd=state.cwd,
             work_path=state.work_path,
@@ -475,14 +482,23 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                 else None
             ),
         )
-        # Per-node input signature (design §1.5): content-hash file inputs, hash
-        # the resolved params, and pin the environment reference. Best-effort:
-        # never let signature computation fail a task.
         if state.monitor is not None:
             state.monitor.update_task_phase(
                 task_id=task.id,
                 phase="preparing",
             )
+        result = _launch(
+            launcher,
+            environment=environment,
+            request=request,
+            console=console,
+            monitor=state.monitor,
+            task_id=task.id,
+        )
+
+        # Per-node input signature (design §1.5): content-hash file inputs, hash
+        # the resolved params, and pin the environment reference. Best-effort:
+        # never let signature computation fail a task.
         signature_started = time.monotonic()
         input_signature: str | None = None
         try:
@@ -495,6 +511,10 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             input_signature = compute_input_signature(
                 params=resolved_params,
                 inputs=signature_inputs,
+                remote_digests={
+                    item["source_id"]: "sha256:" + item["sha256"]
+                    for item in result.input_downloads or []
+                },
                 env=environment_reference(
                     kind=environment.kind, reference=environment.reference
                 ),
@@ -503,14 +523,6 @@ class TaskEnvironmentExecutor(PipelineExecutor):
             input_signature = None
 
         signature_seconds = time.monotonic() - signature_started
-        result = _launch(
-            launcher,
-            environment=environment,
-            request=request,
-            console=console,
-            monitor=state.monitor,
-            task_id=task.id,
-        )
 
         for output_name, dest in task.outputs.items():
             actual_path = result.outputs.get(output_name)
@@ -552,6 +564,8 @@ class TaskEnvironmentExecutor(PipelineExecutor):
                 enrichment["resources"] = {"wall_seconds": float(run_seconds)}
         if result.log_path is not None:
             enrichment["log_path"] = result.log_path
+        if result.input_downloads:
+            enrichment["input_downloads"] = result.input_downloads
         enrichment["reused"] = result.reused
 
         return TaskOutcome(reused=result.reused, enrichment=enrichment)

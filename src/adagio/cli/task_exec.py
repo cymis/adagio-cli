@@ -1,6 +1,7 @@
 """Internal exec-task subcommand: runs a single QIIME action inside a plugin container."""
 
 import argparse
+import json
 from collections.abc import Mapping
 from contextlib import nullcontext
 import os
@@ -39,6 +40,7 @@ def _run_task(spec: dict[str, Any]) -> None:
     telemetry = TaskTelemetry(spec.get("progress_path"))
     telemetry.phase("preparing_cache" if spec.get("recycle_pool") else "preparing")
     setup_started = time.monotonic()
+    spec, input_downloads = _stage_remote_inputs(spec)
     if spec.get("plugin") == DATA_IMPORT_PLUGIN:
         _run_data_import(spec, telemetry=telemetry)
         return
@@ -172,8 +174,81 @@ def _run_task(spec: dict[str, Any]) -> None:
                 metadata_outputs=saved_metadata_outputs,
                 reused=reused,
                 timings=telemetry.finish(),
+                input_downloads=input_downloads,
             ),
         )
+
+
+def _stage_remote_inputs(spec: dict[str, Any]) -> tuple[dict[str, Any], list[dict]]:
+    """Resolve remote archives on the worker, before QIIME cache lookup.
+
+    Local inputs and raw import behavior remain owned by the normal loader.
+    URLs become paths only here; the orchestration process never fetches them.
+    """
+    from adagio.executors.container_support import is_uri
+    from adagio.remote_inputs import RemoteArtifactStore
+
+    result = dict(spec)
+    downloads = []
+
+    def resolve(name: str, source: str, *, metadata: bool = False) -> str:
+        if not is_uri(source):
+            return source
+        materialization = spec.get("archive_input_materializations", {}).get(name)
+        declared_type = spec.get("remote_input_types", {}).get(name)
+        if materialization or declared_type == "RawData":
+            raise ValueError("URL inputs support QIIME artifacts and metadata, not raw imports.")
+
+        from qiime2 import Artifact, Metadata
+        from qiime2.sdk.util import parse_type
+
+        expected = None
+        if not metadata and declared_type and declared_type != "Metadata":
+            expected = parse_type(declared_type)
+            if declared_type.startswith(("List[", "Collection[")):
+                expected = expected.fields[0]
+
+        def validate(path: str) -> dict[str, str]:
+            try:
+                if metadata and not zipfile.is_zipfile(path):
+                    Metadata.load(path)
+                    return {"type": "Metadata"}
+                artifact = Artifact.load(path)
+                artifact.validate(level="min")
+                if metadata:
+                    artifact.view(Metadata)
+            except Exception as exc:
+                expected_format = "QIIME metadata TSV or metadata-capable .qza" if metadata else "QIIME .qza artifact"
+                raise ValueError(
+                    f"Remote input {name!r} could not be loaded as {expected_format}. "
+                    f"QIIME reported: {type(exc).__name__}: {exc}"
+                ) from None
+            return {"uuid": str(artifact.uuid), "type": str(artifact.type)}
+
+        manifest = spec.get("result_manifest")
+        if not manifest:
+            raise ValueError("Remote inputs require a task result manifest in the run work directory.")
+        store = RemoteArtifactStore(Path(manifest).parent / ".adagio-downloads")
+        path, record = store.resolve(source, validate=validate)
+        if expected is not None and not parse_type(record["type"]) <= expected:
+            raise ValueError(
+                f"Remote input {name!r} has type {record['type']}; expected {declared_type}."
+            )
+        entry = {"input": name, **record}
+        downloads.append(entry)
+        print("Input download: " + json.dumps(entry), flush=True)
+        return path
+
+    for field in ("archive_inputs", "metadata_inputs"):
+        result[field] = {
+            name: resolve(name, source, metadata=field == "metadata_inputs")
+            for name, source in spec.get(field, {}).items()
+        }
+    result["archive_collection_inputs"] = {
+        name: [resolve(name, source) for source in sources]
+        for name, sources in spec.get("archive_collection_inputs", {}).items()
+    }
+    return result, downloads
 
 
 def _run_data_import(spec: dict[str, Any], *, telemetry: TaskTelemetry) -> None:
