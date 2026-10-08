@@ -1,9 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
+import errno
 from hashlib import sha256
 from http.client import IncompleteRead
 from io import BytesIO
 import json
 from pathlib import Path
+import ssl
 import sys
 from types import ModuleType, SimpleNamespace
 from urllib.error import HTTPError
@@ -13,6 +15,7 @@ import pytest
 from adagio.cli.task_exec import _stage_remote_inputs
 from adagio.executors.signature import compute_input_signature
 from adagio.remote_inputs import (
+    LocalWriteError,
     RemoteArtifactStore,
     _HTTPSRedirectHandler,
     parse_artifact_url,
@@ -156,6 +159,58 @@ def test_retries_are_bounded_and_partial_files_removed(monkeypatch, tmp_path, er
     with pytest.raises(RuntimeError, match="Cannot download input"):
         RemoteArtifactStore(tmp_path).resolve(URL, validate=validate)
     assert len(calls) == 3
+    assert not list(tmp_path.glob("*.partial"))
+
+
+class BrokenBody(Response):
+    def read(self, size=-1):
+        raise ssl.SSLError("record layer failure")
+
+
+def test_tls_failure_mid_body_is_retried(monkeypatch, tmp_path):
+    calls = network(monkeypatch, iter([BrokenBody(), Response()]))
+    path, _ = RemoteArtifactStore(tmp_path).resolve(URL, validate=validate)
+    assert Path(path).read_bytes() == PAYLOAD
+    assert len(calls) == 2
+
+
+def test_insufficient_space_fails_before_transfer(monkeypatch, tmp_path):
+    calls = network(monkeypatch, iter([Response()]))
+    monkeypatch.setattr(
+        "adagio.remote_inputs.shutil.disk_usage", lambda _: SimpleNamespace(free=1)
+    )
+    with pytest.raises(LocalWriteError, match="Not enough disk space") as exc:
+        RemoteArtifactStore(tmp_path).resolve(URL, validate=validate)
+    assert "id=123" not in str(exc.value)
+    assert len(calls) == 1
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_disk_full_is_not_retried(monkeypatch, tmp_path):
+    calls = network(monkeypatch, iter([Response()] * 3))
+    real_open = Path.open
+
+    class FullDisk:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.handle.close()
+
+        def write(self, chunk):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    def open_(self, mode="r", *args, **kwargs):
+        handle = real_open(self, mode, *args, **kwargs)
+        return FullDisk(handle) if mode == "wb" else handle
+
+    monkeypatch.setattr(Path, "open", open_)
+    with pytest.raises(LocalWriteError, match="No space left on device"):
+        RemoteArtifactStore(tmp_path).resolve(URL, validate=validate)
+    assert len(calls) == 1
     assert not list(tmp_path.glob("*.partial"))
 
 

@@ -111,15 +111,21 @@ lookup, including runs with reuse enabled. To verify a specific version, append
 `#sha256=<64 hexadecimal digits>` to the URL. A mismatch fails the input.
 Transfer resumption and persistent download caching are not implemented yet.
 
-HTTPS URLs to artifacts and metadata TSVs are supported: raw data imports, remote manifests,
-visualizations, login flows, and embedded URL credentials are not supported.
+The staging directory lives in the run's temporary work directory, which is
+under the system temporary directory (`TMPDIR` on macOS and Linux). Point
+`TMPDIR` at a larger volume for large inputs. A download whose reported size
+exceeds the free space there fails before transfer; disk errors are not
+retried. Download time appears as `input_download_seconds` in the task timings.
+
+Raw data imports, remote manifests, visualizations, login flows, and embedded
+URL credentials are not supported.
 The URL need not end in `.qza`; its contents are validated. Workers need network
 access to the source. No `wget` or `curl` installation is needed.
 
 Task logs contain transfer progress. `--log-dir` also saves per-task
 `*_inputs.json` receipts with the source, final URL, byte count, SHA-256, type,
-and original UUID for artifacts (metadata TSVs have no artifact UUID). Connected runs include these receipts in their task-finished
-events. URL query strings are omitted from receipts and download logs; the full
+and original UUID for artifacts (metadata TSVs have no artifact UUID).
+Connected runs include these receipts in their task-finished events. URL query strings are omitted from receipts and download logs; the full
 source is represented by a hash and remains in the supplied run arguments.
 
 ## Catalog pipelines

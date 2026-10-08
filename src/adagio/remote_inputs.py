@@ -11,10 +11,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import tempfile
 import time
 from typing import Callable
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.parse import urldefrag, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -85,6 +86,30 @@ def _file_lock(path: Path):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+class LocalWriteError(RuntimeError):
+    """Disk failures are not network failures: never retried."""
+
+
+@contextmanager
+def _local_write(destination: Path, label: str):
+    try:
+        yield
+    except OSError as exc:
+        raise LocalWriteError(
+            f"Cannot save input from {label} in {destination.parent}: "
+            f"{exc.strerror or type(exc).__name__}."
+        ) from None
+
+
+def _check_free_space(directory: Path, size: int, label: str) -> None:
+    free = shutil.disk_usage(directory).free
+    if size > free:
+        raise LocalWriteError(
+            f"Not enough disk space for input from {label}: it is {size} bytes "
+            f"and {directory} has {free} bytes free."
+        )
+
+
 class RemoteArtifactStore:
     def __init__(self, directory: Path):
         self.directory = directory
@@ -151,17 +176,25 @@ class RemoteArtifactStore:
                 with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
                     parse_artifact_url(response.geturl())
                     expected_size = response.headers.get("Content-Length")
+                    if expected_size is not None:
+                        _check_free_space(destination.parent, int(expected_size), label)
                     digest = sha256()
                     size = 0
                     last_progress = time.monotonic()
-                    with destination.open("wb") as handle:
+                    # Only file operations are local; response.read stays retryable.
+                    with _local_write(destination, label):
+                        handle = destination.open("wb")
+                    with handle:
                         while chunk := response.read(CHUNK_SIZE):
-                            handle.write(chunk)
+                            with _local_write(destination, label):
+                                handle.write(chunk)
                             digest.update(chunk)
                             size += len(chunk)
                             if time.monotonic() - last_progress >= 10:
                                 print(f"Downloaded {size} bytes: {label}", flush=True)
                                 last_progress = time.monotonic()
+                        with _local_write(destination, label):
+                            handle.flush()
                     if expected_size is not None and size != int(expected_size):
                         raise IncompleteRead(b"", int(expected_size) - size)
                     print(f"Downloaded {size} bytes: {label}", flush=True)
@@ -171,13 +204,8 @@ class RemoteArtifactStore:
                         "sha256": digest.hexdigest(),
                         "bytes": size,
                     }
-            except (
-                HTTPError,
-                URLError,
-                TimeoutError,
-                ConnectionError,
-                IncompleteRead,
-            ) as exc:
+            # OSError covers URLError, timeouts, resets and TLS failures mid-body.
+            except (OSError, IncompleteRead) as exc:
                 retryable = not isinstance(exc, HTTPError) or exc.code in {
                     408,
                     429,

@@ -39,8 +39,10 @@ def run_task_exec(argv: list[str]) -> None:
 def _run_task(spec: dict[str, Any]) -> None:
     telemetry = TaskTelemetry(spec.get("progress_path"))
     telemetry.phase("preparing_cache" if spec.get("recycle_pool") else "preparing")
+    # Downloads are timed apart from plugin setup, which they would otherwise dwarf.
+    with telemetry.measure("input_download_seconds"):
+        spec, input_downloads = _stage_remote_inputs(spec)
     setup_started = time.monotonic()
-    spec, input_downloads = _stage_remote_inputs(spec)
     if spec.get("plugin") == DATA_IMPORT_PLUGIN:
         _run_data_import(spec, telemetry=telemetry)
         return
