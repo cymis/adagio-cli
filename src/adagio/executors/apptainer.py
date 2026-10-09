@@ -82,6 +82,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
         spec_path = task_spec_path(task_id=task.id, work_path=request.work_path)
         progress_path = request.work_path / f"{spec_path.stem}_progress.jsonl"
         task_spec = build_task_spec(
+            remote_input_types=dict(request.remote_input_types or {}),
             plugin=task.plugin,
             action=task.action,
             archive_inputs=archive_inputs,
@@ -237,6 +238,7 @@ class ApptainerTaskEnvironmentLauncher(TaskEnvironmentLauncher):
             metadata_outputs[output_name] = str(host_path_from_container(actual_path))
 
         return TaskExecutionResult(
+            input_downloads=output_manifest.get("input_downloads"),
             outputs=resolved_outputs,
             reused=reused,
             metadata_outputs=metadata_outputs,

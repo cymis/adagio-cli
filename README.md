@@ -80,6 +80,54 @@ These options are explicit and mutually exclusive. Omitting both leaves the
 plugin without a default; the Adagio app will flag that plugin until an
 environment is selected for a run.
 
+## Remote artifact inputs
+
+An artifact input accepts a local path or an HTTPS URL, both on the command
+line and in an arguments JSON file:
+
+```bash
+adagio run pipeline.adg --config runtime.toml --cache-dir ./cache \
+  --input-seqs 'https://example.org/data/seqs.qza' --log-dir ./logs
+```
+
+```json
+{"version": 1, "inputs": {"seqs": "https://example.org/data/seqs.qza"}}
+```
+
+Pass that file with `--arguments arguments.json`. The flag name (`seqs` here)
+comes from the pipeline's input name.
+
+The consuming task downloads the artifact inside its execution environment;
+the orchestration process does not fetch it. The original archive is loaded
+without re-importing, preserving its UUID and QIIME provenance. The downloaded
+type must match the declared input type and consuming action. Collections may
+contain both local paths and URLs; artifact URLs can also supply metadata when
+the artifact supports a metadata view. Metadata inputs also accept HTTPS URLs
+to TSV files, which QIIME loads directly without importing them as artifacts.
+
+Downloads stream to disk with bounded retries and share a locked staging
+directory for the run. Every new run fetches again before QIIME result-cache
+lookup, including runs with reuse enabled. To verify a specific version, append
+`#sha256=<64 hexadecimal digits>` to the URL. A mismatch fails the input.
+Transfer resumption and persistent download caching are not implemented yet.
+
+The staging directory lives in the run's temporary work directory, which is
+under the system temporary directory (`TMPDIR` on macOS and Linux). Point
+`TMPDIR` at a larger volume for large inputs. A download whose reported size
+exceeds the free space there fails before transfer; disk errors are not
+retried. Download time appears as `input_download_seconds` in the task timings.
+
+Raw data imports, remote manifests, visualizations, login flows, and embedded
+URL credentials are not supported.
+The URL need not end in `.qza`; its contents are validated. Workers need network
+access to the source. No `wget` or `curl` installation is needed.
+
+Task logs contain transfer progress. `--log-dir` also saves per-task
+`*_inputs.json` receipts with the source, final URL, byte count, SHA-256, type,
+and original UUID for artifacts (metadata TSVs have no artifact UUID).
+Connected runs include these receipts in their task-finished events. URL query strings are omitted from receipts and download logs; the full
+source is represented by a hash and remains in the supplied run arguments.
+
 ## Catalog pipelines
 
 Run a pipeline from the Adagio pipeline catalog:
