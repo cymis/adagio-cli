@@ -238,7 +238,7 @@ class OutputOptionTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("adagio.cli.main.run_pipeline_from_kwargs") as run_mock:
+            with patch("adagio.cli.runner.run_pipeline_from_kwargs") as run_mock:
                 with self.assertRaises(SystemExit) as exc:
                     main(
                         [

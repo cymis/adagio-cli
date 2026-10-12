@@ -1,31 +1,30 @@
+"""CLI entrypoint.
+
+Only the subcommand that runs gets imported. The pipeline runner pulls in
+pydantic, the executors and the catalog client, which `qapi list`/`build`
+never need, and the desktop app spawns those in a fresh interpreter per
+Inspect, so every module loaded here is paid for on each spawn.
+"""
+
 import json
 import sys
 from contextlib import ExitStack
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from cyclopts import App, Group, Parameter
 from cyclopts.panel import CycloptsPanel
 from rich.console import Console
 
 from .. import __version__
-from ..app.parsers.pipeline import Input as InputSpec
-from ..app.parsers.pipeline import Output as OutputSpec
-from ..app.parsers.pipeline import Parameter as ParamSpec
-from ..app.parsers.pipeline import parse_inputs, parse_outputs, parse_parameters
-from ..executors.cache_support import CACHE_DIR_HELP, REUSE_HELP, resolve_cache_dir_path
 from .args import ShowParamsMode, extract_flag_value, promote_positional_pipeline
-from .config import load_run_config
-from .dynamic import build_dynamic_run
-from .pipeline import run_pipeline_cli
-from .pipeline_sources import (
-    PipelineResolution,
-    PipelineResolutionError,
-    resolve_pipeline_reference_details,
-)
-from .qapi import run_qapi
-from .runner import run_pipeline_from_kwargs
+
+if TYPE_CHECKING:
+    from ..app.parsers.pipeline import Input as InputSpec
+    from ..app.parsers.pipeline import Output as OutputSpec
+    from ..app.parsers.pipeline import Parameter as ParamSpec
+    from .pipeline_sources import PipelineResolution
 
 
 console = Console()
@@ -53,12 +52,26 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if argv and argv[0] == "qapi":
+        from .qapi import run_qapi
+
         run_qapi(argv[1:])
         return
 
     if argv and argv[0] == "pipeline":
+        from .pipeline import run_pipeline_cli
+
         run_pipeline_cli(argv[1:])
         return
+
+    _run_pipeline_app(argv)
+
+
+def _run_pipeline_app(argv: list[str]) -> None:
+    from ..app.parsers.pipeline import parse_inputs, parse_outputs, parse_parameters
+    from ..executors.cache_support import CACHE_DIR_HELP, REUSE_HELP
+    from .config import load_run_config
+    from .dynamic import build_dynamic_run
+    from .runner import run_pipeline_from_kwargs
 
     argv, positional_pipeline = promote_positional_pipeline(argv)
     pipeline_str = extract_flag_value(argv, "--pipeline", "-p")
@@ -69,7 +82,11 @@ def main(argv: list[str] | None = None) -> None:
             ShowParamsMode(show_mode_str) if show_mode_str else ShowParamsMode.REQUIRED
         )
     except ValueError:
-        console.print(CycloptsPanel("Invalid --show-params value. Use one of: all, missing, required."))
+        console.print(
+            CycloptsPanel(
+                "Invalid --show-params value. Use one of: all, missing, required."
+            )
+        )
         sys.exit(1)
     if pipeline_str is None:
         pipeline_str = positional_pipeline
@@ -80,6 +97,7 @@ def main(argv: list[str] | None = None) -> None:
         help_format="rich",
         version=__version__,
     )
+
     @app.command
     def cache() -> None:
         """Manage the shared QIIME cache directory."""
@@ -188,7 +206,9 @@ def main(argv: list[str] | None = None) -> None:
         arguments_path_str = extract_flag_value(argv, "--arguments")
         config_path_str = extract_flag_value(argv, "--config")
         arguments_data = (
-            _load_arguments_data(Path(arguments_path_str), console) if arguments_path_str else None
+            _load_arguments_data(Path(arguments_path_str), console)
+            if arguments_path_str
+            else None
         )
         if config_path_str:
             load_run_config(Path(config_path_str))
@@ -207,8 +227,12 @@ def main(argv: list[str] | None = None) -> None:
             visible_input_names={spec.name for spec in visible_inputs},
             visible_param_names={spec.name for spec in visible_params},
             visible_output_names={spec.name for spec in visible_outputs},
-            argument_inputs=arguments_data.get("inputs", {}) if arguments_data else None,
-            argument_params=arguments_data.get("parameters", {}) if arguments_data else None,
+            argument_inputs=arguments_data.get("inputs", {})
+            if arguments_data
+            else None,
+            argument_params=arguments_data.get("parameters", {})
+            if arguments_data
+            else None,
             run_handler=partial(
                 run_pipeline_from_kwargs,
                 console=console,
@@ -221,12 +245,12 @@ def main(argv: list[str] | None = None) -> None:
 
 def _filter_visible_specs(
     *,
-    input_specs: list[InputSpec],
-    param_specs: list[ParamSpec],
-    output_specs: list[OutputSpec],
+    input_specs: "list[InputSpec]",
+    param_specs: "list[ParamSpec]",
+    output_specs: "list[OutputSpec]",
     show_mode: ShowParamsMode,
     arguments_data: dict[str, Any] | None,
-) -> tuple[list[InputSpec], list[ParamSpec], list[OutputSpec]]:
+) -> "tuple[list[InputSpec], list[ParamSpec], list[OutputSpec]]":
     if show_mode is ShowParamsMode.ALL:
         return input_specs, param_specs, output_specs
 
@@ -276,13 +300,23 @@ def _load_arguments_data(path: Path, _console: Console | None = None) -> dict[st
     if not isinstance(data.get("inputs"), dict) or not isinstance(
         data.get("parameters"), dict
     ):
-        _con.print(CycloptsPanel("Invalid arguments file: 'inputs' and 'parameters' must be objects."))
+        _con.print(
+            CycloptsPanel(
+                "Invalid arguments file: 'inputs' and 'parameters' must be objects."
+            )
+        )
         sys.exit(1)
     return data
 
 
 def _is_missing(value: Any) -> bool:
-    return value is None or value == "" or value == "<fill me>" or value == [] or value == {}
+    return (
+        value is None
+        or value == ""
+        or value == "<fill me>"
+        or value == []
+        or value == {}
+    )
 
 
 def _resolve_pipeline(
@@ -291,7 +325,12 @@ def _resolve_pipeline(
     console: Console,
     exit_stack: ExitStack,
     download_cache_dir: Path | None = None,
-) -> PipelineResolution:
+) -> "PipelineResolution":
+    from .pipeline_sources import (
+        PipelineResolutionError,
+        resolve_pipeline_reference_details,
+    )
+
     try:
         return resolve_pipeline_reference_details(
             reference,
@@ -306,6 +345,8 @@ def _resolve_pipeline(
 def _resolve_download_cache_dir(raw_value: str | None) -> Path | None:
     if raw_value is None:
         return None
+    from ..executors.cache_support import resolve_cache_dir_path
+
     return resolve_cache_dir_path(cwd=Path.cwd().resolve(), raw_value=raw_value)
 
 

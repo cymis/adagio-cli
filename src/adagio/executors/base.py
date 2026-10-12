@@ -57,6 +57,7 @@ class TaskExecutionRequest:
     cache_path: str | None = None
     recycle_pool: str | None = None
     metadata_outputs: Mapping[str, str] | None = None
+    remote_input_types: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class TaskExecutionResult:
     image_digest: str | None = None
     log_path: str | None = None
     timings: Mapping[str, float] | None = None
+    input_downloads: list[dict[str, Any]] | None = None
     metadata_outputs: Mapping[str, str] | None = None
 
 

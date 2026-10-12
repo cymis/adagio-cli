@@ -18,7 +18,7 @@ from .cache_support import ExecutionCacheConfig
 from .container_support import is_uri
 from .common import plan_execution_order, prune_to_targets, task_label
 from .path_utils import InputSource, resolve_host_input, resolve_host_path
-from .task_contract import container_log_path
+from .task_contract import container_log_path, task_file_stem, write_json_file
 from .telemetry import append_timing_summary
 
 CONTAINER_SUBTASK_COUNT = 1
@@ -53,6 +53,7 @@ class SerialExecutionState:
     params: dict[str, t.Any]
     scope: dict[str, InputSource]
     cache_config: ExecutionCacheConfig | None
+    input_types: dict[str, str] = field(default_factory=dict)
     materializations: dict[str, t.Any] = field(default_factory=dict)
     metadata_views: dict[str, str] = field(default_factory=dict)
     missing_optional_ids: set[str] = field(default_factory=set)
@@ -113,6 +114,7 @@ def run_serial_pipeline(
             work_path=Path(work_dir),
             params=sig.get_params(arguments),
             scope={},
+            input_types={item.id: item.type for item in sig.inputs},
             cache_config=cache_config,
             log_dir=resolved_log_dir,
             target_ids=selected_target_ids,
@@ -171,6 +173,7 @@ def run_serial_pipeline(
                         state=state,
                         task_id=task.id,
                         fallback_text=REUSED_LOG_NOTE if outcome.reused else None,
+                        downloads=outcome.enrichment.get("input_downloads"),
                     )
                     if persisted_log is not None:
                         outcome.enrichment["log_path"] = persisted_log
@@ -260,6 +263,7 @@ def _persist_task_log(
     state: SerialExecutionState,
     task_id: str,
     fallback_text: str | None = None,
+    downloads: list[dict[str, t.Any]] | None = None,
 ) -> str | None:
     """Copy a task's container log into ``--log-dir`` before teardown (§5.5).
 
@@ -278,6 +282,14 @@ def _persist_task_log(
     """
     if state.log_dir is None:
         return None
+    if downloads:
+        try:
+            write_json_file(
+                state.log_dir / f"{task_file_stem(task_id)}_inputs.json",
+                {"input_downloads": downloads},
+            )
+        except OSError:
+            pass
     try:
         source = container_log_path(task_id=task_id, work_path=state.work_path)
         destination = state.log_dir / source.name

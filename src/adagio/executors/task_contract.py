@@ -68,9 +68,11 @@ def build_task_spec(
     cache_path: str | None,
     recycle_pool: str | None,
     metadata_outputs: dict[str, str] | None = None,
+    remote_input_types: dict[str, str] | None = None,
     progress_path: str | None = None,
 ) -> dict[str, Any]:
     return {
+        "remote_input_types": remote_input_types or {},
         "progress_path": progress_path,
         "plugin": plugin,
         "action": action,
@@ -93,9 +95,11 @@ def build_result_manifest(
     outputs: Mapping[str, str],
     reused: bool,
     metadata_outputs: Mapping[str, str] | None = None,
+    input_downloads: list[dict[str, Any]] | None = None,
     timings: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     return {
+        **({"input_downloads": input_downloads} if input_downloads else {}),
         **({"timings": dict(timings)} if timings is not None else {}),
         "outputs": dict(outputs),
         "metadata_outputs": dict(metadata_outputs or {}),

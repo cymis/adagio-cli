@@ -8,6 +8,16 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+## 0.1.2 - 2026-10-11
+
+### Added
+
+- Supports HTTPS artifact and metadata inputs in task workers, with TLS validation and bounded downloads.
+
+### Changed
+
+- Imports pipeline runner modules only when running a pipeline, reducing startup time for plugin inspection and QAPI builds.
+
 ## 0.1.1 - 2026-10-04
 
 ### Added

@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from urllib.parse import urldefrag
 from typing import Any, Iterable, Mapping
 
 from .container_support import is_uri
@@ -64,10 +65,10 @@ def hash_file_bytes(path: str | Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _digest_input_value(value: Any) -> Any:
+def _digest_input_value(value: Any, remote_digests: Mapping[str, str]) -> Any:
     """Content-digest a single resolved input value.
 
-    * ``str`` that is a URI  -> the URI verbatim (identity; not fetched).
+    * ``str`` that is a URI  -> the worker's digest, or URI identity if unresolved.
     * ``str`` local path     -> ``sha256`` of the file bytes (content address).
     * ``list``               -> element-wise (order preserved for collections).
     * ``dict``               -> key-sorted, values digested (named collection).
@@ -75,12 +76,16 @@ def _digest_input_value(value: Any) -> Any:
     """
     if isinstance(value, str):
         if is_uri(value):
-            return value
+            key = hashlib.sha256(urldefrag(value)[0].encode()).hexdigest()
+            return remote_digests.get(key, value)
         return hash_file_bytes(value)
     if isinstance(value, (list, tuple)):
-        return [_digest_input_value(item) for item in value]
+        return [_digest_input_value(item, remote_digests) for item in value]
     if isinstance(value, Mapping):
-        return {str(k): _digest_input_value(value[k]) for k in sorted(value, key=str)}
+        return {
+            str(k): _digest_input_value(value[k], remote_digests)
+            for k in sorted(value, key=str)
+        }
     return value
 
 
@@ -90,6 +95,7 @@ def compute_input_signature(
     inputs: Mapping[str, Any],
     env: str | None,
     upstream_ids: Iterable[str] | None = None,
+    remote_digests: Mapping[str, str] | None = None,
 ) -> str:
     """Compute the ``sha256`` per-node input signature.
 
@@ -101,6 +107,8 @@ def compute_input_signature(
             ``upstream_ids`` instead (identity, not content).
         env: The resolved environment reference, e.g. ``image_ref@digest`` for a
             docker task or the conda env name/prefix. ``None`` is allowed.
+        remote_digests: Worker-observed content digests, keyed by SHA-256 of the
+            URL without its checksum fragment. Never fetch URLs on this host.
         upstream_ids: Identity references for inputs produced by upstream tasks
             (artifact ids / element ids). Merged into the ``inputs`` block under
             their names, sorted, without content hashing.
@@ -109,7 +117,8 @@ def compute_input_signature(
         ``sha256:<hex>`` string.
     """
     digested_inputs: dict[str, Any] = {
-        str(name): _digest_input_value(value) for name, value in inputs.items()
+        str(name): _digest_input_value(value, remote_digests or {})
+        for name, value in inputs.items()
     }
     for identity in upstream_ids or ():
         # Identity-addressed upstream artifacts: store the id verbatim, keyed by
