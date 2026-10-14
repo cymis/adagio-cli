@@ -9,7 +9,9 @@ from pydantic import BaseModel
 class Parameter(BaseModel):
     id: UUID
     name: str
-    required: bool
+    # Variables are declared without values; `default` is read only from specs
+    # written before configs existed.
+    required: bool = True
     default: Optional[Any] = None
     type: str
     description: Optional[str] = None

@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from ..bundled_config import apply_bundled_config, bundled_config
 from .config import (
     default_environment_override,
     load_run_config,
@@ -67,6 +68,7 @@ def run_pipeline_from_kwargs(
     recycle_pool = kwargs.pop("recycle_pool", None)
     log_dir = kwargs.pop("log_dir", None)
     targets_raw = kwargs.pop("targets", None)
+    no_bundled_config = bool(kwargs.pop("no_bundled_config", False))
 
     with ExitStack() as exit_stack:
         try:
@@ -92,6 +94,17 @@ def run_pipeline_from_kwargs(
     input_names = {name for _, name in input_bindings}
     param_names = {name for _, name in param_bindings}
     output_name_set = set(output_names)
+
+    # Layers, lowest first: the config bundled in the file, the arguments
+    # file, then command-line flags.
+    if not no_bundled_config:
+        apply_bundled_config(
+            arguments,
+            bundled_config(data),
+            input_names=input_names,
+            parameter_names=param_names,
+            output_names=output_name_set,
+        )
 
     if arguments_file is not None:
         file_data = json.loads(arguments_file.read_text(encoding="utf-8"))
