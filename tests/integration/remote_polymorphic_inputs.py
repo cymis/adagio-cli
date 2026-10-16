@@ -13,7 +13,7 @@ import pandas as pd
 from qiime2 import Artifact
 from qiime2.sdk import PluginManager
 
-from adagio.cli.task_exec import _run_task, _stage_remote_inputs
+from adagio.cli.task_exec import _run_task
 
 
 URL = "https://example.org/table.qza"
@@ -80,18 +80,12 @@ with tempfile.TemporaryDirectory() as temporary:
         assert list(remote.ids(axis="observation")) == ["f1"]
         assert calls == [URL]
         payload = Path(taxonomy_path).read_bytes()
-        try:
-            _stage_remote_inputs(
-                {
-                    "archive_inputs": {"table": URL},
-                    "result_manifest": str(root / "invalid" / "results.json"),
-                    "remote_input_types": {"table": display_type},
-                },
-                action=action,
-            )
-        except ValueError as error:
-            assert "expected FeatureTable" in str(error), str(error)
-        else:
-            raise AssertionError("Taxonomy was accepted as a feature table")
+        for name, source in (("invalid-local", taxonomy_path), ("invalid-remote", URL)):
+            try:
+                run(name, source)
+            except TypeError as error:
+                assert "requires an argument of type FeatureTable" in str(error), str(error)
+            else:
+                raise AssertionError("Taxonomy was accepted as a feature table")
 
     print("PASS: taxa.filter_table produces the same result for URL and local inputs; wrong types are rejected.")

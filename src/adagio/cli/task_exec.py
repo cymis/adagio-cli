@@ -39,21 +39,19 @@ def run_task_exec(argv: list[str]) -> None:
 def _run_task(spec: dict[str, Any]) -> None:
     telemetry = TaskTelemetry(spec.get("progress_path"))
     telemetry.phase("preparing_cache" if spec.get("recycle_pool") else "preparing")
-    setup_started = time.monotonic()
-    action = (
-        None if spec.get("plugin") == DATA_IMPORT_PLUGIN
-        else _resolve_action(spec["plugin"], spec["action"])
-    )
-    plugin_setup_seconds = time.monotonic() - setup_started
     # Downloads are timed apart from plugin setup, which they would otherwise dwarf.
     with telemetry.measure("input_download_seconds"):
-        spec, input_downloads = _stage_remote_inputs(spec, action=action)
+        spec, input_downloads = _stage_remote_inputs(spec)
     setup_started = time.monotonic()
     if spec.get("plugin") == DATA_IMPORT_PLUGIN:
         _run_data_import(spec, telemetry=telemetry)
         return
 
     from qiime2 import Artifact, Cache, Metadata
+    from qiime2.sdk import PluginManager
+
+    plugin_name: str = spec["plugin"]
+    action_name: str = spec["action"]
     archive_inputs: dict[str, str] = spec.get("archive_inputs", {})
     archive_input_materializations: dict[str, dict[str, Any]] = spec.get(
         "archive_input_materializations", {}
@@ -68,13 +66,29 @@ def _run_task(spec: dict[str, Any]) -> None:
     cache_path: str | None = spec.get("cache_path")
     recycle_pool: str | None = spec.get("recycle_pool")
 
+    plugin_manager = PluginManager()
+
+    plugin = _resolve_key(plugin_manager.plugins, plugin_name)
+    if plugin is None:
+        available = ", ".join(sorted(plugin_manager.plugins.keys())[:20])
+        raise KeyError(
+            f"QIIME plugin {plugin_name!r} not found. "
+            f"Available plugins (first 20): [{available}]"
+        )
+
+    action = _resolve_key(plugin.actions, action_name)
+    if action is None:
+        available = ", ".join(sorted(plugin.actions.keys())[:30])
+        raise KeyError(
+            f"QIIME action {plugin_name!r}.{action_name!r} not found. "
+            f"Available actions (first 30): [{available}]"
+        )
+
     cache = Cache(cache_path) if cache_path else None
     cache_context = cache if cache is not None else nullcontext()
     reused = False
 
-    telemetry.timings["plugin_setup_seconds"] = (
-        plugin_setup_seconds + time.monotonic() - setup_started
-    )
+    telemetry.timings["plugin_setup_seconds"] = time.monotonic() - setup_started
     with cache_context:
         kwargs: dict[str, Any] = {}
 
@@ -167,30 +181,7 @@ def _run_task(spec: dict[str, Any]) -> None:
         )
 
 
-def _resolve_action(plugin_name: str, action_name: str) -> Any:
-    from qiime2.sdk import PluginManager
-
-    plugin_manager = PluginManager()
-    plugin = _resolve_key(plugin_manager.plugins, plugin_name)
-    if plugin is None:
-        available = ", ".join(sorted(plugin_manager.plugins.keys())[:20])
-        raise KeyError(
-            f"QIIME plugin {plugin_name!r} not found. "
-            f"Available plugins (first 20): [{available}]"
-        )
-    action = _resolve_key(plugin.actions, action_name)
-    if action is None:
-        available = ", ".join(sorted(plugin.actions.keys())[:30])
-        raise KeyError(
-            f"QIIME action {plugin_name!r}.{action_name!r} not found. "
-            f"Available actions (first 30): [{available}]"
-        )
-    return action
-
-
-def _stage_remote_inputs(
-    spec: dict[str, Any], *, action: Any
-) -> tuple[dict[str, Any], list[dict]]:
+def _stage_remote_inputs(spec: dict[str, Any]) -> tuple[dict[str, Any], list[dict]]:
     """Resolve remote archives on the worker, before QIIME cache lookup.
 
     Local inputs and raw import behavior remain owned by the normal loader.
@@ -211,13 +202,6 @@ def _stage_remote_inputs(
             raise ValueError("URL inputs support QIIME artifacts and metadata, not raw imports.")
 
         from qiime2 import Artifact, Metadata
-        from qiime2.sdk.util import parse_type
-
-        expected = None
-        if not metadata:
-            expected = action.signature.inputs[name].qiime_type
-            if expected.name in ("List", "Collection"):
-                expected = expected.fields[0]
 
         def validate(path: str) -> dict[str, str]:
             try:
@@ -241,10 +225,6 @@ def _stage_remote_inputs(
             raise ValueError("Remote inputs require a task result manifest in the run work directory.")
         store = RemoteArtifactStore(Path(manifest).parent / ".adagio-downloads")
         path, record = store.resolve(source, validate=validate)
-        if expected is not None and not parse_type(record["type"]) <= expected:
-            raise ValueError(
-                f"Remote input {name!r} has type {record['type']}; expected {expected}."
-            )
         entry = {"input": name, **record}
         downloads.append(entry)
         print("Input download: " + json.dumps(entry), flush=True)

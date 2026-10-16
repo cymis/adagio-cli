@@ -249,16 +249,11 @@ def fake_qiime(monkeypatch):
     class Type:
         def __init__(self, text):
             self.text = text
-            self.name = text.split("[", 1)[0]
-            self.accepted_types = (text,)
             if text.startswith(("List[", "Collection[")):
                 self.fields = [Type(text[text.index("[") + 1 : -1])]
 
         def __le__(self, other):
-            return self.text in other.accepted_types
-
-        def __str__(self):
-            return self.text
+            return self.text == other.text
 
     artifact = SimpleNamespace(
         uuid=INFO["uuid"], type=INFO["type"], validate=lambda **kw: None,
@@ -293,16 +288,6 @@ def fake_qiime(monkeypatch):
     return loads
 
 
-@pytest.fixture
-def fake_action(fake_qiime):
-    from qiime2.sdk.util import parse_type
-
-    return SimpleNamespace(signature=SimpleNamespace(inputs={
-        name: SimpleNamespace(qiime_type=parse_type(INFO["type"]))
-        for name in ("data", "tables")
-    }))
-
-
 def task_spec(tmp_path):
     return {
         "archive_inputs": {"data": URL},
@@ -312,13 +297,13 @@ def task_spec(tmp_path):
 
 
 def test_worker_stages_scalar_collection_and_artifact_metadata(
-    monkeypatch, tmp_path, fake_qiime, fake_action
+    monkeypatch, tmp_path, fake_qiime
 ):
     calls = network(monkeypatch, iter([Response()]))
     spec = task_spec(tmp_path)
     spec["archive_collection_inputs"] = {"tables": [URL, "/local/file.qza"]}
     spec["metadata_inputs"] = {"metadata": URL}
-    staged, records = _stage_remote_inputs(spec, action=fake_action)
+    staged, records = _stage_remote_inputs(spec)
     assert (
         staged["archive_inputs"]["data"]
         == staged["archive_collection_inputs"]["tables"][0]
@@ -331,116 +316,75 @@ def test_worker_stages_scalar_collection_and_artifact_metadata(
     assert len(fake_qiime) == 3
 
 
-def test_worker_accepts_remote_metadata_and_preserves_bytes(monkeypatch, tmp_path, fake_action):
+def test_worker_accepts_remote_metadata_and_preserves_bytes(monkeypatch, tmp_path, fake_qiime):
     payload = b"id\tbarcode-sequence\ns1\tACGT\n"
     calls = network(monkeypatch, iter([Response(payload=payload)]))
     spec = task_spec(tmp_path)
     spec["archive_inputs"] = {}
     spec["metadata_inputs"] = {"barcodes": URL}
-    staged, records = _stage_remote_inputs(spec, action=fake_action)
+    staged, records = _stage_remote_inputs(spec)
     path = Path(staged["metadata_inputs"]["barcodes"])
     assert path.suffix == ".tsv"
     assert path.read_bytes() == payload
     assert records[0]["type"] == "Metadata"
     assert records[0]["sha256"] == sha256(payload).hexdigest()
     assert "uuid" not in records[0]
-    assert _stage_remote_inputs(spec, action=fake_action) == (staged, records)
+    assert _stage_remote_inputs(spec) == (staged, records)
     assert len(calls) == 1
     # Sharing the URL cache cannot make TSV data valid for an artifact input.
     with pytest.raises(ValueError, match="QIIME .qza artifact"):
-        _stage_remote_inputs(task_spec(tmp_path), action=fake_action)
+        _stage_remote_inputs(task_spec(tmp_path))
 
 
-def test_worker_rejects_invalid_remote_metadata(monkeypatch, tmp_path, fake_action):
+def test_worker_rejects_invalid_remote_metadata(monkeypatch, tmp_path, fake_qiime):
     network(monkeypatch, iter([Response(payload=b"<html>Not metadata</html>")]))
     spec = task_spec(tmp_path)
     spec["archive_inputs"] = {}
     spec["metadata_inputs"] = {"barcodes": URL}
     with pytest.raises(ValueError, match="metadata TSV") as error:
-        _stage_remote_inputs(spec, action=fake_action)
+        _stage_remote_inputs(spec)
     assert "barcodes" in str(error.value)
     assert "Invalid metadata TSV" in str(error.value)
     assert not list((tmp_path / ".adagio-downloads").glob("*.tsv"))
 
 
-def test_worker_rejects_action_input_type_mismatch(monkeypatch, tmp_path, fake_action):
-    from qiime2.sdk.util import parse_type
-
+def test_worker_stages_polymorphic_input_without_parsing_display_type(
+    monkeypatch, tmp_path, fake_qiime
+):
     network(monkeypatch, iter([Response()]))
     spec = task_spec(tmp_path)
-    fake_action.signature.inputs["data"].qiime_type = parse_type("FeatureData[Sequence]")
-    with pytest.raises(ValueError, match="expected FeatureData"):
-        _stage_remote_inputs(spec, action=fake_action)
+    spec["remote_input_types"]["data"] = (
+        "FeatureTable[Frequency¹ | PresenceAbsence² | RelativeFrequency³]"
+    )
+
+    def unexpected_parse_type(text):
+        raise AssertionError("Staging must defer semantic type checking to the action")
+
+    monkeypatch.setattr(sys.modules["qiime2.sdk.util"], "parse_type", unexpected_parse_type)
+    staged, records = _stage_remote_inputs(spec)
+    assert Path(staged["archive_inputs"]["data"]).read_bytes() == PAYLOAD
+    assert records[0]["type"] == INFO["type"]
 
 
-def test_worker_accepts_collection_member_type(monkeypatch, tmp_path, fake_action):
-    from qiime2.sdk.util import parse_type
-
+def test_worker_accepts_collection_member_type(monkeypatch, tmp_path, fake_qiime):
     network(monkeypatch, iter([Response()]))
     spec = task_spec(tmp_path)
     spec["remote_input_types"]["data"] = "Collection[FeatureTable[Frequency]]"
-    fake_action.signature.inputs["data"].qiime_type = parse_type(
-        "Collection[FeatureTable[Frequency]]"
-    )
     spec["archive_collection_inputs"] = {"data": [URL]}
     spec["archive_inputs"] = {}
-    _stage_remote_inputs(spec, action=fake_action)
-
-
-@pytest.mark.parametrize("collection", [False, True])
-@pytest.mark.parametrize("artifact_type", [INFO["type"], "FeatureData[Sequence]"])
-def test_worker_validates_polymorphic_signature_without_parsing_display_type(
-    monkeypatch, tmp_path, fake_action, collection, artifact_type
-):
-    from qiime2.sdk.util import parse_type
-
-    network(monkeypatch, iter([Response()]))
-    display_type = "FeatureTable[Frequency¹ | PresenceAbsence² | RelativeFrequency³]"
-    expected = parse_type(display_type)
-    expected.accepted_types = (
-        "FeatureTable[Frequency]", "FeatureTable[PresenceAbsence]",
-        "FeatureTable[RelativeFrequency]",
-    )
-    if collection:
-        expected = SimpleNamespace(name="Collection", fields=[expected])
-    fake_action.signature.inputs["data"].qiime_type = expected
-    spec = task_spec(tmp_path)
-    spec["remote_input_types"]["data"] = display_type
-    if collection:
-        spec["archive_inputs"] = {}
-        spec["archive_collection_inputs"] = {"data": [URL]}
-    original_parse_type = parse_type
-    original_load = sys.modules["qiime2"].Artifact.load
-
-    def load_artifact(path):
-        artifact = original_load(path)
-        artifact.type = artifact_type
-        return artifact
-
-    def parse_artifact_type(text):
-        assert text != display_type
-        return original_parse_type(text)
-
-    monkeypatch.setattr(sys.modules["qiime2.sdk.util"], "parse_type", parse_artifact_type)
-    monkeypatch.setattr(sys.modules["qiime2"].Artifact, "load", load_artifact)
-    if artifact_type == INFO["type"]:
-        staged, records = _stage_remote_inputs(spec, action=fake_action)
-        assert records[0]["type"] == INFO["type"]
-    else:
-        with pytest.raises(ValueError, match="expected"):
-            _stage_remote_inputs(spec, action=fake_action)
+    _stage_remote_inputs(spec)
 
 
 def test_raw_url_rejected_before_network_or_qiime(tmp_path):
     spec = task_spec(tmp_path)
     spec["archive_input_materializations"] = {"data": {"mode": "raw"}}
     with pytest.raises(ValueError, match="not raw imports"):
-        _stage_remote_inputs(spec, action=None)
+        _stage_remote_inputs(spec)
 
 
 def test_local_inputs_do_not_need_manifest_or_qiime():
     staged, downloads = _stage_remote_inputs(
-        {"archive_inputs": {"data": "/local/file.qza"}}, action=None
+        {"archive_inputs": {"data": "/local/file.qza"}}
     )
     assert staged["archive_inputs"]["data"] == "/local/file.qza"
     assert not downloads
