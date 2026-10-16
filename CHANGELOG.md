@@ -16,6 +16,11 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 - Reads variable values from the bundled configuration rather than the pipeline signature; signatures written by older releases still supply their defaults.
 
+### Fixed
+
+- Validates URL artifact inputs against installed action signatures, including
+  polymorphic types whose display labels contain superscript annotations.
+
 ## 0.1.2 - 2026-10-11
 
 ### Added
