@@ -68,6 +68,7 @@ def main(argv: list[str] | None = None) -> None:
 
 def _run_pipeline_app(argv: list[str]) -> None:
     from ..app.parsers.pipeline import parse_inputs, parse_outputs, parse_parameters
+    from ..bundled_config import bundled_config
     from ..executors.cache_support import CACHE_DIR_HELP, REUSE_HELP
     from .config import load_run_config
     from .dynamic import build_dynamic_run
@@ -210,6 +211,21 @@ def _run_pipeline_app(argv: list[str]) -> None:
             if arguments_path_str
             else None
         )
+        # What --help shows as defaults and what --show-params counts as
+        # missing follow the same layers as the run: the bundled config
+        # underneath, the arguments file over it.
+        bundled = None if "--no-bundled-config" in argv else bundled_config(data)
+        if bundled is not None:
+            arguments_data = {
+                "inputs": {
+                    **bundled["inputs"],
+                    **(arguments_data or {}).get("inputs", {}),
+                },
+                "parameters": {
+                    **bundled["parameters"],
+                    **(arguments_data or {}).get("parameters", {}),
+                },
+            }
         if config_path_str:
             load_run_config(Path(config_path_str))
         visible_inputs, visible_params, visible_outputs = _filter_visible_specs(

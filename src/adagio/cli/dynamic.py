@@ -283,6 +283,7 @@ def build_dynamic_run(
         "--pipeline",
         "-p",
         "--arguments",
+        "--no-bundled-config",
         "--config",
         "--show-params",
         "--cache-dir",
@@ -319,6 +320,18 @@ def build_dynamic_run(
             name=("--arguments",),
             group=command_group,
             help="Path to a JSON arguments file. Values are applied before CLI overrides.",
+        ),
+    ]
+    annotations["no_bundled_config"] = Annotated[
+        bool,
+        CliParameter(
+            name=("--no-bundled-config",),
+            negative=(),
+            group=command_group,
+            help=(
+                "Ignore the configuration bundled in the pipeline file. By default it "
+                "supplies values under the arguments file and these options."
+            ),
         ),
     ]
     annotations["show_params"] = Annotated[
@@ -409,6 +422,12 @@ def build_dynamic_run(
             kind=inspect.Parameter.KEYWORD_ONLY,
             default=None,
             annotation=annotations["arguments_file"],
+        ),
+        inspect.Parameter(
+            name="no_bundled_config",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default=False,
+            annotation=annotations["no_bundled_config"],
         ),
         inspect.Parameter(
             name="show_params",
@@ -616,6 +635,7 @@ def build_dynamic_run(
     def run(
         pipeline: Path,
         arguments_file: Path | None = None,
+        no_bundled_config: bool = False,
         show_params: ShowParamsMode = ShowParamsMode.REQUIRED,
         config_file: Path | None = None,
         output_dir: Path | None = None,
@@ -625,6 +645,7 @@ def build_dynamic_run(
         **kwargs: Any,
     ) -> None:
         _ = show_params
+        kwargs["no_bundled_config"] = no_bundled_config
         kwargs["output_dir"] = output_dir
         kwargs["recycle_pool"] = recycle_pool
         kwargs["log_dir"] = log_dir

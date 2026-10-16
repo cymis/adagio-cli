@@ -14,6 +14,7 @@ from ..executors.cache_support import (
     REUSE_HELP,
     resolve_cache_config,
 )
+from ..bundled_config import apply_bundled_config, bundled_config
 from ..model.arguments import AdagioArguments
 from ..model.pipeline import AdagioPipeline
 from ..monitor.composite import CompositeMonitor
@@ -117,6 +118,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         pipeline=pipeline,
         runtime_arguments=runtime_arguments,
         output_dir=output_dir,
+        spec_data=spec_data,
     )
     target_ids = _parse_targets(opts.targets)
     _validate_required_arguments(pipeline, arguments, target_ids=target_ids)
@@ -258,9 +260,23 @@ def _build_arguments(
     pipeline: AdagioPipeline,
     runtime_arguments: Any,
     output_dir: str,
+    spec_data: Any = None,
 ) -> AdagioArguments:
     arguments = pipeline.signature.to_default_arguments()
     storage_root = "/storage"
+
+    # A spec file that is a full .adg envelope brings its bundled config as
+    # the lowest layer; the job's arguments override it below.
+    bundled = bundled_config(spec_data)
+    if bundled is not None:
+        input_names, parameter_names, output_names = pipeline.signature.names()
+        apply_bundled_config(
+            arguments,
+            bundled,
+            input_names=input_names,
+            parameter_names=parameter_names,
+            output_names=output_names,
+        )
 
     if isinstance(runtime_arguments, dict):
         if isinstance(runtime_arguments.get("inputs"), dict):

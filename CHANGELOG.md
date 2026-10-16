@@ -8,6 +8,14 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ## [Unreleased]
 
+### Added
+
+- Applies the configuration bundled in a pipeline file (`configs` in the `.adg`) as the lowest argument layer, under `--arguments` and command-line flags; `--no-bundled-config` ignores it and `adagio pipeline config` prints it as an arguments file.
+
+### Changed
+
+- Reads variable values from the bundled configuration rather than the pipeline signature; signatures written by older releases still supply their defaults.
+
 ## 0.1.2 - 2026-10-11
 
 ### Added
