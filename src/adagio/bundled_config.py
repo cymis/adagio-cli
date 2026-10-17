@@ -9,10 +9,18 @@ overrides it, and command-line flags override both.
 Files written before configs existed kept variable defaults inside the spec
 (``signature.parameters[].default`` and ``meta.editor_variables[].value``);
 those read as a bundled config too, so an older file keeps working unchanged.
+
+The same config may carry an ``execution`` object: the environments and
+resources the app would run each plugin and task with, in the shape of a
+``--config`` file. The CLI applies them under any ``--config`` file the same
+way, so a downloaded pipeline runs without one.
 """
 
 from typing import Any
 
+from pydantic import ValidationError
+
+from .cli.config import AdagioRunConfig
 from .model.arguments import AdagioArguments
 
 
@@ -41,6 +49,30 @@ def bundled_config(data: Any) -> dict[str, Any] | None:
                     "outputs": _record(entry.get("outputs")),
                 }
     return _legacy_config(data.get("spec", data))
+
+
+def saved_run_config(data: Any) -> AdagioRunConfig | None:
+    """The execution settings saved with a pipeline file, or ``None``.
+
+    Raises ``SystemExit`` with a readable message when the saved settings do
+    not have the shape of a ``--config`` file.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("configs"), list):
+        return None
+    for entry in data["configs"]:
+        if not isinstance(entry, dict):
+            continue
+        execution = entry.get("execution")
+        if execution is None:
+            return None
+        try:
+            return AdagioRunConfig.model_validate(execution)
+        except ValidationError as error:
+            raise SystemExit(
+                "The execution environments saved with this pipeline are not "
+                f"valid: {error}"
+            ) from error
+    return None
 
 
 def _legacy_config(spec: Any) -> dict[str, Any] | None:
