@@ -10,7 +10,7 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ### Added
 
-- Applies the configuration bundled in a pipeline file (`configs` in the `.adg`) as the lowest argument layer, under `--arguments` and command-line flags; `--no-bundled-config` ignores it and `adagio pipeline config` prints it as an arguments file.
+- Applies the configuration bundled in a pipeline file (`configs` in the `.adg`) as the lowest argument layer, under `--arguments` and command-line flags. `--help` shows bundled values as defaults.
 
 ### Changed
 
