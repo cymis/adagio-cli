@@ -214,7 +214,7 @@ def _run_pipeline_app(argv: list[str]) -> None:
         # What --help shows as defaults and what --show-params counts as
         # missing follow the same layers as the run: the bundled config
         # underneath, the arguments file over it.
-        bundled = None if "--no-bundled-config" in argv else bundled_config(data)
+        bundled = bundled_config(data)
         if bundled is not None:
             arguments_data = {
                 "inputs": {
