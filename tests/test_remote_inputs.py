@@ -348,12 +348,22 @@ def test_worker_rejects_invalid_remote_metadata(monkeypatch, tmp_path, fake_qiim
     assert not list((tmp_path / ".adagio-downloads").glob("*.tsv"))
 
 
-def test_worker_rejects_declared_type_mismatch(monkeypatch, tmp_path, fake_qiime):
+def test_worker_stages_polymorphic_input_without_parsing_display_type(
+    monkeypatch, tmp_path, fake_qiime
+):
     network(monkeypatch, iter([Response()]))
     spec = task_spec(tmp_path)
-    spec["remote_input_types"]["data"] = "FeatureData[Sequence]"
-    with pytest.raises(ValueError, match="expected FeatureData"):
-        _stage_remote_inputs(spec)
+    spec["remote_input_types"]["data"] = (
+        "FeatureTable[Frequency¹ | PresenceAbsence² | RelativeFrequency³]"
+    )
+
+    def unexpected_parse_type(text):
+        raise AssertionError("Staging must defer semantic type checking to the action")
+
+    monkeypatch.setattr(sys.modules["qiime2.sdk.util"], "parse_type", unexpected_parse_type)
+    staged, records = _stage_remote_inputs(spec)
+    assert Path(staged["archive_inputs"]["data"]).read_bytes() == PAYLOAD
+    assert records[0]["type"] == INFO["type"]
 
 
 def test_worker_accepts_collection_member_type(monkeypatch, tmp_path, fake_qiime):
