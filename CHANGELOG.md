@@ -10,11 +10,11 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ### Added
 
-- Applies the configuration bundled in a pipeline file (`configs` in the `.adg`) as the lowest argument layer, under `--arguments` and command-line flags. `--help` shows bundled values as defaults.
+- Applies the variable values and input paths saved with a pipeline (`configs` in the `.adg`) as the lowest argument layer, under `--arguments` and command-line flags. `--help` shows a variable's value as the parameter's default.
 
 ### Changed
 
-- Reads variable values from the bundled configuration rather than the pipeline signature; signatures written by older releases still supply their defaults.
+- Reads variable values from the values saved with the pipeline rather than the pipeline signature; signatures written by older releases still supply their defaults.
 
 ### Fixed
 
