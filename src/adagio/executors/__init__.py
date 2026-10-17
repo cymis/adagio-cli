@@ -19,6 +19,7 @@ def select_default_executor(
     default_override=None,
     plugin_overrides=None,
     task_overrides=None,
+    lower_layers=(),
     launchers=None,
 ):
     from .defaults import ConfigurableTaskEnvironmentResolver
@@ -29,6 +30,7 @@ def select_default_executor(
             default_override=default_override,
             plugin_overrides=plugin_overrides,
             task_overrides=task_overrides,
+            lower_layers=lower_layers,
         ),
         launchers=launchers or builtin_task_environment_launchers(),
     )

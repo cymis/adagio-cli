@@ -334,7 +334,10 @@ def build_dynamic_run(
         CliParameter(
             name=("--config",),
             group=command_group,
-            help="Path to a TOML runtime config file.",
+            help=(
+                "Path to a TOML or JSON runtime config file. Its environments "
+                "override those saved with the pipeline."
+            ),
         ),
     ]
     annotations["cache_dir"] = Annotated[

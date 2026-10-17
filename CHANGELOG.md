@@ -11,6 +11,7 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 ### Added
 
 - Applies the variable values and input paths saved with a pipeline (`configs` in the `.adg`) as the lowest argument layer, under `--arguments` and command-line flags. `--help` shows a variable's value as the parameter's default.
+- Runs each plugin and task in the execution environment saved with the pipeline (`configs[0].execution` in the `.adg`, the shape of a `--config` file), so a downloaded pipeline runs without a separate run-config file. A `--config` file overrides the saved environments. The run header lists each plugin's environment and whether it came from the pipeline file or `--config`.
 
 ### Changed
 
