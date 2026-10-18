@@ -93,7 +93,7 @@ def _display_type_label(*, spec_type: str | None, type_hint: Any, is_input: bool
 
 
 _OUTPUT_PATH_RULE = (
-    "Overrides --output-dir for this output. A path ending in / is a folder "
+    "Overrides --output-dir for this output. A path ending in / is a directory "
     "the output is written into under its own name."
 )
 
