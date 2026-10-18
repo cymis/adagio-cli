@@ -92,11 +92,17 @@ def _display_type_label(*, spec_type: str | None, type_hint: Any, is_input: bool
     return _pipeline_type_label(type_hint)
 
 
+_OUTPUT_PATH_RULE = (
+    "Overrides --output-dir for this output. A path ending in / is a directory "
+    "the output is written into under its own name."
+)
+
+
 def _output_path_help(description: str | None) -> str:
     cleaned = (description or "").strip()
     if cleaned:
-        return f"{cleaned} Overrides --output-dir for this output."
-    return "Overrides --output-dir for this output."
+        return f"{cleaned} {_OUTPUT_PATH_RULE}"
+    return _OUTPUT_PATH_RULE
 
 
 def _render_pipeline_type(
@@ -334,7 +340,10 @@ def build_dynamic_run(
         CliParameter(
             name=("--config",),
             group=command_group,
-            help="Path to a TOML runtime config file.",
+            help=(
+                "Path to a TOML or JSON runtime config file. Its environments "
+                "override those saved with the pipeline."
+            ),
         ),
     ]
     annotations["cache_dir"] = Annotated[

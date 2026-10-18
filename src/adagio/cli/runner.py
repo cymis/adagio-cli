@@ -7,11 +7,14 @@ from typing import Any
 
 from rich import box
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
+from ..bundled_config import apply_bundled_config, bundled_config, saved_run_config
 from .config import (
     default_environment_override,
+    environment_layer,
     load_run_config,
     named_environment_overrides,
 )
@@ -87,11 +90,22 @@ def run_pipeline_from_kwargs(
     parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
     arguments = parsed_pipeline.signature.to_default_arguments()
     run_config = load_run_config(config_file)
+    saved_execution = saved_run_config(data)
     output_names = [output.name for output in parsed_pipeline.signature.outputs]
 
     input_names = {name for _, name in input_bindings}
     param_names = {name for _, name in param_bindings}
     output_name_set = set(output_names)
+
+    # Layers, lowest first: the config bundled in the file, the arguments
+    # file, then command-line flags.
+    apply_bundled_config(
+        arguments,
+        bundled_config(data),
+        input_names=input_names,
+        parameter_names=param_names,
+        output_names=output_name_set,
+    )
 
     if arguments_file is not None:
         file_data = json.loads(arguments_file.read_text(encoding="utf-8"))
@@ -196,18 +210,32 @@ def run_pipeline_from_kwargs(
         console.print(f"[bold]Cache:[/bold] {describe_cache_config(cache_config)}")
 
     from ..executors import select_default_executor
+    from ..executors.defaults import ConfigurableTaskEnvironmentResolver
 
-    executor = select_default_executor(
-        default_override=default_environment_override(run_config),
-        plugin_overrides=named_environment_overrides(
+    # Environments, lowest first: those saved with the pipeline, then the
+    # --config file.
+    environments = {
+        "default_override": default_environment_override(run_config),
+        "plugin_overrides": named_environment_overrides(
             run_config.plugins if run_config is not None else {}
         ),
-        task_overrides=named_environment_overrides(
+        "task_overrides": named_environment_overrides(
             run_config.tasks if run_config is not None else {}
         ),
-    )
+        "lower_layers": (
+            [environment_layer(saved_execution, source="pipeline file")]
+            if saved_execution is not None
+            else []
+        ),
+    }
+    executor = select_default_executor(**environments)
 
     if not suppress_header:
+        _print_environments(
+            console,
+            parsed_pipeline,
+            ConfigurableTaskEnvironmentResolver(**environments),
+        )
         console.print(f"[bold]Executing pipeline[/bold] ({executor.mode_label})")
 
     target_ids: set[str] | None = None
@@ -224,6 +252,41 @@ def run_pipeline_from_kwargs(
         target_ids=target_ids,
         log_dir=str(log_dir) if log_dir else None,
     )
+
+
+def _print_environments(console: Console, pipeline: Any, resolver: Any) -> None:
+    """List each plugin's environment and where it came from.
+
+    A task whose environment differs from the rest of its plugin's gets a row
+    of its own, so a per-task choice is never hidden behind the plugin's.
+    """
+    from ..model.task import PluginActionTask
+
+    rows: dict[str, str] = {}
+    plugin_rows: dict[str, str] = {}
+    for task in pipeline.iter_tasks():
+        if not isinstance(task, PluginActionTask):
+            continue
+        try:
+            environment = resolver.resolve(task=task)
+        except ValueError:
+            description = "[red]not configured[/red]"
+        else:
+            source = resolver.source_of(task=task) or "default"
+            description = (
+                f"{environment.kind} {escape(environment.reference)} "
+                f"[dim]({source})[/dim]"
+            )
+        if task.plugin not in plugin_rows:
+            plugin_rows[task.plugin] = description
+            rows[task.plugin] = description
+        elif plugin_rows[task.plugin] != description:
+            rows[f"{task.plugin} ({task.name or task.id})"] = description
+    if not rows:
+        return
+    console.print("[bold]Environments:[/bold]")
+    for label, description in rows.items():
+        console.print(f"  {escape(label)}: {description}", highlight=False)
 
 
 def _is_missing(value: Any) -> bool:

@@ -37,12 +37,17 @@ class AdagioSignature(BaseModel):
     outputs: 'list[_OutputDef]'
 
     def to_default_arguments(self):
+        """Placeholders for every argument, plus any default an older spec still carries.
+
+        A current spec declares variables without values; they arrive from the
+        bundled config and the layers above it (see ``adagio.bundled_config``).
+        """
         inputs = {}
         for input in self.inputs:
             inputs[input.name] = '<fill me>'
         params = {}
         for param in self.parameters:
-            if param.required:
+            if param.required and param.default is None:
                 params[param.name] = '<fill me>'
             else:
                 params[param.name] = param.default
@@ -51,6 +56,14 @@ class AdagioSignature(BaseModel):
             outputs[output.name] = '<fill me>'
 
         return AdagioArguments(inputs=inputs, parameters=params, outputs=outputs)
+
+    def names(self) -> tuple[set[str], set[str], set[str]]:
+        """Input, parameter and output names, for filtering a config to this signature."""
+        return (
+            {input.name for input in self.inputs},
+            {param.name for param in self.parameters},
+            {output.name for output in self.outputs},
+        )
 
     def validate_arguments(self, args: AdagioArguments):
         return
@@ -77,7 +90,10 @@ class _InputDef(_Def):
 
 
 class _ParameterDef(_Def):
-    required: bool
+    # The signature provides no value, so a variable is required of the layers
+    # above it unless one of them supplies it. `default` only appears in specs
+    # written before configs existed.
+    required: bool = True
     default: 'AllowableValue | None' = None
 
 

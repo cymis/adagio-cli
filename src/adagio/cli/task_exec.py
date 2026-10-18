@@ -202,13 +202,6 @@ def _stage_remote_inputs(spec: dict[str, Any]) -> tuple[dict[str, Any], list[dic
             raise ValueError("URL inputs support QIIME artifacts and metadata, not raw imports.")
 
         from qiime2 import Artifact, Metadata
-        from qiime2.sdk.util import parse_type
-
-        expected = None
-        if not metadata and declared_type and declared_type != "Metadata":
-            expected = parse_type(declared_type)
-            if declared_type.startswith(("List[", "Collection[")):
-                expected = expected.fields[0]
 
         def validate(path: str) -> dict[str, str]:
             try:
@@ -232,10 +225,6 @@ def _stage_remote_inputs(spec: dict[str, Any]) -> tuple[dict[str, Any], list[dic
             raise ValueError("Remote inputs require a task result manifest in the run work directory.")
         store = RemoteArtifactStore(Path(manifest).parent / ".adagio-downloads")
         path, record = store.resolve(source, validate=validate)
-        if expected is not None and not parse_type(record["type"]) <= expected:
-            raise ValueError(
-                f"Remote input {name!r} has type {record['type']}; expected {declared_type}."
-            )
         entry = {"input": name, **record}
         downloads.append(entry)
         print("Input download: " + json.dumps(entry), flush=True)
