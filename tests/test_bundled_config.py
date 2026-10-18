@@ -232,38 +232,6 @@ class TestRunLayers:
         assert requests[0].archive_inputs == {"table": "/file.qza"}
         assert requests[0].params == {"sampling_depth": 3}
 
-    def test_no_bundled_config_makes_the_variables_required_again(
-        self, monkeypatch, tmp_path
-    ):
-        _capture_run(monkeypatch)
-        path = tmp_path / "pipeline.adg"
-        path.write_text(
-            json.dumps(
-                _envelope(
-                    [
-                        {
-                            "inputs": {"table": "/shared/table.qza"},
-                            "parameters": {"depth": 5},
-                        }
-                    ]
-                )
-            )
-        )
-        monkeypatch.chdir(tmp_path)
-
-        assert (
-            _run(
-                [
-                    "run",
-                    str(path),
-                    "--cache-dir",
-                    str(tmp_path / "cache"),
-                    "--no-bundled-config",
-                ]
-            )
-            == 1
-        )
-
     def test_a_bundled_value_for_an_unused_variable_is_not_an_error(
         self, monkeypatch, tmp_path
     ):
@@ -306,27 +274,6 @@ class TestRunLayers:
             == 0
         )
         assert requests[0].params == {"sampling_depth": 120}
-
-
-def test_pipeline_config_command_prints_the_bundled_config(tmp_path, capsys):
-    from adagio.cli.main import main
-
-    path = tmp_path / "pipeline.adg"
-    path.write_text(json.dumps(_envelope([{"parameters": {"depth": 5}}])))
-
-    with pytest.raises(SystemExit) as exit_status:
-        main(["pipeline", "config", str(path)])
-    assert exit_status.value.code == 0
-    assert json.loads(capsys.readouterr().out) == {
-        "version": 1,
-        "inputs": {},
-        "parameters": {"depth": 5},
-        "outputs": {},
-    }
-
-    path.write_text(json.dumps(_envelope([])))
-    with pytest.raises(SystemExit, match="bundles no configuration"):
-        main(["pipeline", "config", str(path)])
 
 
 def test_runtime_applies_the_bundled_config_under_job_arguments(tmp_path):

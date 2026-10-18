@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..executors.base import TaskEnvironmentOverride
+from ..executors.defaults import EnvironmentLayer
 
 try:
     import tomllib
@@ -181,3 +182,13 @@ def named_environment_overrides(
         if (override := raw_override.to_task_environment_override()) is not None
     }
     return resolved or None
+
+
+def environment_layer(run_config: AdagioRunConfig, *, source: str) -> EnvironmentLayer:
+    """The environments ``run_config`` sets, as one layer named ``source``."""
+    return EnvironmentLayer(
+        source=source,
+        default_override=default_environment_override(run_config),
+        plugin_overrides=named_environment_overrides(run_config.plugins) or {},
+        task_overrides=named_environment_overrides(run_config.tasks) or {},
+    )

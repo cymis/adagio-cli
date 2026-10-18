@@ -10,11 +10,12 @@ using [PEP 440](https://packaging.python.org/en/latest/specifications/version-sp
 
 ### Added
 
-- Applies the configuration bundled in a pipeline file (`configs` in the `.adg`) as the lowest argument layer, under `--arguments` and command-line flags; `--no-bundled-config` ignores it and `adagio pipeline config` prints it as an arguments file.
+- Applies the variable values and input paths saved with a pipeline (`configs` in the `.adg`) as the lowest argument layer, under `--arguments` and command-line flags. `--help` shows a variable's value as the parameter's default.
+- Runs each plugin and task in the execution environment saved with the pipeline (`configs[0].execution` in the `.adg`, the shape of a `--config` file), so a downloaded pipeline runs without a separate run-config file. A `--config` file overrides the saved environments. The run header lists each plugin's environment and whether it came from the pipeline file or `--config`.
 
 ### Changed
 
-- Reads variable values from the bundled configuration rather than the pipeline signature; signatures written by older releases still supply their defaults.
+- Reads variable values from the values saved with the pipeline rather than the pipeline signature; signatures written by older releases still supply their defaults.
 
 ### Fixed
 

@@ -49,9 +49,20 @@ def resolve_output_destination(
                 f"{output_name!r}. Expected output names: [{expected_outputs}]. "
                 f"Provided output names: [{provided_outputs}]."
             )
+        if is_directory_path(raw_dest):
+            return append_output_suffix(os.path.join(raw_dest, output_name), suffix)
         return append_output_suffix(raw_dest, suffix)
 
     raise TypeError("Unsupported outputs configuration.")
+
+
+def is_directory_path(destination: str) -> bool:
+    """Whether an output destination names a directory: it ends in a separator.
+
+    Only the text decides, never the disk, so a pipeline file shared to another
+    machine means the same thing there.
+    """
+    return destination.endswith(("/", os.sep))
 
 
 def append_output_suffix(destination: str, suffix: str) -> str:
