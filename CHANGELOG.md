@@ -6,12 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 using [PEP 440](https://packaging.python.org/en/latest/specifications/version-specifiers/) version strings for Python releases.
 
-## [Unreleased]
+## 0.1.3 - 2026-10-17
 
 ### Added
 
 - Applies the variable values and input paths saved with a pipeline (`configs` in the `.adg`) as the lowest argument layer, under `--arguments` and command-line flags. `--help` shows a variable's value as the parameter's default.
 - Runs each plugin and task in the execution environment saved with the pipeline (`configs[0].execution` in the `.adg`, the shape of a `--config` file), so a downloaded pipeline runs without a separate run-config file. A `--config` file overrides the saved environments. The run header lists each plugin's environment and whether it came from the pipeline file or `--config`.
+- Treats a per-output path ending in `/` as a directory: the output is written into it as `<output name>.qza` (`.qzv` for a visualization), matching `--output-dir`.
 
 ### Changed
 
