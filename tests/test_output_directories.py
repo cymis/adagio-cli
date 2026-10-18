@@ -5,7 +5,7 @@ from pathlib import Path
 from adagio.executors.path_utils import resolve_output_destination
 
 
-class OutputFolderTests(unittest.TestCase):
+class OutputDirectoryTests(unittest.TestCase):
     """A per-output path ending in / is a directory, whatever exists on disk."""
 
     def resolve(self, outputs, name="table", suffix=".qza"):
