@@ -103,3 +103,34 @@ def test_a_complete_file_still_runs(monkeypatch, tmp_path):
 
     assert exit_status.value.code == 0
     assert len(launched) == 1
+
+
+def test_the_runtime_entry_point_refuses_an_incomplete_file_too(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "adagio.executors.select_default_executor",
+        lambda *args, **kwargs: pytest.fail("no executor may be built"),
+    )
+    spec = tmp_path / "pipeline.adg"
+    spec.write_text(json.dumps(_envelope(["Missing argument for `sampling_depth`."])))
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"version": 1}))
+
+    from adagio.cli.runtime import run_runtime
+
+    with pytest.raises(SystemExit) as exit_status:
+        run_runtime(
+            [
+                "--spec",
+                str(spec),
+                "--config",
+                str(config),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--output-dir",
+                str(tmp_path / "outputs"),
+            ],
+            console=None,
+        )
+
+    assert "This pipeline is incomplete" in str(exit_status.value.code)
+    assert "Missing argument for `sampling_depth`." in str(exit_status.value.code)
