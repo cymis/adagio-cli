@@ -3,6 +3,8 @@ import json
 import os
 import urllib.error
 import urllib.request
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,7 @@ from ..executors.cache_support import (
     REUSE_HELP,
     resolve_cache_config,
 )
+from ..executors.path_utils import is_directory_path
 from ..bundled_config import apply_bundled_config, bundled_config
 from ..model.arguments import AdagioArguments
 from ..model.pipeline import AdagioPipeline
@@ -47,7 +50,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     )
     parser.add_argument("--job-id", required=False, help="Runtime job ID.")
     parser.add_argument(
-        "--output-dir", required=False, help="Directory for output artifacts."
+        "--output-dir", required=True, help="Directory for output artifacts."
     )
     parser.add_argument(
         "--runtime-url", required=False, help="Runtime adapter API base URL."
@@ -113,7 +116,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         runtime_arguments = {}
 
     pipeline = _parse_pipeline(spec_data)
-    output_dir = _resolve_output_dir(opts.output_dir, opts.job_id)
+    output_dir = _resolve_output_dir(opts.output_dir)
     arguments = _build_arguments(
         pipeline=pipeline,
         runtime_arguments=runtime_arguments,
@@ -245,15 +248,11 @@ def _parse_pipeline(data: Any) -> AdagioPipeline:
     return AdagioPipeline.model_validate(pipeline_data)
 
 
-def _resolve_output_dir(raw_output_dir: str | None, job_id: str | None) -> str:
-    if raw_output_dir:
-        output_dir = raw_output_dir
-    elif job_id:
-        output_dir = f"/storage/runtime_jobs/{job_id}/outputs"
-    else:
-        output_dir = "/storage/runtime_outputs"
+def _resolve_output_dir(raw_output_dir: str) -> str:
+    output_dir = os.path.abspath(os.path.expanduser(raw_output_dir))
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
+
 
 def _build_arguments(
     *,
@@ -263,7 +262,6 @@ def _build_arguments(
     spec_data: Any = None,
 ) -> AdagioArguments:
     arguments = pipeline.signature.to_default_arguments()
-    storage_root = "/storage"
 
     # A spec file that is a full .adg envelope brings its bundled config as
     # the lowest layer; the job's arguments override it below.
@@ -281,27 +279,20 @@ def _build_arguments(
     if isinstance(runtime_arguments, dict):
         if isinstance(runtime_arguments.get("inputs"), dict):
             _apply_named_arguments(
-                arguments=arguments,
-                runtime_arguments=runtime_arguments,
-                storage_root=storage_root,
+                arguments=arguments, runtime_arguments=runtime_arguments
             )
         else:
             _apply_legacy_arguments(
                 pipeline=pipeline,
                 arguments=arguments,
                 runtime_arguments=runtime_arguments,
-                storage_root=storage_root,
             )
 
-        resolved_outputs = _resolve_outputs(
-            runtime_arguments.get("outputs"), storage_root=storage_root
-        )
+        resolved_outputs = _resolve_outputs(runtime_arguments.get("outputs"))
         if resolved_outputs is not None:
             arguments.outputs = resolved_outputs
 
-        resolved_publish = _resolve_outputs(
-            runtime_arguments.get("publish"), storage_root=storage_root
-        )
+        resolved_publish = _resolve_outputs(runtime_arguments.get("publish"))
         if isinstance(resolved_publish, dict):
             output_names = {output.name for output in pipeline.signature.outputs}
             unknown = sorted(set(resolved_publish) - output_names)
@@ -314,18 +305,17 @@ def _build_arguments(
     if _outputs_need_default(arguments.outputs):
         arguments.outputs = output_dir
 
+    _resolve_paths(arguments)
     return arguments
 
 
 def _apply_named_arguments(
-    *, arguments: AdagioArguments, runtime_arguments: dict[str, Any], storage_root: str
+    *, arguments: AdagioArguments, runtime_arguments: dict[str, Any]
 ) -> None:
     raw_inputs = runtime_arguments.get("inputs", {})
     if isinstance(raw_inputs, dict):
         for name, value in raw_inputs.items():
-            arguments.inputs[name] = _resolve_input_value(
-                value, storage_root=storage_root
-            )
+            arguments.inputs[name] = _resolve_input_value(value)
 
     raw_parameters = runtime_arguments.get("parameters", {})
     if isinstance(raw_parameters, dict):
@@ -337,7 +327,6 @@ def _apply_legacy_arguments(
     pipeline: AdagioPipeline,
     arguments: AdagioArguments,
     runtime_arguments: dict[str, Any],
-    storage_root: str,
 ) -> None:
     preprocessing = runtime_arguments.get("preprocessing", {})
     root_artifacts = (
@@ -360,16 +349,12 @@ def _apply_legacy_arguments(
         token = token_lookup.get(str(input_def.id))
         if token is None:
             continue
-        arguments.inputs[input_def.name] = _resolve_input_path(
-            token, storage_root=storage_root
-        )
+        arguments.inputs[input_def.name] = _resolve_input_path(token)
 
     named_inputs = runtime_arguments.get("inputs", {})
     if isinstance(named_inputs, dict):
         for name, value in named_inputs.items():
-            arguments.inputs[name] = _resolve_input_value(
-                value, storage_root=storage_root
-            )
+            arguments.inputs[name] = _resolve_input_value(value)
 
     task_arguments = runtime_arguments.get("arguments", {})
     if isinstance(task_arguments, dict):
@@ -385,66 +370,136 @@ def _apply_legacy_arguments(
         arguments.parameters.update(top_level_params)
 
 
-def _resolve_input_path(value: Any, *, storage_root: str) -> str:
+def _resolve_input_path(value: Any) -> str:
     if isinstance(value, dict):
         path = value.get("path")
-        if path is None:
-            return str(value)
-        return _normalize_path(path, storage_root=storage_root)
-    if isinstance(value, str):
-        return _normalize_path(value, storage_root=storage_root)
+        return str(value) if path is None else path
     return str(value)
 
 
-def _resolve_input_value(value: Any, *, storage_root: str) -> Any:
+def _resolve_input_value(value: Any) -> Any:
     if isinstance(value, list):
-        return [_resolve_input_value(item, storage_root=storage_root) for item in value]
+        return [_resolve_input_value(item) for item in value]
     if isinstance(value, dict):
         path = value.get("path")
         if path is not None:
-            return _normalize_path(path, storage_root=storage_root)
-        return {
-            str(key): _resolve_input_value(item, storage_root=storage_root)
-            for key, item in value.items()
-        }
-    if isinstance(value, str):
-        return _normalize_path(value, storage_root=storage_root)
+            return path
+        return {str(key): _resolve_input_value(item) for key, item in value.items()}
     return str(value)
 
 
-def _resolve_outputs(value: Any, *, storage_root: str) -> str | dict[str, str] | None:
-    if value is None:
-        return None
+def _resolve_outputs(value: Any) -> str | dict[str, str] | None:
     if isinstance(value, str):
-        return _normalize_path(value, storage_root=storage_root)
+        return value
     if isinstance(value, dict):
-        resolved: dict[str, str] = {}
-        for name, output in value.items():
-            if isinstance(output, dict):
-                resolved[name] = _resolve_input_path(output, storage_root=storage_root)
-            elif isinstance(output, str):
-                resolved[name] = _normalize_path(output, storage_root=storage_root)
-            else:
-                resolved[name] = str(output)
-        return resolved
+        return {name: _resolve_input_path(output) for name, output in value.items()}
     return None
 
 
-def _normalize_path(path: str, *, storage_root: str) -> str:
-    if not path:
-        return path
-    if path.startswith("/") or "://" in path:
-        return path
-    return os.path.join(storage_root, path)
+def _resolve_paths(arguments: AdagioArguments) -> None:
+    """Expand ``~`` in every input, output and publish path; refuse relative ones.
+
+    The runtime runs each job in a folder of its own (under Adagio Desktop's or
+    a Runtime Server's home), which is not a folder whoever typed the path had
+    in mind, so a relative path has nothing sensible to be relative to. Refusing
+    it here stops the job before any step runs, instead of after every step has
+    run and only the save is left.
+    """
+    relative: list[str] = []
+
+    def place(label: str, path: str) -> str:
+        if path in _PLACEHOLDERS or "://" in path:
+            return path
+        expanded = os.path.expanduser(path)
+        if not os.path.isabs(expanded):
+            relative.append(f"{label} ({path!r})")
+        return expanded
+
+    arguments.inputs = {
+        name: _map_paths(value, partial(place, f"input:{name}"))
+        for name, value in arguments.inputs.items()
+    }
+    if isinstance(arguments.outputs, str):
+        arguments.outputs = place("outputs", arguments.outputs)
+    else:
+        arguments.outputs = {
+            name: place(f"output:{name}", path)
+            for name, path in arguments.outputs.items()
+        }
+    # The editor's output paths arrive as publish destinations; an empty one
+    # means none was given, and the output stays in the job's output folder.
+    arguments.publish = {
+        name: place(f"output:{name}", path)
+        for name, path in arguments.publish.items()
+        if path not in _PLACEHOLDERS
+    }
+
+    if relative:
+        raise SystemExit(
+            "Relative paths cannot be resolved: "
+            + ", ".join(dict.fromkeys(relative))
+            + ". Start each path with / or ~/; a run works in a folder of its "
+            "own, so a relative path has nothing to be relative to."
+        )
+    _refuse_unwritable_outputs(arguments)
+
+
+def _refuse_unwritable_outputs(arguments: AdagioArguments) -> None:
+    """Refuse output folders this machine cannot create or write into.
+
+    Saving happens once the steps have run, so a folder that cannot be made
+    (``/storage`` on a Mac's read-only system volume, a Mac home folder on a
+    Linux Runtime Server) would otherwise lose all of that work. Nothing is
+    created here; the nearest folder that already exists must be writable.
+    """
+    if isinstance(arguments.outputs, str):
+        destinations = [("outputs", os.path.join(arguments.outputs, ""))]
+    else:
+        destinations = [
+            (f"output:{name}", path) for name, path in arguments.outputs.items()
+        ]
+    destinations += [
+        (f"output:{name}", path) for name, path in arguments.publish.items()
+    ]
+
+    blocked: list[str] = []
+    for label, path in destinations:
+        if "://" in path:
+            continue
+        existing = path if is_directory_path(path) else os.path.dirname(path)
+        while not os.path.exists(existing):
+            existing = os.path.dirname(existing)
+        if not (os.path.isdir(existing) and os.access(existing, os.W_OK | os.X_OK)):
+            blocked.append(f"{label} ({path!r}: cannot write in {existing})")
+    if blocked:
+        raise SystemExit(
+            "Outputs cannot be saved on this machine: "
+            + ", ".join(dict.fromkeys(blocked))
+            + ". Choose a folder this machine can write to."
+        )
+
+
+def _map_paths(value: Any, place: Callable[[str], str]) -> Any:
+    """Apply ``place`` to each path in an input value (a path, list or map)."""
+    if isinstance(value, list):
+        return [_map_paths(item, place) for item in value]
+    if isinstance(value, dict):
+        return {key: _map_paths(item, place) for key, item in value.items()}
+    if isinstance(value, str):
+        return place(value)
+    return value
+
+
+_PLACEHOLDERS = {"", "<fill me>"}
 
 
 def _outputs_need_default(outputs: str | dict[str, str]) -> bool:
     if isinstance(outputs, str):
-        return outputs == "" or outputs == "<fill me>"
+        return outputs in _PLACEHOLDERS
     # An empty map means no destinations were provided (the run UI sends
     # ``outputs: {}``) → fall back to --output-dir, which yields one file per
     # pipeline output. A non-empty map still defaults only if it has holes.
-    return not outputs or any(value in {"", "<fill me>"} for value in outputs.values())
+    return not outputs or any(value in _PLACEHOLDERS for value in outputs.values())
 
 
 def _is_missing(value: Any) -> bool:

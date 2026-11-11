@@ -64,17 +64,17 @@ class RuntimeFlagsTests(unittest.TestCase):
         )
         pipeline = SimpleNamespace(signature=signature)
 
-        arguments = runtime_cli._build_arguments(
-            pipeline=pipeline,
-            runtime_arguments={
-                "inputs": {},
-                "publish": {"table": "/exports/table.qza"},
-            },
-            output_dir="/jobs/current/outputs",
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            outputs = f"{tmp}/jobs/current/outputs"
+            exported = f"{tmp}/exports/table.qza"
+            arguments = runtime_cli._build_arguments(
+                pipeline=pipeline,
+                runtime_arguments={"inputs": {}, "publish": {"table": exported}},
+                output_dir=outputs,
+            )
 
-        self.assertEqual(arguments.outputs, "/jobs/current/outputs")
-        self.assertEqual(arguments.publish, {"table": "/exports/table.qza"})
+        self.assertEqual(arguments.outputs, outputs)
+        self.assertEqual(arguments.publish, {"table": exported})
 
     def _run(self, extra_argv, config_payload, *, spec_payload=_SPEC):
         console = Console()
