@@ -9,6 +9,8 @@ failed once every step had run.
 
 import json
 import os
+import re
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,43 +27,48 @@ TABLE_AST = {
     "predicate": None,
     "fields": [],
 }
-INPUT_ID = "00000000-0000-0000-0000-000000000001"
-OUTPUT_ID = "00000000-0000-0000-0000-000000000002"
 
-SPEC = {
-    "type": "pipeline",
-    "signature": {
-        "inputs": [
-            {
-                "id": INPUT_ID,
-                "name": "table",
-                "type": "FeatureTable[Frequency]",
-                "ast": TABLE_AST,
-                "required": True,
-            }
-        ],
-        "parameters": [],
-        "outputs": [
-            {
-                "id": OUTPUT_ID,
-                "name": "rarefied",
-                "type": "FeatureTable[Frequency]",
-                "ast": TABLE_AST,
-            }
-        ],
-    },
-    "graph": [
-        {
-            "id": "task",
-            "kind": "plugin-action",
-            "plugin": "feature_table",
-            "action": "rarefy",
-            "inputs": {"table": {"kind": "archive", "id": INPUT_ID}},
-            "parameters": {"sampling_depth": {"kind": "literal", "value": 10}},
-            "outputs": {"rarefied_table": {"kind": "archive", "id": OUTPUT_ID}},
-        }
-    ],
-}
+
+def _table(element_id, name, **extra):
+    return {
+        "id": element_id,
+        "name": name,
+        "type": "FeatureTable[Frequency]",
+        "ast": TABLE_AST,
+        **extra,
+    }
+
+
+def _rarefy(task_id, input_id, output_id):
+    return {
+        "id": task_id,
+        "kind": "plugin-action",
+        "plugin": "feature_table",
+        "action": "rarefy",
+        "inputs": {"table": {"kind": "archive", "id": input_id}},
+        "parameters": {"sampling_depth": {"kind": "literal", "value": 10}},
+        "outputs": {"rarefied_table": {"kind": "archive", "id": output_id}},
+    }
+
+
+def _spec(*branches):
+    """A pipeline of independent branches: (task id, input name, output name)."""
+    inputs, outputs, graph = [], [], []
+    for number, (task_id, input_name, output_name) in enumerate(branches):
+        input_id = f"00000000-0000-0000-0000-{2 * number + 1:012d}"
+        output_id = f"00000000-0000-0000-0000-{2 * number + 2:012d}"
+        inputs.append(_table(input_id, input_name, required=True))
+        outputs.append(_table(output_id, output_name))
+        graph.append(_rarefy(task_id, input_id, output_id))
+    return {
+        "type": "pipeline",
+        "signature": {"inputs": inputs, "parameters": [], "outputs": outputs},
+        "graph": graph,
+    }
+
+
+SPEC = _spec(("task", "table", "rarefied"))
+TWO_BRANCHES = _spec(("A", "table_a", "a"), ("B", "table_b", "b"))
 
 
 @pytest.fixture
@@ -72,17 +79,32 @@ def home(tmp_path, monkeypatch):
     return home
 
 
-def _build(runtime_arguments, output_dir, *, spec_data=None):
+def _build(runtime_arguments, output_dir, *, spec=SPEC, spec_data=None):
     return runtime_cli._build_arguments(
-        pipeline=AdagioPipeline.model_validate(SPEC),
+        pipeline=AdagioPipeline.model_validate(spec),
         runtime_arguments=runtime_arguments,
         output_dir=str(output_dir),
         spec_data=spec_data,
     )
 
 
+def _check(runtime_arguments, output_dir, *, spec=SPEC, targets=None):
+    """Build the arguments and run the up-front path check on them."""
+    arguments = _build(runtime_arguments, output_dir, spec=spec)
+    runtime_cli._refuse_unusable_paths(
+        AdagioPipeline.model_validate(spec), arguments, target_ids=targets
+    )
+    return arguments
+
+
+def _refusal(runtime_arguments, output_dir, **options):
+    with pytest.raises(SystemExit) as refused:
+        _check(runtime_arguments, output_dir, **options)
+    return str(refused.value)
+
+
 def test_tilde_is_expanded_in_input_output_and_publish_paths(home, tmp_path):
-    arguments = _build(
+    arguments = _check(
         {
             "inputs": {"table": "~/data/table.qza"},
             "outputs": {"rarefied": "~/job/rarefied.qza"},
@@ -99,8 +121,8 @@ def test_tilde_is_expanded_in_input_output_and_publish_paths(home, tmp_path):
 
 
 def test_tilde_is_expanded_in_every_path_of_a_collection_input(home, tmp_path):
-    listed = _build({"inputs": {"table": ["~/a.qza", "/b.qza"]}}, tmp_path)
-    keyed = _build({"inputs": {"table": {"x": "~/x.qza", "y": "/y.qza"}}}, tmp_path)
+    listed = _check({"inputs": {"table": ["~/a.qza", "/b.qza"]}}, tmp_path)
+    keyed = _check({"inputs": {"table": {"x": "~/x.qza", "y": "/y.qza"}}}, tmp_path)
 
     assert listed.inputs["table"] == [f"{home}/a.qza", "/b.qza"]
     assert keyed.inputs["table"] == {"x": f"{home}/x.qza", "y": "/y.qza"}
@@ -108,7 +130,7 @@ def test_tilde_is_expanded_in_every_path_of_a_collection_input(home, tmp_path):
 
 def test_a_directory_path_keeps_its_trailing_slash(home, tmp_path):
     # The trailing "/" is what makes an output path name a folder.
-    arguments = _build(
+    arguments = _check(
         {"inputs": {"table": "/t.qza"}, "publish": {"rarefied": "~/review/"}},
         tmp_path,
     )
@@ -118,7 +140,7 @@ def test_a_directory_path_keeps_its_trailing_slash(home, tmp_path):
 
 def test_absolute_paths_and_urls_are_kept_as_given(tmp_path):
     exports = tmp_path / "exports"
-    arguments = _build(
+    arguments = _check(
         {
             "inputs": {"table": "https://example.org/table.qza"},
             "outputs": {"rarefied": str(tmp_path / "job" / "rarefied.qza")},
@@ -135,17 +157,15 @@ def test_absolute_paths_and_urls_are_kept_as_given(tmp_path):
 
 
 def test_relative_paths_are_refused_naming_each_one(tmp_path):
-    with pytest.raises(SystemExit) as refused:
-        _build(
-            {
-                "inputs": {"table": "data/table.qza"},
-                "outputs": {"rarefied": "job/rarefied.qza"},
-                "publish": {"rarefied": "results/rarefied.qza"},
-            },
-            tmp_path,
-        )
+    message = _refusal(
+        {
+            "inputs": {"table": "data/table.qza"},
+            "outputs": {"rarefied": "job/rarefied.qza"},
+            "publish": {"rarefied": "results/rarefied.qza"},
+        },
+        tmp_path,
+    )
 
-    message = str(refused.value)
     assert "input:table ('data/table.qza')" in message
     assert "output:rarefied ('job/rarefied.qza')" in message
     assert "output:rarefied ('results/rarefied.qza')" in message
@@ -153,13 +173,30 @@ def test_relative_paths_are_refused_naming_each_one(tmp_path):
 
 
 def test_a_relative_outputs_folder_is_refused(tmp_path):
-    with pytest.raises(SystemExit, match=r"outputs \('results/'\)"):
-        _build({"inputs": {"table": "/t.qza"}, "outputs": "results/"}, tmp_path)
+    message = _refusal({"inputs": {"table": "/t.qza"}, "outputs": "results/"}, tmp_path)
+
+    assert "outputs ('results/')" in message
+
+
+def test_a_partial_run_checks_only_the_paths_it_uses(tmp_path):
+    # Branch B has a relative input and a relative output path; running only
+    # branch A uses neither, so they must not block it.
+    arguments = {
+        "inputs": {"table_a": "/a.qza", "table_b": "b.qza"},
+        "publish": {"b": "results/b.qza"},
+    }
+
+    _check(arguments, tmp_path, spec=TWO_BRANCHES, targets={"A"})
+    message = _refusal(arguments, tmp_path, spec=TWO_BRANCHES, targets={"B"})
+
+    assert "input:table_b ('b.qza')" in message
+    assert "output:b ('results/b.qza')" in message
+    assert "table_a" not in message
 
 
 def test_an_unset_input_is_still_reported_missing_not_relative(tmp_path):
     pipeline = AdagioPipeline.model_validate(SPEC)
-    arguments = _build({"inputs": {}}, tmp_path)
+    arguments = _check({"inputs": {}}, tmp_path)
 
     assert arguments.inputs == {"table": "<fill me>"}
     with pytest.raises(SystemExit, match="Missing required runtime arguments: input:table"):
@@ -167,7 +204,7 @@ def test_an_unset_input_is_still_reported_missing_not_relative(tmp_path):
 
 
 def test_an_empty_publish_path_publishes_nothing(tmp_path):
-    arguments = _build(
+    arguments = _check(
         {"inputs": {"table": "/t.qza"}, "publish": {"rarefied": ""}}, tmp_path
     )
 
@@ -191,34 +228,82 @@ def test_an_output_under_a_file_is_refused(tmp_path):
     blocker = tmp_path / "not-a-folder"
     blocker.write_text("x", encoding="utf-8")
 
-    with pytest.raises(SystemExit) as refused:
-        _build(
-            {
-                "inputs": {"table": "/t.qza"},
-                "publish": {"rarefied": f"{blocker}/review/rarefied.qza"},
-            },
-            tmp_path,
-        )
+    message = _refusal(
+        {
+            "inputs": {"table": "/t.qza"},
+            "publish": {"rarefied": f"{blocker}/review/rarefied.qza"},
+        },
+        tmp_path,
+    )
 
-    assert "Outputs cannot be saved on this machine" in str(refused.value)
-    assert f"cannot write in {blocker}" in str(refused.value)
+    assert "Outputs cannot be saved on this machine" in message
+    assert f"cannot write to {blocker}" in message
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only folder")
+def _saves(destination: Path, tmp_path: Path) -> bool:
+    """Whether saving an output over ``destination`` works, as the save does it."""
+    source = tmp_path / "produced.qza"
+    source.write_text("new", encoding="utf-8")
+    try:
+        shutil.copy2(source, destination)
+    except PermissionError:
+        return False
+    return True
+
+
+root_can_write_anything = pytest.mark.skipif(
+    os.geteuid() == 0, reason="root can write a read-only file or folder"
+)
+
+
+@root_can_write_anything
 def test_an_output_in_a_read_only_folder_is_refused(tmp_path):
     # The original failure: /storage under a Mac's read-only "/".
     read_only = tmp_path / "read-only"
     read_only.mkdir()
     read_only.chmod(0o500)
     try:
-        with pytest.raises(SystemExit, match=f"cannot write in {read_only}"):
-            _build(
-                {
-                    "inputs": {"table": "/t.qza"},
-                    "publish": {"rarefied": f"{read_only}/adagio/rarefied.qza"},
-                },
-                tmp_path,
-            )
+        message = _refusal(
+            {
+                "inputs": {"table": "/t.qza"},
+                "publish": {"rarefied": f"{read_only}/adagio/rarefied.qza"},
+            },
+            tmp_path,
+        )
+    finally:
+        read_only.chmod(0o700)
+
+    assert f"cannot write to {read_only}" in message
+
+
+@root_can_write_anything
+def test_an_existing_read_only_output_file_is_refused(tmp_path):
+    # Its folder is writable, but the save overwrites the file in place.
+    existing = tmp_path / "rarefied.qza"
+    existing.write_text("old", encoding="utf-8")
+    existing.chmod(0o400)
+
+    with pytest.raises(SystemExit, match=re.escape(f"cannot write to {existing}")):
+        _check(
+            {"inputs": {"table": "/t.qza"}, "publish": {"rarefied": str(existing)}},
+            tmp_path / "outputs",
+        )
+    assert not _saves(existing, tmp_path)
+
+
+@root_can_write_anything
+def test_an_existing_writable_output_file_in_a_read_only_folder_is_accepted(tmp_path):
+    read_only = tmp_path / "read-only"
+    read_only.mkdir()
+    existing = read_only / "rarefied.qza"
+    existing.write_text("old", encoding="utf-8")
+    read_only.chmod(0o500)
+    try:
+        _check(
+            {"inputs": {"table": "/t.qza"}, "publish": {"rarefied": str(existing)}},
+            tmp_path / "outputs",
+        )
+        assert _saves(existing, tmp_path)
     finally:
         read_only.chmod(0o700)
 
@@ -231,22 +316,23 @@ class _Executor:
         self.calls.append(kwargs)
 
 
-def _run(tmp_path, arguments_payload, *, output_dir):
-    spec = tmp_path / "spec.json"
-    spec.write_text(json.dumps(SPEC), encoding="utf-8")
+def _run(tmp_path, arguments_payload, *, output_dir, spec=SPEC, extra_argv=()):
+    spec_file = tmp_path / "spec.json"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
     config = tmp_path / "config.toml"
     config.write_text("version = 1\n", encoding="utf-8")
     arguments = tmp_path / "arguments.json"
     arguments.write_text(json.dumps(arguments_payload), encoding="utf-8")
     argv = [
         "--spec",
-        str(spec),
+        str(spec_file),
         "--config",
         str(config),
         "--arguments",
         str(arguments),
         "--cache-dir",
         str(tmp_path / "cache"),
+        *extra_argv,
     ]
     if output_dir is not None:
         argv += ["--output-dir", output_dir]
@@ -266,6 +352,24 @@ def test_a_relative_publish_path_stops_the_job_before_any_step_runs(tmp_path):
             )
 
     select.assert_not_called()
+
+
+def test_a_selected_branch_runs_despite_a_relative_path_elsewhere(tmp_path):
+    # The editor's "Run selected" sends every output path, used or not.
+    executor = _Executor()
+    with patch("adagio.executors.select_default_executor", return_value=executor):
+        _run(
+            tmp_path,
+            {
+                "inputs": {"table_a": "/a.qza", "table_b": "/b.qza"},
+                "publish": {"b": "results/b.qza"},
+            },
+            output_dir=str(tmp_path / "outputs"),
+            spec=TWO_BRANCHES,
+            extra_argv=["--targets", "A"],
+        )
+
+    assert executor.calls[0]["target_ids"] == {"A"}
 
 
 def test_tilde_in_the_output_dir_is_expanded(home, tmp_path):

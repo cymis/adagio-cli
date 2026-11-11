@@ -3,8 +3,7 @@ import json
 import os
 import urllib.error
 import urllib.request
-from collections.abc import Callable
-from functools import partial
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +124,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     )
     target_ids = _parse_targets(opts.targets)
     _validate_required_arguments(pipeline, arguments, target_ids=target_ids)
+    _refuse_unusable_paths(pipeline, arguments, target_ids=target_ids)
     cache_config = resolve_cache_config(
         cwd=Path.cwd().resolve(),
         cache_dir=opts.cache_dir,
@@ -305,7 +305,7 @@ def _build_arguments(
     if _outputs_need_default(arguments.outputs):
         arguments.outputs = output_dir
 
-    _resolve_paths(arguments)
+    _expand_paths(arguments)
     return arguments
 
 
@@ -396,44 +396,92 @@ def _resolve_outputs(value: Any) -> str | dict[str, str] | None:
     return None
 
 
-def _resolve_paths(arguments: AdagioArguments) -> None:
-    """Expand ``~`` in every input, output and publish path; refuse relative ones.
+def _expand_paths(arguments: AdagioArguments) -> None:
+    """Expand ``~`` in every input, output and publish path.
 
-    The runtime runs each job in a folder of its own (under Adagio Desktop's or
-    a Runtime Server's home), which is not a folder whoever typed the path had
-    in mind, so a relative path has nothing sensible to be relative to. Refusing
-    it here stops the job before any step runs, instead of after every step has
-    run and only the save is left.
+    ``~`` is the home folder of whoever runs the job: the user on Adagio
+    Desktop, the server account on a Runtime Server. The editor's output paths
+    arrive as publish destinations; an empty one means none was given, and the
+    output stays in the job's output folder.
     """
-    relative: list[str] = []
-
-    def place(label: str, path: str) -> str:
-        if path in _PLACEHOLDERS or "://" in path:
-            return path
-        expanded = os.path.expanduser(path)
-        if not os.path.isabs(expanded):
-            relative.append(f"{label} ({path!r})")
-        return expanded
-
     arguments.inputs = {
-        name: _map_paths(value, partial(place, f"input:{name}"))
+        name: _map_paths(value, os.path.expanduser)
         for name, value in arguments.inputs.items()
     }
     if isinstance(arguments.outputs, str):
-        arguments.outputs = place("outputs", arguments.outputs)
+        arguments.outputs = os.path.expanduser(arguments.outputs)
     else:
         arguments.outputs = {
-            name: place(f"output:{name}", path)
-            for name, path in arguments.outputs.items()
+            name: os.path.expanduser(path) for name, path in arguments.outputs.items()
         }
-    # The editor's output paths arrive as publish destinations; an empty one
-    # means none was given, and the output stays in the job's output folder.
     arguments.publish = {
-        name: place(f"output:{name}", path)
+        name: os.path.expanduser(path)
         for name, path in arguments.publish.items()
         if path not in _PLACEHOLDERS
     }
 
+
+def _refuse_unusable_paths(
+    pipeline: AdagioPipeline,
+    arguments: AdagioArguments,
+    target_ids: set[str] | None = None,
+) -> None:
+    """Refuse relative paths and outputs that cannot be saved, before any step.
+
+    The runtime runs each job in a folder of its own (under Adagio Desktop's or
+    a Runtime Server's home), which is not a folder whoever typed the path had
+    in mind, so a relative path has nothing sensible to be relative to. Saving
+    happens once every step has run, so an output that cannot be written would
+    otherwise lose all of that work.
+
+    Only the paths this run uses are checked: for a partial run, the inputs its
+    steps read and the outputs they produce, so a path on an unrelated branch
+    never blocks it.
+    """
+    sig = pipeline.signature
+    input_ids, _, output_ids = _closure_argument_ids(pipeline, target_ids)
+    unused = {
+        f"input:{item.name}"
+        for item in sig.inputs
+        if input_ids is not None and item.id not in input_ids
+    } | {
+        f"output:{item.name}"
+        for item in sig.outputs
+        if output_ids is not None and item.id not in output_ids
+    }
+
+    def checked(entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        # A URL is read or written by whatever serves it, not by this machine.
+        return [
+            (label, path)
+            for label, path in entries
+            if label not in unused and "://" not in path
+        ]
+
+    sources = checked(
+        [
+            (f"input:{name}", path)
+            for name, value in arguments.inputs.items()
+            for path in _paths_in(value)
+            if path not in _PLACEHOLDERS
+        ]
+    )
+    if isinstance(arguments.outputs, str):
+        destinations = [("outputs", os.path.join(arguments.outputs, ""))]
+    else:
+        destinations = [
+            (f"output:{name}", path) for name, path in arguments.outputs.items()
+        ]
+    destinations = checked(
+        destinations
+        + [(f"output:{name}", path) for name, path in arguments.publish.items()]
+    )
+
+    relative = [
+        f"{label} ({path!r})"
+        for label, path in sources + destinations
+        if not os.path.isabs(path)
+    ]
     if relative:
         raise SystemExit(
             "Relative paths cannot be resolved: "
@@ -441,42 +489,37 @@ def _resolve_paths(arguments: AdagioArguments) -> None:
             + ". Start each path with / or ~/; a run works in a folder of its "
             "own, so a relative path has nothing to be relative to."
         )
-    _refuse_unwritable_outputs(arguments)
 
-
-def _refuse_unwritable_outputs(arguments: AdagioArguments) -> None:
-    """Refuse output folders this machine cannot create or write into.
-
-    Saving happens once the steps have run, so a folder that cannot be made
-    (``/storage`` on a Mac's read-only system volume, a Mac home folder on a
-    Linux Runtime Server) would otherwise lose all of that work. Nothing is
-    created here; the nearest folder that already exists must be writable.
-    """
-    if isinstance(arguments.outputs, str):
-        destinations = [("outputs", os.path.join(arguments.outputs, ""))]
-    else:
-        destinations = [
-            (f"output:{name}", path) for name, path in arguments.outputs.items()
-        ]
-    destinations += [
-        (f"output:{name}", path) for name, path in arguments.publish.items()
-    ]
-
-    blocked: list[str] = []
+    blocked = []
     for label, path in destinations:
-        if "://" in path:
-            continue
-        existing = path if is_directory_path(path) else os.path.dirname(path)
-        while not os.path.exists(existing):
-            existing = os.path.dirname(existing)
-        if not (os.path.isdir(existing) and os.access(existing, os.W_OK | os.X_OK)):
-            blocked.append(f"{label} ({path!r}: cannot write in {existing})")
+        blocker = _save_blocker(path)
+        if blocker is not None:
+            blocked.append(f"{label} ({path!r}: cannot write to {blocker})")
     if blocked:
         raise SystemExit(
             "Outputs cannot be saved on this machine: "
             + ", ".join(dict.fromkeys(blocked))
             + ". Choose a folder this machine can write to."
         )
+
+
+def _save_blocker(path: str) -> str | None:
+    """What would stop an output being saved at absolute ``path``, if anything.
+
+    Saving copies over an existing file in place, so that file must itself be
+    writable, whatever its folder allows. Anything new is made in the nearest
+    folder that already exists, which must be a writable folder (a file there,
+    ``/`` on a Mac, a Mac home folder on a Linux Runtime Server all fail).
+    Nothing is created here.
+    """
+    if not is_directory_path(path) and os.path.isfile(path):
+        return None if os.access(path, os.W_OK) else path
+    existing = path if is_directory_path(path) else os.path.dirname(path)
+    while not os.path.exists(existing):
+        existing = os.path.dirname(existing)
+    if os.path.isdir(existing) and os.access(existing, os.W_OK | os.X_OK):
+        return None
+    return existing
 
 
 def _map_paths(value: Any, place: Callable[[str], str]) -> Any:
@@ -488,6 +531,18 @@ def _map_paths(value: Any, place: Callable[[str], str]) -> Any:
     if isinstance(value, str):
         return place(value)
     return value
+
+
+def _paths_in(value: Any) -> Iterator[str]:
+    """Each path in an input value (a path, list or map)."""
+    if isinstance(value, list):
+        for item in value:
+            yield from _paths_in(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _paths_in(item)
+    elif isinstance(value, str):
+        yield value
 
 
 _PLACEHOLDERS = {"", "<fill me>"}
@@ -517,7 +572,7 @@ def _validate_required_arguments(
     # actually consumes — a downstream target must not demand root inputs that
     # feed unrelated branches (that SystemExit'd valid partial runs before any
     # node reported, leaving the editor stuck on yellow). None => require all.
-    needed_input_ids, needed_param_ids = _closure_argument_ids(pipeline, target_ids)
+    needed_input_ids, needed_param_ids, _ = _closure_argument_ids(pipeline, target_ids)
 
     missing_inputs = [
         input_def.name
@@ -544,16 +599,17 @@ def _validate_required_arguments(
 
 def _closure_argument_ids(
     pipeline: AdagioPipeline, target_ids: set[str] | None
-) -> tuple[set[str] | None, set[str] | None]:
-    """Pipeline input ids + param ids the ``target_ids`` closure consumes.
+) -> tuple[set[str] | None, set[str] | None, set[str] | None]:
+    """Pipeline input, param and output ids the ``target_ids`` closure uses.
 
-    Returns ``(None, None)`` for a full run (require everything). For a partial
+    Returns ``(None, None, None)`` for a full run (everything). For a partial
     run, walks the same target closure the executor runs (``prune_to_targets``)
     and collects the signature input ids (a RootInputTask's input src.id equals
-    the pipeline input id) and promoted param ids those tasks reference.
+    the pipeline input id) and promoted param ids those tasks reference, and
+    the ids of the outputs they produce (the only ones the run can save).
     """
     if not target_ids:
-        return None, None
+        return None, None, None
 
     from ..executors.common import prune_to_targets
     from ..model.task import input_source_ids
@@ -563,7 +619,9 @@ def _closure_argument_ids(
     )
     input_ids: set[str] = set()
     param_ids: set[str] = set()
+    output_ids: set[str] = set()
     for task in closure:
+        output_ids.update(output.id for output in task.outputs.values())
         for src in task.inputs.values():
             for source_id in input_source_ids(src):
                 input_ids.add(source_id)
@@ -575,7 +633,7 @@ def _closure_argument_ids(
                 column = getattr(param, "column", None)
                 if getattr(column, "kind", None) == "promoted":
                     param_ids.add(column.id)
-    return input_ids, param_ids
+    return input_ids, param_ids, output_ids
 
 
 def _post_job_event(*, runtime_url: str, job_id: str, payload: dict[str, Any]) -> None:
