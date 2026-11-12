@@ -19,6 +19,7 @@ from ..executors.path_utils import is_directory_path, resolve_output_destination
 from ..bundled_config import apply_bundled_config, bundled_config
 from ..model.arguments import AdagioArguments
 from ..model.pipeline import AdagioPipeline
+from ..bundled_config import unset_values
 from ..monitor.composite import CompositeMonitor
 from ..monitor.connected import ConnectedMonitor
 from ..monitor.log import LogMonitor
@@ -107,6 +108,13 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     opts = parser.parse_args(argv)
 
     spec_data = _load_json(Path(opts.spec))
+    # A pipeline file saved before its values were set never runs, here or
+    # through `adagio run`: a step would fail after the ones before it ran.
+    missing = unset_values(spec_data)
+    if missing:
+        raise SystemExit(
+            "This pipeline is incomplete. Set these values in Adagio first: " + "; ".join(missing)
+        )
     run_config = load_run_config(Path(opts.config))
     runtime_arguments: Any = {}
     if opts.arguments:

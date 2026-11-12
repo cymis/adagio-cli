@@ -51,6 +51,19 @@ def bundled_config(data: Any) -> dict[str, Any] | None:
     return _legacy_config(data.get("spec", data))
 
 
+def unset_values(data: Any) -> list[str]:
+    """The values an incomplete pipeline file still needs before it can run.
+
+    Adagio saves a pipeline whose author has not chosen every value yet, so it
+    can be shared or finished later, and lists what is missing under
+    ``incomplete``. Such a file opens in Adagio but must not run: a step would
+    fail partway through, after the steps before it had already run.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("incomplete"), list):
+        return []
+    return [entry for entry in data["incomplete"] if isinstance(entry, str) and entry.strip()]
+
+
 def saved_run_config(data: Any) -> AdagioRunConfig | None:
     """The execution settings saved with a pipeline file, or ``None``.
 
