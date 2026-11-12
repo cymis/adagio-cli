@@ -1,6 +1,5 @@
 import tempfile
 import unittest
-from pathlib import Path
 
 from adagio.executors.path_utils import resolve_output_destination
 
@@ -13,7 +12,7 @@ class OutputDirectoryTests(unittest.TestCase):
             output_name=name,
             output_names=["table", "summary"],
             outputs=outputs,
-            source_path=Path(f"/cache/x{suffix}"),
+            suffix=suffix,
         )
 
     def test_trailing_slash_writes_into_the_directory(self) -> None:

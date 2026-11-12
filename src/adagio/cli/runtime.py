@@ -15,7 +15,7 @@ from ..executors.cache_support import (
     REUSE_HELP,
     resolve_cache_config,
 )
-from ..executors.path_utils import is_directory_path
+from ..executors.path_utils import is_directory_path, resolve_output_destination
 from ..bundled_config import apply_bundled_config, bundled_config
 from ..model.arguments import AdagioArguments
 from ..model.pipeline import AdagioPipeline
@@ -491,10 +491,28 @@ def _refuse_unusable_paths(
         )
 
     blocked = []
-    for label, path in destinations:
-        blocker = _save_blocker(path)
-        if blocker is not None:
-            blocked.append(f"{label} ({path!r}: cannot write to {blocker})")
+    output_names = [output.name for output in sig.outputs]
+    for output in sig.outputs:
+        label = f"output:{output.name}"
+        if label in unused:
+            continue
+        # QIIME saves visualizations as .qzv and artifacts as .qza. Resolve
+        # the same filename the save will use before checking permissions.
+        suffix = ".qzv" if output.type == "Visualization" else ".qza"
+        for paths in (arguments.outputs, arguments.publish):
+            if isinstance(paths, dict) and output.name not in paths:
+                continue
+            path = resolve_output_destination(
+                output_name=output.name,
+                output_names=output_names,
+                outputs=paths,
+                suffix=suffix,
+            )
+            if "://" in path:
+                continue
+            blocker = _save_blocker(path)
+            if blocker is not None:
+                blocked.append(f"{label} ({path!r}: cannot write to {blocker})")
     if blocked:
         raise SystemExit(
             "Outputs cannot be saved on this machine: "

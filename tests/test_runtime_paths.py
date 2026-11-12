@@ -18,6 +18,8 @@ import pytest
 from rich.console import Console
 
 from adagio.cli import runtime as runtime_cli
+from adagio.executors.serial_runner import SerialExecutionState
+from adagio.executors.task_environments import _save_outputs
 from adagio.model.pipeline import AdagioPipeline
 
 TABLE_AST = {
@@ -306,6 +308,101 @@ def test_an_existing_writable_output_file_in_a_read_only_folder_is_accepted(tmp_
         assert _saves(existing, tmp_path)
     finally:
         read_only.chmod(0o700)
+
+
+output_destinations = [
+    ("publish", "directory"),
+    ("publish", "prefix"),
+    ("outputs", "directory"),
+    ("outputs", "prefix"),
+    ("outputs", "all"),
+]
+
+
+def _configured_output(tmp_path, section, form, suffix):
+    folder = tmp_path / "exports"
+    folder.mkdir()
+    destination = folder / f"rarefied{suffix}"
+    path = str(folder) + "/" if form != "prefix" else str(folder / "rarefied")
+    arguments = {
+        "inputs": {"table": "/table.qza"},
+        section: path if form == "all" else {"rarefied": path},
+    }
+    spec = _spec(("task", "table", "rarefied"))
+    if suffix == ".qzv":
+        spec["signature"]["outputs"][0].update(
+            type="Visualization", ast={**TABLE_AST, "name": "Visualization"}
+        )
+    return spec, arguments, destination
+
+
+def _save_produced_output(tmp_path, spec, arguments, suffix):
+    source = tmp_path / f"produced{suffix}"
+    source.write_text("new", encoding="utf-8")
+    signature = AdagioPipeline.model_validate(spec).signature
+    state = SerialExecutionState(
+        cwd=tmp_path,
+        work_path=tmp_path,
+        params={},
+        scope={signature.outputs[0].id: str(source)},
+        cache_config=None,
+    )
+    _save_outputs(sig=signature, arguments=arguments, state=state, monitor=None)
+
+
+@root_can_write_anything
+@pytest.mark.parametrize(("section", "form"), output_destinations)
+@pytest.mark.parametrize("suffix", [".qza", ".qzv"])
+def test_a_read_only_resolved_output_is_refused_before_execution(
+    tmp_path, section, form, suffix
+):
+    spec, arguments, destination = _configured_output(tmp_path, section, form, suffix)
+    destination.write_text("old", encoding="utf-8")
+    destination.chmod(0o400)
+    try:
+        with patch("adagio.executors.select_default_executor") as select:
+            with pytest.raises(
+                SystemExit, match=re.escape(f"cannot write to {destination}")
+            ):
+                _run(tmp_path, arguments, output_dir=str(tmp_path / "outputs"), spec=spec)
+        select.assert_not_called()
+        built = _build(arguments, tmp_path / "outputs", spec=spec)
+        with pytest.raises(PermissionError):
+            _save_produced_output(tmp_path, spec, built, suffix)
+    finally:
+        destination.chmod(0o600)
+
+
+@root_can_write_anything
+@pytest.mark.parametrize(("section", "form"), output_destinations)
+@pytest.mark.parametrize("suffix", [".qza", ".qzv"])
+def test_a_writable_resolved_output_in_a_read_only_folder_can_be_saved(
+    tmp_path, section, form, suffix
+):
+    spec, arguments, destination = _configured_output(tmp_path, section, form, suffix)
+    destination.write_text("old", encoding="utf-8")
+    destination.parent.chmod(0o500)
+    try:
+        built = _check(arguments, tmp_path / "outputs", spec=spec)
+        _save_produced_output(tmp_path, spec, built, suffix)
+        assert destination.read_text(encoding="utf-8") == "new"
+    finally:
+        destination.parent.chmod(0o700)
+
+
+@root_can_write_anything
+def test_an_existing_prefix_file_does_not_decide_output_permissions(tmp_path):
+    spec, arguments, destination = _configured_output(tmp_path, "publish", "prefix", ".qza")
+    prefix = destination.with_suffix("")
+    prefix.write_text("leave alone", encoding="utf-8")
+    prefix.chmod(0o400)
+    try:
+        built = _check(arguments, tmp_path / "outputs", spec=spec)
+        _save_produced_output(tmp_path, spec, built, ".qza")
+        assert destination.read_text(encoding="utf-8") == "new"
+        assert prefix.read_text(encoding="utf-8") == "leave alone"
+    finally:
+        prefix.chmod(0o600)
 
 
 class _Executor:

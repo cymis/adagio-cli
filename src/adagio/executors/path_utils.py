@@ -32,10 +32,9 @@ def resolve_output_destination(
     output_name: str,
     output_names: Iterable[str],
     outputs: str | dict[str, str],
-    source_path: Path,
+    suffix: str,
 ) -> str:
-    suffix = source_path.suffix
-
+    """Resolve the complete filename using the result's save suffix."""
     if isinstance(outputs, str):
         return append_output_suffix(os.path.join(outputs, output_name), suffix)
 
