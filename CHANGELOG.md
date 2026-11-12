@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 using [PEP 440](https://packaging.python.org/en/latest/specifications/version-specifiers/) version strings for Python releases.
 
+## 0.1.4 - 2026-11-11
+
+### Fixed
+
+- Refuses incomplete pipeline files before executing any steps through either `adagio run` or `adagio runtime`.
+- Expands `~` in runtime input and output paths, rejects relative paths, and checks the resolved output filenames for write access before executing work.
+- Limits runtime path checks to the selected steps and their required upstream steps, so unrelated paths do not block partial runs.
+- Handles existing output file permissions consistently for directory, extensionless, and explicit filename destinations, including visualizations.
+
 ## 0.1.3 - 2026-10-17
 
 ### Added
