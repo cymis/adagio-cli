@@ -3,6 +3,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from ..executors.cache_support import (
     REUSE_HELP,
     resolve_cache_config,
 )
+from ..executors.path_utils import is_directory_path, resolve_output_destination
 from ..bundled_config import apply_bundled_config, bundled_config
 from ..model.arguments import AdagioArguments
 from ..model.pipeline import AdagioPipeline
@@ -47,7 +49,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     )
     parser.add_argument("--job-id", required=False, help="Runtime job ID.")
     parser.add_argument(
-        "--output-dir", required=False, help="Directory for output artifacts."
+        "--output-dir", required=True, help="Directory for output artifacts."
     )
     parser.add_argument(
         "--runtime-url", required=False, help="Runtime adapter API base URL."
@@ -113,7 +115,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
         runtime_arguments = {}
 
     pipeline = _parse_pipeline(spec_data)
-    output_dir = _resolve_output_dir(opts.output_dir, opts.job_id)
+    output_dir = _resolve_output_dir(opts.output_dir)
     arguments = _build_arguments(
         pipeline=pipeline,
         runtime_arguments=runtime_arguments,
@@ -122,6 +124,7 @@ def run_runtime(argv: list[str], *, console: Console) -> None:
     )
     target_ids = _parse_targets(opts.targets)
     _validate_required_arguments(pipeline, arguments, target_ids=target_ids)
+    _refuse_unusable_paths(pipeline, arguments, target_ids=target_ids)
     cache_config = resolve_cache_config(
         cwd=Path.cwd().resolve(),
         cache_dir=opts.cache_dir,
@@ -245,15 +248,11 @@ def _parse_pipeline(data: Any) -> AdagioPipeline:
     return AdagioPipeline.model_validate(pipeline_data)
 
 
-def _resolve_output_dir(raw_output_dir: str | None, job_id: str | None) -> str:
-    if raw_output_dir:
-        output_dir = raw_output_dir
-    elif job_id:
-        output_dir = f"/storage/runtime_jobs/{job_id}/outputs"
-    else:
-        output_dir = "/storage/runtime_outputs"
+def _resolve_output_dir(raw_output_dir: str) -> str:
+    output_dir = os.path.abspath(os.path.expanduser(raw_output_dir))
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
+
 
 def _build_arguments(
     *,
@@ -263,7 +262,6 @@ def _build_arguments(
     spec_data: Any = None,
 ) -> AdagioArguments:
     arguments = pipeline.signature.to_default_arguments()
-    storage_root = "/storage"
 
     # A spec file that is a full .adg envelope brings its bundled config as
     # the lowest layer; the job's arguments override it below.
@@ -281,27 +279,20 @@ def _build_arguments(
     if isinstance(runtime_arguments, dict):
         if isinstance(runtime_arguments.get("inputs"), dict):
             _apply_named_arguments(
-                arguments=arguments,
-                runtime_arguments=runtime_arguments,
-                storage_root=storage_root,
+                arguments=arguments, runtime_arguments=runtime_arguments
             )
         else:
             _apply_legacy_arguments(
                 pipeline=pipeline,
                 arguments=arguments,
                 runtime_arguments=runtime_arguments,
-                storage_root=storage_root,
             )
 
-        resolved_outputs = _resolve_outputs(
-            runtime_arguments.get("outputs"), storage_root=storage_root
-        )
+        resolved_outputs = _resolve_outputs(runtime_arguments.get("outputs"))
         if resolved_outputs is not None:
             arguments.outputs = resolved_outputs
 
-        resolved_publish = _resolve_outputs(
-            runtime_arguments.get("publish"), storage_root=storage_root
-        )
+        resolved_publish = _resolve_outputs(runtime_arguments.get("publish"))
         if isinstance(resolved_publish, dict):
             output_names = {output.name for output in pipeline.signature.outputs}
             unknown = sorted(set(resolved_publish) - output_names)
@@ -314,18 +305,17 @@ def _build_arguments(
     if _outputs_need_default(arguments.outputs):
         arguments.outputs = output_dir
 
+    _expand_paths(arguments)
     return arguments
 
 
 def _apply_named_arguments(
-    *, arguments: AdagioArguments, runtime_arguments: dict[str, Any], storage_root: str
+    *, arguments: AdagioArguments, runtime_arguments: dict[str, Any]
 ) -> None:
     raw_inputs = runtime_arguments.get("inputs", {})
     if isinstance(raw_inputs, dict):
         for name, value in raw_inputs.items():
-            arguments.inputs[name] = _resolve_input_value(
-                value, storage_root=storage_root
-            )
+            arguments.inputs[name] = _resolve_input_value(value)
 
     raw_parameters = runtime_arguments.get("parameters", {})
     if isinstance(raw_parameters, dict):
@@ -337,7 +327,6 @@ def _apply_legacy_arguments(
     pipeline: AdagioPipeline,
     arguments: AdagioArguments,
     runtime_arguments: dict[str, Any],
-    storage_root: str,
 ) -> None:
     preprocessing = runtime_arguments.get("preprocessing", {})
     root_artifacts = (
@@ -360,16 +349,12 @@ def _apply_legacy_arguments(
         token = token_lookup.get(str(input_def.id))
         if token is None:
             continue
-        arguments.inputs[input_def.name] = _resolve_input_path(
-            token, storage_root=storage_root
-        )
+        arguments.inputs[input_def.name] = _resolve_input_path(token)
 
     named_inputs = runtime_arguments.get("inputs", {})
     if isinstance(named_inputs, dict):
         for name, value in named_inputs.items():
-            arguments.inputs[name] = _resolve_input_value(
-                value, storage_root=storage_root
-            )
+            arguments.inputs[name] = _resolve_input_value(value)
 
     task_arguments = runtime_arguments.get("arguments", {})
     if isinstance(task_arguments, dict):
@@ -385,66 +370,209 @@ def _apply_legacy_arguments(
         arguments.parameters.update(top_level_params)
 
 
-def _resolve_input_path(value: Any, *, storage_root: str) -> str:
+def _resolve_input_path(value: Any) -> str:
     if isinstance(value, dict):
         path = value.get("path")
-        if path is None:
-            return str(value)
-        return _normalize_path(path, storage_root=storage_root)
-    if isinstance(value, str):
-        return _normalize_path(value, storage_root=storage_root)
+        return str(value) if path is None else path
     return str(value)
 
 
-def _resolve_input_value(value: Any, *, storage_root: str) -> Any:
+def _resolve_input_value(value: Any) -> Any:
     if isinstance(value, list):
-        return [_resolve_input_value(item, storage_root=storage_root) for item in value]
+        return [_resolve_input_value(item) for item in value]
     if isinstance(value, dict):
         path = value.get("path")
         if path is not None:
-            return _normalize_path(path, storage_root=storage_root)
-        return {
-            str(key): _resolve_input_value(item, storage_root=storage_root)
-            for key, item in value.items()
-        }
-    if isinstance(value, str):
-        return _normalize_path(value, storage_root=storage_root)
+            return path
+        return {str(key): _resolve_input_value(item) for key, item in value.items()}
     return str(value)
 
 
-def _resolve_outputs(value: Any, *, storage_root: str) -> str | dict[str, str] | None:
-    if value is None:
-        return None
+def _resolve_outputs(value: Any) -> str | dict[str, str] | None:
     if isinstance(value, str):
-        return _normalize_path(value, storage_root=storage_root)
+        return value
     if isinstance(value, dict):
-        resolved: dict[str, str] = {}
-        for name, output in value.items():
-            if isinstance(output, dict):
-                resolved[name] = _resolve_input_path(output, storage_root=storage_root)
-            elif isinstance(output, str):
-                resolved[name] = _normalize_path(output, storage_root=storage_root)
-            else:
-                resolved[name] = str(output)
-        return resolved
+        return {name: _resolve_input_path(output) for name, output in value.items()}
     return None
 
 
-def _normalize_path(path: str, *, storage_root: str) -> str:
-    if not path:
-        return path
-    if path.startswith("/") or "://" in path:
-        return path
-    return os.path.join(storage_root, path)
+def _expand_paths(arguments: AdagioArguments) -> None:
+    """Expand ``~`` in every input, output and publish path.
+
+    ``~`` is the home folder of whoever runs the job: the user on Adagio
+    Desktop, the server account on a Runtime Server. The editor's output paths
+    arrive as publish destinations; an empty one means none was given, and the
+    output stays in the job's output folder.
+    """
+    arguments.inputs = {
+        name: _map_paths(value, os.path.expanduser)
+        for name, value in arguments.inputs.items()
+    }
+    if isinstance(arguments.outputs, str):
+        arguments.outputs = os.path.expanduser(arguments.outputs)
+    else:
+        arguments.outputs = {
+            name: os.path.expanduser(path) for name, path in arguments.outputs.items()
+        }
+    arguments.publish = {
+        name: os.path.expanduser(path)
+        for name, path in arguments.publish.items()
+        if path not in _PLACEHOLDERS
+    }
+
+
+def _refuse_unusable_paths(
+    pipeline: AdagioPipeline,
+    arguments: AdagioArguments,
+    target_ids: set[str] | None = None,
+) -> None:
+    """Refuse relative paths and outputs that cannot be saved, before any step.
+
+    The runtime runs each job in a folder of its own (under Adagio Desktop's or
+    a Runtime Server's home), which is not a folder whoever typed the path had
+    in mind, so a relative path has nothing sensible to be relative to. Saving
+    happens once every step has run, so an output that cannot be written would
+    otherwise lose all of that work.
+
+    Only the paths this run uses are checked: for a partial run, the inputs its
+    steps read and the outputs they produce, so a path on an unrelated branch
+    never blocks it.
+    """
+    sig = pipeline.signature
+    input_ids, _, output_ids = _closure_argument_ids(pipeline, target_ids)
+    unused = {
+        f"input:{item.name}"
+        for item in sig.inputs
+        if input_ids is not None and item.id not in input_ids
+    } | {
+        f"output:{item.name}"
+        for item in sig.outputs
+        if output_ids is not None and item.id not in output_ids
+    }
+
+    def checked(entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        # A URL is read or written by whatever serves it, not by this machine.
+        return [
+            (label, path)
+            for label, path in entries
+            if label not in unused and "://" not in path
+        ]
+
+    sources = checked(
+        [
+            (f"input:{name}", path)
+            for name, value in arguments.inputs.items()
+            for path in _paths_in(value)
+            if path not in _PLACEHOLDERS
+        ]
+    )
+    if isinstance(arguments.outputs, str):
+        destinations = [("outputs", os.path.join(arguments.outputs, ""))]
+    else:
+        destinations = [
+            (f"output:{name}", path) for name, path in arguments.outputs.items()
+        ]
+    destinations = checked(
+        destinations
+        + [(f"output:{name}", path) for name, path in arguments.publish.items()]
+    )
+
+    relative = [
+        f"{label} ({path!r})"
+        for label, path in sources + destinations
+        if not os.path.isabs(path)
+    ]
+    if relative:
+        raise SystemExit(
+            "Relative paths cannot be resolved: "
+            + ", ".join(dict.fromkeys(relative))
+            + ". Start each path with / or ~/; a run works in a folder of its "
+            "own, so a relative path has nothing to be relative to."
+        )
+
+    blocked = []
+    output_names = [output.name for output in sig.outputs]
+    for output in sig.outputs:
+        label = f"output:{output.name}"
+        if label in unused:
+            continue
+        # QIIME saves visualizations as .qzv and artifacts as .qza. Resolve
+        # the same filename the save will use before checking permissions.
+        suffix = ".qzv" if output.type == "Visualization" else ".qza"
+        for paths in (arguments.outputs, arguments.publish):
+            if isinstance(paths, dict) and output.name not in paths:
+                continue
+            path = resolve_output_destination(
+                output_name=output.name,
+                output_names=output_names,
+                outputs=paths,
+                suffix=suffix,
+            )
+            if "://" in path:
+                continue
+            blocker = _save_blocker(path)
+            if blocker is not None:
+                blocked.append(f"{label} ({path!r}: cannot write to {blocker})")
+    if blocked:
+        raise SystemExit(
+            "Outputs cannot be saved on this machine: "
+            + ", ".join(dict.fromkeys(blocked))
+            + ". Choose a folder this machine can write to."
+        )
+
+
+def _save_blocker(path: str) -> str | None:
+    """What would stop an output being saved at absolute ``path``, if anything.
+
+    Saving copies over an existing file in place, so that file must itself be
+    writable, whatever its folder allows. Anything new is made in the nearest
+    folder that already exists, which must be a writable folder (a file there,
+    ``/`` on a Mac, a Mac home folder on a Linux Runtime Server all fail).
+    Nothing is created here.
+    """
+    if not is_directory_path(path) and os.path.isfile(path):
+        return None if os.access(path, os.W_OK) else path
+    existing = path if is_directory_path(path) else os.path.dirname(path)
+    while not os.path.exists(existing):
+        existing = os.path.dirname(existing)
+    if os.path.isdir(existing) and os.access(existing, os.W_OK | os.X_OK):
+        return None
+    return existing
+
+
+def _map_paths(value: Any, place: Callable[[str], str]) -> Any:
+    """Apply ``place`` to each path in an input value (a path, list or map)."""
+    if isinstance(value, list):
+        return [_map_paths(item, place) for item in value]
+    if isinstance(value, dict):
+        return {key: _map_paths(item, place) for key, item in value.items()}
+    if isinstance(value, str):
+        return place(value)
+    return value
+
+
+def _paths_in(value: Any) -> Iterator[str]:
+    """Each path in an input value (a path, list or map)."""
+    if isinstance(value, list):
+        for item in value:
+            yield from _paths_in(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _paths_in(item)
+    elif isinstance(value, str):
+        yield value
+
+
+_PLACEHOLDERS = {"", "<fill me>"}
 
 
 def _outputs_need_default(outputs: str | dict[str, str]) -> bool:
     if isinstance(outputs, str):
-        return outputs == "" or outputs == "<fill me>"
+        return outputs in _PLACEHOLDERS
     # An empty map means no destinations were provided (the run UI sends
     # ``outputs: {}``) → fall back to --output-dir, which yields one file per
     # pipeline output. A non-empty map still defaults only if it has holes.
-    return not outputs or any(value in {"", "<fill me>"} for value in outputs.values())
+    return not outputs or any(value in _PLACEHOLDERS for value in outputs.values())
 
 
 def _is_missing(value: Any) -> bool:
@@ -462,7 +590,7 @@ def _validate_required_arguments(
     # actually consumes — a downstream target must not demand root inputs that
     # feed unrelated branches (that SystemExit'd valid partial runs before any
     # node reported, leaving the editor stuck on yellow). None => require all.
-    needed_input_ids, needed_param_ids = _closure_argument_ids(pipeline, target_ids)
+    needed_input_ids, needed_param_ids, _ = _closure_argument_ids(pipeline, target_ids)
 
     missing_inputs = [
         input_def.name
@@ -489,16 +617,17 @@ def _validate_required_arguments(
 
 def _closure_argument_ids(
     pipeline: AdagioPipeline, target_ids: set[str] | None
-) -> tuple[set[str] | None, set[str] | None]:
-    """Pipeline input ids + param ids the ``target_ids`` closure consumes.
+) -> tuple[set[str] | None, set[str] | None, set[str] | None]:
+    """Pipeline input, param and output ids the ``target_ids`` closure uses.
 
-    Returns ``(None, None)`` for a full run (require everything). For a partial
+    Returns ``(None, None, None)`` for a full run (everything). For a partial
     run, walks the same target closure the executor runs (``prune_to_targets``)
     and collects the signature input ids (a RootInputTask's input src.id equals
-    the pipeline input id) and promoted param ids those tasks reference.
+    the pipeline input id) and promoted param ids those tasks reference, and
+    the ids of the outputs they produce (the only ones the run can save).
     """
     if not target_ids:
-        return None, None
+        return None, None, None
 
     from ..executors.common import prune_to_targets
     from ..model.task import input_source_ids
@@ -508,7 +637,9 @@ def _closure_argument_ids(
     )
     input_ids: set[str] = set()
     param_ids: set[str] = set()
+    output_ids: set[str] = set()
     for task in closure:
+        output_ids.update(output.id for output in task.outputs.values())
         for src in task.inputs.values():
             for source_id in input_source_ids(src):
                 input_ids.add(source_id)
@@ -520,7 +651,7 @@ def _closure_argument_ids(
                 column = getattr(param, "column", None)
                 if getattr(column, "kind", None) == "promoted":
                     param_ids.add(column.id)
-    return input_ids, param_ids
+    return input_ids, param_ids, output_ids
 
 
 def _post_job_event(*, runtime_url: str, job_id: str, payload: dict[str, Any]) -> None:
