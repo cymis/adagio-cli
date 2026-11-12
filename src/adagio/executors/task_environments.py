@@ -738,7 +738,7 @@ def _save_outputs(
             output_name=output.name,
             output_names=[item.name for item in sig.outputs],
             outputs=arguments.outputs,
-            source_path=source_path,
+            suffix=source_path.suffix,
         )
 
         parent = os.path.dirname(destination)
@@ -757,7 +757,7 @@ def _save_outputs(
                     output_name=output.name,
                     output_names=[item.name for item in sig.outputs],
                     outputs=arguments.publish,
-                    source_path=Path(destination),
+                    suffix=Path(destination).suffix,
                 )
                 publish_parent = os.path.dirname(publish_destination)
                 if publish_parent:

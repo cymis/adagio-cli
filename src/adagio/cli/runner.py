@@ -11,7 +11,12 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
-from ..bundled_config import apply_bundled_config, bundled_config, saved_run_config
+from ..bundled_config import (
+    apply_bundled_config,
+    bundled_config,
+    saved_run_config,
+    unset_values,
+)
 from .config import (
     default_environment_override,
     environment_layer,
@@ -85,6 +90,14 @@ def run_pipeline_from_kwargs(
             _error_exit(console, str(error))
 
         data = json.loads(pipeline_resolution.path.read_text(encoding="utf-8"))
+
+    missing = unset_values(data)
+    if missing:
+        _error_exit(
+            console,
+            "This pipeline is incomplete. Set these values in Adagio, then download it again:\n"
+            + "\n".join(f"  - {escape(value)}" for value in missing),
+        )
 
     pipeline_data = data.get("spec", data) if isinstance(data, dict) else data
     parsed_pipeline = AdagioPipeline.model_validate(pipeline_data)
